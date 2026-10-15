@@ -1,0 +1,49 @@
+{
+    "profiles": [
+        {
+            "profileName": "default",
+            "user": {
+                "name": "user1",
+                "password": "password1"
+            },
+            "servers": [
+                {
+                    "domainName": "localhost",
+                    "portBindings": [
+                        {
+                            "portRange": "9999-9999",
+                            "protocol": "TCP"
+                        },
+                        {
+                            "port": 10001,
+                            "protocol": "TCP"
+                        },
+                        {
+                            "port": 10002,
+                            "protocol": "UDP"
+                        },
+                        {
+                            "port": 10003,
+                            "protocol": "UDP"
+                        }
+                    ]
+                }
+            ],
+            "mtu": 1400,
+            "multiplexing": {
+                "level": "MULTIPLEXING_HIGH"
+            },
+            "trafficPattern": {
+                "unlockAll": true,
+                "tcpFragment":  {
+                    "enable":  true,
+                    "maxSleepMs":  10
+                }
+            }
+        }
+    ],
+    "activeProfile": "default",
+    "socks5Port": 1080,
+    "loggingLevel": "DEBUG",
+    "socks5ListenLAN": false
+}

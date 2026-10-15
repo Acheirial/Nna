@@ -1,0 +1,24 @@
+# third party source code
+/vendor
+
+# binaries
+/bin
+/release
+*.exe
+*.dll
+*.so
+*.dylib
+__pycache__/
+
+# build tools
+/tools/build/**
+
+# code editors
+/.vscode/
+
+# AI assistant context files (keep local only)
+AGENTS.md
+
+# code coverage
+/coverage.out
+/coverage.html

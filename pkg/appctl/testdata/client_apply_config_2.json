@@ -1,0 +1,79 @@
+{
+    "profiles": [
+        {
+            "profileName": "default",
+            "user": {
+                "name": "user2",
+                "password": "21e2e8ef4f08"
+            },
+            "servers": [
+                {
+                    "ipAddress": "2001:db8::88",
+                    "portBindings": [
+                        {
+                            "port": 5000,
+                            "protocol": "UDP"
+                        },
+                        {
+                            "port": 5100,
+                            "protocol": "UDP"
+                        }
+                    ]
+                },
+                {
+                    "ipAddress": "2001:db8::99",
+                    "portBindings": [
+                        {
+                            "port": 5000,
+                            "protocol": "UDP"
+                        },
+                        {
+                            "port": 5100,
+                            "protocol": "UDP"
+                        }
+                    ]
+                }
+            ],
+            "mtu": 1350,
+            "multiplexing": {
+                "level": "MULTIPLEXING_HIGH"
+            },
+            "trafficPattern": {
+                "seed": 2
+            }
+        },
+        {
+            "profileName": "new",
+            "user": {
+                "name": "user3",
+                "password": "c30ce98ebe45"
+            },
+            "servers": [
+                {
+                    "domainName": "mieru.org",
+                    "portBindings": [
+                        {
+                            "port": 6000,
+                            "protocol": "UDP"
+                        }
+                    ]
+                }
+            ],
+            "mtu": 1400,
+            "multiplexing": {
+                "level": "MULTIPLEXING_OFF"
+            },
+            "handshakeMode": "HANDSHAKE_NO_WAIT"
+        }
+    ],
+    "activeProfile": "new",
+    "socks5Port": 1090,
+    "loggingLevel": "INFO",
+    "socks5ListenLAN": false,
+    "socks5Authentication": [
+        {
+            "user": "user3",
+            "password": "password3"
+        }
+    ]
+}
