@@ -32,8 +32,8 @@ type ReplayCache struct {
 	mu sync.Mutex
 
 	// capacity is the maximum number of entries in one replay cache.
-	// If the size of `current` map is bigger than capacity, `current` map
-	// will replace `previous` map.
+	// Once the size of the `current` map reaches capacity (i.e. len(current) >=
+	// capacity), the `current` map replaces the `previous` map.
 	capacity int
 
 	// expireTime is the time when `current` map should replace `previous` map,
@@ -101,6 +101,10 @@ func (c *ReplayCache) IsDuplicate(data []byte, tag string) bool {
 	} else {
 		c.current[signature] = tag
 	}
+	// The signature was missing from `current`, so it was stored into `current`
+	// above. If it is also found in `previous` and this call reports a duplicate,
+	// the signature is still promoted (re-inserted into `current` with the tag of
+	// this call) as a side effect of that store.
 	if existingTag, ok := c.previous[signature]; ok {
 		if existingTag == EmptyTag || tag == EmptyTag {
 			return true

@@ -18,13 +18,16 @@ package protocol
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/enfein/mieru/v3/pkg/stderror"
 )
 
 func TestDeliverSegmentUnblocksOnSessionClose(t *testing.T) {
@@ -691,4 +694,511 @@ func TestPacketOutputLoopEventDriven(t *testing.T) {
 		t.Fatalf("heartbeat protocol = %v, want %v", heartbeat.Protocol(), ackClientToServer)
 	}
 	expectNoPacketForTest(t, receiverConn)
+}
+
+// TestUnderlayCloseIsConcurrentAndIdempotent verifies that closing an underlay
+// from many goroutines is safe: every call returns, no shutdown step runs
+// twice, and a later call is a no-op.
+func TestUnderlayCloseIsConcurrentAndIdempotent(t *testing.T) {
+	local, remote := net.Pipe()
+	defer remote.Close()
+	underlay := &StreamUnderlay{
+		baseUnderlay:       *newBaseUnderlay(false, 1400, nil),
+		conn:               local,
+		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
+	}
+	underlay.baseUnderlay.rawConn = local
+	defer underlay.sessionCleanTicker.Stop()
+
+	for i := 1; i <= 4; i++ {
+		session := NewSession(uint32(i), false, 1400, nil, nil)
+		if err := underlay.AddSession(session, nil); err != nil {
+			t.Fatalf("AddSession(%d) failed: %v", i, err)
+		}
+	}
+
+	const goroutines = 8
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- underlay.Close()
+		}()
+	}
+	returned := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Close() didn't return")
+	}
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("Close() = %v, want nil", err)
+		}
+	}
+	if err := underlay.Close(); err != nil {
+		t.Errorf("Close() after close = %v, want nil", err)
+	}
+}
+
+// TestStreamUnderlayCloseReleasesEventLoopRead verifies that closing the
+// underlay releases the event loop from its pending read, and that the event
+// loop can release the underlying connection again after the underlay already
+// closed it.
+func TestStreamUnderlayCloseReleasesEventLoopRead(t *testing.T) {
+	local, remote := net.Pipe()
+	defer remote.Close()
+	underlay := &StreamUnderlay{
+		baseUnderlay:       *newBaseUnderlay(true, 1400, nil),
+		conn:               local,
+		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
+	}
+	underlay.baseUnderlay.rawConn = local
+	defer underlay.sessionCleanTicker.Stop()
+
+	loopDone := make(chan error, 1)
+	go func() {
+		loopDone <- underlay.RunEventLoop(context.Background())
+	}()
+	// Give the event loop a chance to block in the read of the connection.
+	time.Sleep(100 * time.Millisecond)
+	if err := underlay.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	select {
+	case err := <-loopDone:
+		if err != nil && !stderror.IsClosed(err) && !stderror.IsTimeout(err) {
+			t.Fatalf("RunEventLoop() = %v, want nil or a connection close error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunEventLoop() didn't stop after Close()")
+	}
+
+	// The connection of the underlay is already released. Running the event
+	// loop after that must not panic when it releases the connection again.
+	if err := underlay.RunEventLoop(context.Background()); err != nil {
+		t.Fatalf("RunEventLoop() after Close() = %v, want nil", err)
+	}
+	if err := underlay.Close(); err != nil {
+		t.Errorf("Close() after RunEventLoop() = %v, want nil", err)
+	}
+}
+
+// TestPacketUnderlayCloseReleasesEventLoopRead verifies the same for the packet
+// underlay, whose pending read is released by an expired read deadline.
+func TestPacketUnderlayCloseReleasesEventLoopRead(t *testing.T) {
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.ListenPacket() failed: %v", err)
+	}
+	underlay := &PacketUnderlay{
+		baseUnderlay:       *newBaseUnderlay(false, 1400, nil),
+		conn:               conn,
+		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
+	}
+	underlay.baseUnderlay.rawConn = conn
+	defer underlay.sessionCleanTicker.Stop()
+
+	loopDone := make(chan error, 1)
+	go func() {
+		loopDone <- underlay.RunEventLoop(context.Background())
+	}()
+	// Give the event loop a chance to block in the read of the connection.
+	time.Sleep(100 * time.Millisecond)
+	if err := underlay.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	select {
+	case err := <-loopDone:
+		if err != nil && !stderror.IsClosed(err) && !stderror.IsTimeout(err) {
+			t.Fatalf("RunEventLoop() = %v, want nil or a connection close error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunEventLoop() didn't stop after Close()")
+	}
+
+	if err := underlay.RunEventLoop(context.Background()); err != nil {
+		t.Fatalf("RunEventLoop() after Close() = %v, want nil", err)
+	}
+}
+
+// TestUnderlayCloseIsNotSlowedDownBySessionCount verifies that closing an
+// underlay doesn't wait for the sessions one after another.
+func TestUnderlayCloseIsNotSlowedDownBySessionCount(t *testing.T) {
+	// Each session of this underlay can't flush its close session request, so
+	// closing one session waits for the graceful close timeout before it gives
+	// up. That makes the cost of closing a single session observable.
+	single := newTestStalledSessions(t, 1)
+	start := time.Now()
+	if err := single.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	singleCost := time.Since(start)
+
+	const sessionCount = 64
+	underlay := newTestStalledSessions(t, sessionCount)
+	if got := underlay.SessionCount(); got != sessionCount {
+		t.Fatalf("SessionCount() = %d, want %d", got, sessionCount)
+	}
+	start = time.Now()
+	if err := underlay.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Closing the sessions one after another would cost about sessionCount
+	// times the cost of closing one session, which is far above this bound.
+	if limit := 6*singleCost + time.Second; elapsed > limit {
+		t.Fatalf("Close() with %d stalled sessions took %v, want less than %v (one session costs %v)", sessionCount, elapsed, limit, singleCost)
+	}
+	if limit := 3 * time.Second; elapsed > limit {
+		t.Fatalf("Close() with %d stalled sessions took %v, want less than %v", sessionCount, elapsed, limit)
+	}
+	underlay.sessionMap.Range(func(_, value any) bool {
+		session := value.(*Session)
+		if !session.isState(sessionClosed) {
+			t.Errorf("session %d is %v after the underlay Close(), want %v", session.id, sessionState(session.state.Load()), sessionClosed)
+		}
+		return true
+	})
+}
+
+// newTestStalledSessions returns a server stream underlay with n sessions whose
+// output can't flush the close session request, so that closing each session
+// waits for the graceful close timeout before it gives up.
+func newTestStalledSessions(t *testing.T, n int) *StreamUnderlay {
+	t.Helper()
+	local, remote := net.Pipe()
+	underlay := &StreamUnderlay{
+		baseUnderlay:       *newBaseUnderlay(false, 1400, nil),
+		conn:               local,
+		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
+	}
+	underlay.baseUnderlay.rawConn = local
+	t.Cleanup(func() {
+		underlay.Close()
+		remote.Close()
+		underlay.sessionCleanTicker.Stop()
+	})
+	for i := 0; i < n; i++ {
+		session := NewSession(uint32(i+1), false, 1400, nil, nil)
+		if err := underlay.AddSession(session, nil); err != nil {
+			t.Fatalf("AddSession(%d) failed: %v", i, err)
+		}
+		// The session sent a segment before, so the close session request has
+		// a sequence number the peer can't have received yet.
+		session.nextSend.Store(1)
+	}
+	return underlay
+}
+
+// TestStalledStreamSessionDoesNotBlockOtherSessions verifies that a session
+// whose application stopped reading only blocks its own delivery. The other
+// sessions of the same underlay keep receiving and sending.
+func TestStalledStreamSessionDoesNotBlockOtherSessions(t *testing.T) {
+	// The underlay writes to a pipe that is drained in the background, like a
+	// peer that keeps reading.
+	local, remote := net.Pipe()
+	block, err := cipher.BlockCipherFromPassword([]byte(t.Name()), false)
+	if err != nil {
+		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
+	}
+	underlay := &StreamUnderlay{
+		baseUnderlay:       *newBaseUnderlay(true, 1400, nil),
+		conn:               local,
+		block:              block,
+		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
+	}
+	underlay.baseUnderlay.rawConn = local
+	t.Cleanup(func() {
+		underlay.Close()
+		remote.Close()
+		underlay.sessionCleanTicker.Stop()
+	})
+	go func() {
+		_, _ = io.Copy(io.Discard, remote)
+	}()
+
+	stalled := NewSession(1, true, 1400, nil, nil)
+	healthy := NewSession(2, true, 1400, nil, nil)
+	for _, session := range []*Session{stalled, healthy} {
+		if err := underlay.AddSession(session, nil); err != nil {
+			t.Fatalf("AddSession(%d) failed: %v", session.id, err)
+		}
+	}
+
+	// The application of the stalled session never reads, so its receive queue
+	// stays full.
+	for i := 0; i < segmentTreeCapacity; i++ {
+		if !stalled.recvQueue.Insert(testServerToClientDataSegment(stalled.id, uint32(i), nil, common.StreamTransport)) {
+			t.Fatalf("failed to fill the receive queue of the stalled session at %d", i)
+		}
+	}
+
+	// Fill the receive buffer of the stalled session. Its input loop consumes
+	// one segment before it blocks, so the rest fills both receive channels.
+	seg := testServerToClientDataSegment(stalled.id, segmentTreeCapacity, []byte("stalled"), common.StreamTransport)
+	for i := 0; i < 1+2*segmentChanCapacity; i++ {
+		if !deliverSegmentWithin(t, &underlay.baseUnderlay, stalled, seg, 5*time.Second) {
+			t.Fatalf("segment %d of the stalled session was dropped, want it to be queued", i)
+		}
+	}
+
+	// The next segment waits for room instead of being dropped, because the
+	// stream transport is reliable.
+	blocked := make(chan bool, 1)
+	go func() {
+		blocked <- underlay.deliverSegmentToSession(stalled, seg)
+	}()
+	select {
+	case delivered := <-blocked:
+		t.Fatalf("deliverSegmentToSession() = %v for the stalled session, want it to wait for room", delivered)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Another session of the same underlay still receives data.
+	if !deliverSegmentWithin(t, &underlay.baseUnderlay, healthy, testServerToClientDataSegment(healthy.id, 0, []byte("healthy"), common.StreamTransport), 5*time.Second) {
+		t.Fatal("the segment of the healthy session was dropped")
+	}
+	type readResult struct {
+		payload string
+		err     error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		buf := make([]byte, 16)
+		n, err := healthy.Read(buf)
+		readDone <- readResult{payload: string(buf[:n]), err: err}
+	}()
+	select {
+	case res := <-readDone:
+		if res.err != nil || res.payload != "healthy" {
+			t.Fatalf("Read() on the healthy session = (%q, %v), want (%q, nil)", res.payload, res.err, "healthy")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read() on the healthy session didn't return")
+	}
+
+	// ... and it can still send.
+	payload := make([]byte, 2*MaxSessionOpenPayload)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	type writeResult struct {
+		n   int
+		err error
+	}
+	writeDone := make(chan writeResult, 1)
+	go func() {
+		n, err := healthy.Write(payload)
+		writeDone <- writeResult{n: n, err: err}
+	}()
+	select {
+	case res := <-writeDone:
+		if res.err != nil || res.n != len(payload) {
+			t.Fatalf("Write() on the healthy session = (%d, %v), want (%d, nil)", res.n, res.err, len(payload))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Write() on the healthy session didn't return")
+	}
+	if healthy.closeRequested.Load() {
+		t.Fatal("the healthy session was closed while another session was stalled")
+	}
+	if got := len(stalled.recvChan); got != segmentChanCapacity {
+		t.Fatalf("the receive buffer of the stalled session holds %d segments, want %d", got, segmentChanCapacity)
+	}
+
+	// Closing the stalled session releases the blocked delivery. The segment is
+	// either queued before the delivery loop stops or dropped, so only the
+	// prompt return is checked here.
+	if err := stalled.Close(); err != nil {
+		t.Fatalf("stalled.Close() failed: %v", err)
+	}
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliverSegmentToSession() didn't return after the stalled session was closed")
+	}
+}
+
+// TestDeliverSegmentToSessionQueueFullSemantics verifies what happens when the
+// receive buffer of a session is full. The packet transport is lossy and drops
+// the segment. The stream transport is reliable and waits for room.
+func TestDeliverSegmentToSessionQueueFullSemantics(t *testing.T) {
+	underlay := newBaseUnderlay(true, 1400, nil)
+	seg := testDataSegment(1, 1, []byte("a"), common.PacketTransport)
+
+	packetSession := NewSession(1, true, 1400, nil, nil)
+	packetSession.transportProtocol = common.PacketTransport
+	for i := 0; i < segmentChanCapacity; i++ {
+		packetSession.recvChan <- seg
+	}
+	start := time.Now()
+	if underlay.deliverSegmentToSession(packetSession, seg) {
+		t.Fatal("deliverSegmentToSession() = true when the receive buffer of a packet session is full, want false")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("deliverSegmentToSession() blocked %v for a full packet session, want an immediate drop", elapsed)
+	}
+	if got := packetSession.droppedSegments.Load(); got != 1 {
+		t.Fatalf("droppedSegments = %d, want 1", got)
+	}
+
+	streamSession := NewSession(2, true, 1400, nil, nil)
+	streamSession.transportProtocol = common.StreamTransport
+	for i := 0; i < segmentChanCapacity; i++ {
+		streamSession.recvChan <- seg
+	}
+	done := make(chan bool, 1)
+	go func() {
+		done <- underlay.deliverSegmentToSession(streamSession, seg)
+	}()
+	select {
+	case delivered := <-done:
+		t.Fatalf("deliverSegmentToSession() = %v when the receive buffer of a stream session is full, want it to wait for room", delivered)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Free one slot. The reliable transport delivers the segment instead of
+	// dropping it.
+	<-streamSession.recvChan
+	select {
+	case delivered := <-done:
+		if !delivered {
+			t.Fatal("deliverSegmentToSession() = false after the receive buffer of the stream session had room, want true")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliverSegmentToSession() didn't return after the receive buffer of the stream session had room")
+	}
+	if got := streamSession.droppedSegments.Load(); got != 0 {
+		t.Fatalf("droppedSegments = %d for a stream session, want 0", got)
+	}
+}
+
+// TestDeliverSegmentToSessionReturnsFalseAfterUnderlayClose verifies that a
+// segment is not queued when the underlay is closed, and that a delivery
+// waiting for room is released by the underlay close.
+func TestDeliverSegmentToSessionReturnsFalseAfterUnderlayClose(t *testing.T) {
+	underlay := newBaseUnderlay(false, 1400, nil)
+	packetSession := NewSession(1, false, 1400, nil, nil)
+	packetSession.transportProtocol = common.PacketTransport
+	if err := underlay.AddSession(packetSession, nil); err != nil {
+		t.Fatalf("AddSession() failed: %v", err)
+	}
+	seg := testDataSegment(1, 1, []byte("a"), common.PacketTransport)
+	if err := underlay.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	if underlay.deliverSegmentToSession(packetSession, seg) {
+		t.Fatal("deliverSegmentToSession() = true after the underlay was closed, want false")
+	}
+
+	blockedUnderlay := newBaseUnderlay(false, 1400, nil)
+	streamSession := NewSession(2, false, 1400, nil, nil)
+	streamSession.transportProtocol = common.StreamTransport
+	if err := blockedUnderlay.AddSession(streamSession, nil); err != nil {
+		t.Fatalf("AddSession() failed: %v", err)
+	}
+	for i := 0; i < segmentChanCapacity; i++ {
+		streamSession.recvChan <- seg
+	}
+	done := make(chan bool, 1)
+	go func() {
+		done <- blockedUnderlay.deliverSegmentToSession(streamSession, seg)
+	}()
+	select {
+	case delivered := <-done:
+		t.Fatalf("deliverSegmentToSession() returned %v before the underlay was closed, want it to wait for room", delivered)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := blockedUnderlay.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	select {
+	case delivered := <-done:
+		if delivered {
+			t.Fatal("deliverSegmentToSession() = true after the underlay was closed, want false")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("deliverSegmentToSession() didn't return after the underlay was closed")
+	}
+}
+
+// TestExpiredReadDeadlineDoesNotFailRead verifies that a read deadline which is
+// already in the past, as it is left by a previous write, is not turned into an
+// immediate timeout.
+func TestExpiredReadDeadlineDoesNotFailRead(t *testing.T) {
+	s := NewSession(1, true, 1400, nil, nil)
+	s.transportProtocol = common.StreamTransport
+	if err := s.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+
+	// Data that arrived before the deadline expired is still readable.
+	if !s.recvQueue.Insert(testServerToClientDataSegment(s.id, 0, []byte("payload"), common.StreamTransport)) {
+		t.Fatal("failed to queue a segment")
+	}
+	buf := make([]byte, 16)
+	n, err := s.Read(buf)
+	if err != nil || n != len("payload") || string(buf[:n]) != "payload" {
+		t.Fatalf("Read() = (%d, %v), want (%d, nil)", n, err, len("payload"))
+	}
+
+	// An expired deadline doesn't fail a read that has nothing to return yet.
+	if err := s.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := s.Read(buf)
+		readDone <- err
+	}()
+	select {
+	case err := <-readDone:
+		t.Fatalf("Read() = %v with an expired deadline and no data, want it to wait", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	select {
+	case err := <-readDone:
+		if err != io.EOF {
+			t.Fatalf("Read() after Close() = %v, want %v", err, io.EOF)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read() didn't return after the session was closed")
+	}
+}
+
+// deliverSegmentWithin delivers seg to the session in a separate goroutine and
+// reports whether it was queued. The test fails when the delivery doesn't
+// return in time, so a wrong expectation can't hang the test binary.
+func deliverSegmentWithin(t *testing.T, underlay *baseUnderlay, s *Session, seg *segment, timeout time.Duration) bool {
+	t.Helper()
+	done := make(chan bool, 1)
+	go func() {
+		done <- underlay.deliverSegmentToSession(s, seg)
+	}()
+	select {
+	case delivered := <-done:
+		return delivered
+	case <-time.After(timeout):
+		t.Fatalf("deliverSegmentToSession() to session %d didn't return in %v", s.id, timeout)
+		return false
+	}
+}
+
+// testServerToClientDataSegment returns a data segment in the server to client
+// direction, which a client session accepts.
+func testServerToClientDataSegment(sessionID, seq uint32, payload []byte, transport common.TransportProtocol) *segment {
+	seg := testDataSegment(sessionID, seq, payload, transport)
+	seg.metadata.(*dataAckStruct).baseStruct.protocol = uint8(dataServerToClient)
+	return seg
 }

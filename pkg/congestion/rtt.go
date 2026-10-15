@@ -41,6 +41,9 @@ const (
 
 // RTTStats provides round-trip statistics
 type RTTStats struct {
+	// hasMeasurement is true once the first valid RTT sample is recorded.
+	// While it is false the estimators hold no measurement: UpdateRTT seeds
+	// them with the first sample, and SetInitialRTT is allowed.
 	hasMeasurement bool
 
 	minRTT        time.Duration
@@ -51,7 +54,8 @@ type RTTStats struct {
 	maxAckDelay   time.Duration
 	rtoMultiplier float64
 
-	mu sync.Mutex
+	// mu is required to access the RTT stats.
+	mu sync.RWMutex
 }
 
 // NewRTTStats makes a properly initialized RTTStats object
@@ -63,32 +67,54 @@ func NewRTTStats() *RTTStats {
 
 // MinRTT Returns the minRTT for the entire connection.
 // May return Zero if no valid updates have occurred.
-func (r *RTTStats) MinRTT() time.Duration { return r.minRTT }
+func (r *RTTStats) MinRTT() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.minRTT
+}
 
 // LatestRTT returns the most recent rtt measurement.
 // May return Zero if no valid updates have occurred.
-func (r *RTTStats) LatestRTT() time.Duration { return r.latestRTT }
+func (r *RTTStats) LatestRTT() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.latestRTT
+}
 
 // SmoothedRTT returns the smoothed RTT for the connection.
 // May return Zero if no valid updates have occurred.
-func (r *RTTStats) SmoothedRTT() time.Duration { return r.smoothedRTT }
+func (r *RTTStats) SmoothedRTT() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.smoothedRTT
+}
 
 // MeanDeviation gets the mean deviation
-func (r *RTTStats) MeanDeviation() time.Duration { return r.meanDeviation }
+func (r *RTTStats) MeanDeviation() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.meanDeviation
+}
 
 // MaxAckDelay gets the max_ack_delay advertised by the peer
-func (r *RTTStats) MaxAckDelay() time.Duration { return r.maxAckDelay }
+func (r *RTTStats) MaxAckDelay() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.maxAckDelay
+}
 
 // RTO gets the retransmission timeout.
 func (r *RTTStats) RTO() time.Duration {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	if r.SmoothedRTT() == 0 {
+	// mu is already held for reading, so the fields are read directly instead
+	// of calling the getters, which would acquire the lock again.
+	if r.smoothedRTT == 0 {
 		return 2 * defaultInitialRTT
 	}
-	rto := r.SmoothedRTT() + mathext.Max(4*r.MeanDeviation(), 10*time.Millisecond)
-	rto += r.MaxAckDelay()
+	rto := r.smoothedRTT + mathext.Max(4*r.meanDeviation, 10*time.Millisecond)
+	rto += r.maxAckDelay
 	return time.Duration(float64(rto) * r.rtoMultiplier)
 }
 
@@ -135,6 +161,9 @@ func (r *RTTStats) SetRTOMultiplier(n float64) {
 
 // SetInitialRTT sets the initial RTT.
 // It is used during the 0-RTT handshake when restoring the RTT stats from the session state.
+// It may be called as long as no measurement is recorded, which includes the state
+// right after Reset. The value is a guess only: the first sample passed to UpdateRTT
+// seeds the estimators and replaces it.
 func (r *RTTStats) SetInitialRTT(t time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -147,10 +176,17 @@ func (r *RTTStats) SetInitialRTT(t time.Duration) {
 }
 
 // Reset is called when connection migrates and rtt measurement needs to be reset.
+// It restores the state of a newly created RTTStats: every RTT estimate is cleared
+// and the stats are marked as having no measurement, so that the next valid sample
+// seeds the estimators again (smoothed RTT = the sample, mean deviation = the
+// sample / 2) instead of being blended with the cleared values.
+// The connection level max_ack_delay and the RTO multiplier are preserved, and
+// SetInitialRTT may be called again on the reset stats.
 func (r *RTTStats) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.hasMeasurement = false
 	r.latestRTT = 0
 	r.minRTT = 0
 	r.smoothedRTT = 0

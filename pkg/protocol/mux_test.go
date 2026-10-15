@@ -356,3 +356,95 @@ func TestNewEndpointsReturnsOnlyAdditions(t *testing.T) {
 		}
 	}
 }
+
+// TestMuxCloseIsIdempotentUnderConcurrency verifies that the mux can be closed
+// from many goroutines: every call returns, no shutdown step runs twice, all
+// underlays stop, and a later call is a no-op.
+func TestMuxCloseIsIdempotentUnderConcurrency(t *testing.T) {
+	tcpPort, err := common.UnusedTCPPort()
+	if err != nil {
+		t.Fatalf("common.UnusedTCPPort() failed: %v", err)
+	}
+	udpPort, err := common.UnusedUDPPort()
+	if err != nil {
+		t.Fatalf("common.UnusedUDPPort() failed: %v", err)
+	}
+	tcpAddr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: tcpPort}
+	udpAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: udpPort}
+	mux := NewMux(false).
+		SetServerUsers(users).
+		SetEndpoints([]UnderlayProperties{
+			NewUnderlayProperties(1400, common.StreamTransport, tcpAddr, nil),
+			NewUnderlayProperties(1400, common.PacketTransport, udpAddr, nil),
+		})
+	t.Cleanup(func() { mux.Close() })
+	if err := mux.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// The mux creates a stream underlay for a new connection. Keep the
+	// connection open so the underlay is still alive when the mux is closed.
+	rawConn, err := net.Dial("tcp", tcpAddr.String())
+	if err != nil {
+		t.Fatalf("net.Dial() failed: %v", err)
+	}
+	t.Cleanup(func() { rawConn.Close() })
+
+	// Wait until both endpoints have a running underlay.
+	var underlays []Underlay
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mux.mu.Lock()
+		if len(mux.underlays) >= 2 {
+			underlays = append([]Underlay(nil), mux.underlays...)
+		}
+		mux.mu.Unlock()
+		if len(underlays) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the mux didn't start an underlay for both endpoints")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	const goroutines = 8
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- mux.Close()
+		}()
+	}
+	returned := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Mux.Close() didn't return")
+	}
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("Mux.Close() = %v, want nil", err)
+		}
+	}
+	if err := mux.Close(); err != nil {
+		t.Errorf("Mux.Close() after close = %v, want nil", err)
+	}
+	for _, underlay := range underlays {
+		select {
+		case <-underlay.Done():
+		default:
+			t.Errorf("%v is not closed after Mux.Close()", underlay)
+		}
+	}
+	if _, err := mux.Accept(); err == nil {
+		t.Error("Accept() succeeded after the mux was closed")
+	}
+}

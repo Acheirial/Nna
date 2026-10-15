@@ -259,3 +259,25 @@ func TestResponseReadWrite(t *testing.T) {
 		}
 	}
 }
+
+func TestReadSocks5InvalidVersion(t *testing.T) {
+	const badVersion = 0x04
+	requestInput := []byte{badVersion, constant.Socks5ConnectCmd, 0, constant.Socks5IPv4Address, 127, 0, 0, 1, 0, 80}
+	responseInput := []byte{badVersion, constant.Socks5ReplySuccess, 0, constant.Socks5IPv4Address, 127, 0, 0, 1, 0, 80}
+
+	if _, err := ReadSocks5Request(bytes.NewBuffer(requestInput)); err == nil {
+		t.Error("ReadSocks5Request() accepted a non-SOCKS5 version")
+	}
+	if _, err := ReadSocks5Response(bytes.NewBuffer(responseInput)); err == nil {
+		t.Error("ReadSocks5Response() accepted a non-SOCKS5 version")
+	}
+
+	var req Request
+	if err := req.ReadFromSocks5(bytes.NewBuffer(requestInput)); err == nil {
+		t.Error("Request.ReadFromSocks5() accepted a non-SOCKS5 version")
+	}
+	var resp Response
+	if err := resp.ReadFromSocks5(bytes.NewBuffer(responseInput)); err == nil {
+		t.Error("Response.ReadFromSocks5() accepted a non-SOCKS5 version")
+	}
+}

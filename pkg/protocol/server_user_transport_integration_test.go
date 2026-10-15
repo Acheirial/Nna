@@ -16,6 +16,8 @@
 package protocol
 
 import (
+	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -121,21 +123,35 @@ func TestStreamServerInvalidInitialSegmentsDoNotRefreshCache(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, seg, err := readServerUserStreamWire(t, mux, remoteAddr, test.wire)
-			if err == nil && seg.serverUserAuthentication.Valid() {
-				err = validateNewServerSessionSegment(seg)
-				if err != nil {
-					err = stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
-				}
-			}
+			underlay, err := runServerUserStreamEventLoop(t, mux, remoteAddr, test.wire)
 			if err == nil {
-				t.Fatal("readOneSegment() succeeded, want rejection")
+				t.Fatal("RunEventLoop() accepted an invalid initial segment, want rejection")
 			}
-			if got := stderror.GetErrorType(err); got != test.errorType {
+			if got := serverUserStreamErrorType(err); got != test.errorType {
 				t.Fatalf("error type = %v, want %v: %v", got, test.errorType, err)
 			}
+			assertNoServerUserSession(t, underlay)
 		})
 	}
+
+	// A client that closes before its first write sends closeSessionRequest as
+	// the initial segment. The new-session gate applies only to
+	// openSessionRequest, so this segment must reach close-session dispatch
+	// instead of being rejected as a new session.
+	t.Run("close_before_first_write", func(t *testing.T) {
+		wire := buildServerUserStreamWire(t, credential, userName, testSessionSegment(closeSessionRequest, 13, common.StreamTransport), nil, nil)
+		underlay, err := runServerUserStreamEventLoop(t, mux, remoteAddr, wire)
+		if err == nil {
+			t.Fatal("RunEventLoop() returned without a terminal read error")
+		}
+		// The loop ends only when the closed connection makes the next read
+		// fail; a PROTOCOL_ERROR here would mean the close was rejected by the
+		// new-session gate.
+		if got := serverUserStreamErrorType(err); got != stderror.NETWORK_ERROR {
+			t.Fatalf("close-first segment error type = %v, want %v: %v", got, stderror.NETWORK_ERROR, err)
+		}
+		assertNoServerUserSession(t, underlay)
+	})
 }
 
 func TestStreamServerReplayDoesNotRefreshCache(t *testing.T) {
@@ -419,6 +435,58 @@ func TestRetiredGenerationAuthenticationRecordIsNoOp(t *testing.T) {
 	authentication.Record()
 	if authentication.Valid() {
 		t.Fatal("retired cache record retained its generation")
+	}
+}
+
+// runServerUserStreamEventLoop drives a server StreamUnderlay through its real
+// read loop so the production validation and dispatch path handles the wire.
+func runServerUserStreamEventLoop(t *testing.T, mux *Mux, remoteAddr net.Addr, wire []byte) (*StreamUnderlay, error) {
+	t.Helper()
+	reader, writer := net.Pipe()
+	conn := &serverUserTestRemoteConn{Conn: reader, remoteAddr: remoteAddr}
+	underlay := mux.serverWrapTCPConn(conn, 1400, nil).(*StreamUnderlay)
+	writeDone := make(chan struct{})
+	go func() {
+		_, _ = writer.Write(wire)
+		_ = writer.Close()
+		close(writeDone)
+	}()
+	err := underlay.RunEventLoop(context.Background())
+	underlay.sessionCleanTicker.Stop()
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("stream test writer didn't stop")
+	}
+	return underlay, err
+}
+
+// serverUserStreamErrorType extracts the typed error from the errors returned
+// by StreamUnderlay.RunEventLoop, which wraps read errors with fmt.Errorf.
+func serverUserStreamErrorType(err error) stderror.ErrorType {
+	for err != nil {
+		if t := stderror.GetErrorType(err); t != stderror.UNKNOWN_ERROR {
+			return t
+		}
+		err = errors.Unwrap(err)
+	}
+	return stderror.UNKNOWN_ERROR
+}
+
+// assertNoServerUserSession verifies that a rejected initial segment neither
+// registered a session nor enqueued one as ready.
+func assertNoServerUserSession(t *testing.T, underlay *StreamUnderlay) {
+	t.Helper()
+	count := 0
+	underlay.sessionMap.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	if count != 0 {
+		t.Fatalf("underlay registered %d sessions for a rejected initial segment", count)
+	}
+	if got := len(underlay.readySessions); got != 0 {
+		t.Fatalf("underlay enqueued %d ready sessions for a rejected initial segment", got)
 	}
 }
 
