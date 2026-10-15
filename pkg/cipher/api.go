@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -182,6 +183,10 @@ func TryDecrypt(data, password []byte, stateless bool) (BlockCipher, []byte, err
 }
 
 // CheckUserFromHint checks if the user is the one associated with the nonce.
+// The user hint embedded in the nonce is only used to quickly filter candidate
+// users before real authentication. It can be computed by anyone who knows the
+// user name, so a matching hint provides no authentication by itself and must
+// never be used as an access control check.
 // It panics if the user is empty or too long, or the nonce is too short.
 func CheckUserFromHint(user, nonce []byte) bool {
 	if len(user) == 0 {
@@ -201,17 +206,37 @@ func CheckUserFromHint(user, nonce []byte) bool {
 }
 
 // NewStatelessDecryptor builds a StatelessDecryptor for the given password.
+// The password bytes are copied, so the caller can erase the input afterwards.
 func NewStatelessDecryptor(password []byte) (*StatelessDecryptor, error) {
 	if len(password) == 0 {
 		return nil, fmt.Errorf("password is empty")
 	}
-	return &StatelessDecryptor{password: string(password)}, nil
+	p := make([]byte, len(password))
+	copy(p, password)
+	return &StatelessDecryptor{password: p}, nil
 }
 
 // StatelessDecryptor is optimized and safe for concurrent decryption.
 type StatelessDecryptor struct {
-	password string
+	// mu guards password. Caller must hold mu to access password.
+	mu       sync.RWMutex
+	password []byte
 	ciphers  atomic.Pointer[cachedCiphers]
+}
+
+// Clear erases the password stored in the decryptor. The decryptor must not be
+// used to decrypt data after Clear returns.
+func (d *StatelessDecryptor) Clear() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := range d.password {
+		d.password[i] = 0
+	}
+	d.password = nil
+	d.ciphers.Store(nil)
 }
 
 func (d *StatelessDecryptor) TryDecrypt(ciphertext, dst []byte) (BlockCipher, []byte, error) {
@@ -222,11 +247,18 @@ func (d *StatelessDecryptor) tryDecryptAt(ciphertext, dst []byte, now time.Time)
 	if d == nil {
 		return nil, nil, fmt.Errorf("stateless decryptor is nil")
 	}
+	// Hold the read lock so that Clear() can't erase the password while it is
+	// in use.
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if len(d.password) == 0 {
+		return nil, nil, fmt.Errorf("stateless decryptor is cleared")
+	}
 	epoch := cipherKeyEpoch(now)
 	entry := d.ciphers.Load()
 	if entry == nil || entry.epoch != epoch {
 		var err error
-		entry, err = getCachedCiphers(d.password, now)
+		entry, err = getCachedCiphers(string(d.password), now)
 		if err != nil {
 			return nil, nil, err
 		}

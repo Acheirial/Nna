@@ -26,6 +26,11 @@ import (
 const (
 	cacheValidInterval    = KeyRefreshInterval / 4
 	cacheValidMaxJitterMs = 5000
+
+	// maxCacheSize is the maximum number of password entries kept in
+	// blockCipherCache. Once the limit is reached, the oldest entries are
+	// evicted, preferring entries that don't belong to the current key epoch.
+	maxCacheSize = 256
 )
 
 type cachedCiphers struct {
@@ -34,7 +39,15 @@ type cachedCiphers struct {
 	epoch      int64
 }
 
-var blockCipherCache = sync.Map{}
+var (
+	// blockCipherCacheMu guards blockCipherCache and blockCipherCacheQueue.
+	blockCipherCacheMu sync.RWMutex
+	// blockCipherCache maps password to the cached stateless block ciphers.
+	blockCipherCache = make(map[string]*cachedCiphers)
+	// blockCipherCacheQueue records the insertion order of the passwords in
+	// blockCipherCache, oldest first.
+	blockCipherCacheQueue []string
+)
 
 var errUnableToDecrypt = errors.New("unable to decrypt from supplied cipher blocks")
 
@@ -60,17 +73,13 @@ func getBlockCipherList(password string, stateless bool) ([]*aeadBlockCipher, er
 
 func getCachedCiphers(password string, now time.Time) (*cachedCiphers, error) {
 	// Try to find []BlockCipher from cache.
-	c, ok := blockCipherCache.Load(password)
-	if ok {
-		entry := c.(*cachedCiphers)
+	epoch := cipherKeyEpoch(now)
+	if entry, ok := loadCachedCiphers(password); ok {
 		// Check if the cached entry is expired.
 		jitter := time.Duration(mrand.Intn(cacheValidMaxJitterMs)) * time.Millisecond
-		if entry.epoch != cipherKeyEpoch(now) || entry.createTime.Add(cacheValidInterval-jitter).Before(now) {
-			ok = false
+		if entry.epoch == epoch && !entry.createTime.Add(cacheValidInterval-jitter).Before(now) {
+			return entry, nil
 		}
-	}
-	if ok {
-		return c.(*cachedCiphers), nil
 	}
 
 	// If not found, generate the stateless []BlockCipher.
@@ -83,10 +92,63 @@ func getCachedCiphers(password string, now time.Time) (*cachedCiphers, error) {
 	entry := &cachedCiphers{
 		cipherList: blockCiphers,
 		createTime: now,
-		epoch:      cipherKeyEpoch(now),
+		epoch:      epoch,
 	}
-	blockCipherCache.Store(password, entry)
+	storeCachedCiphers(password, entry)
 	return entry, nil
+}
+
+// loadCachedCiphers returns the cached entry of password if it exists.
+func loadCachedCiphers(password string) (*cachedCiphers, bool) {
+	blockCipherCacheMu.RLock()
+	defer blockCipherCacheMu.RUnlock()
+	entry, ok := blockCipherCache[password]
+	return entry, ok
+}
+
+// storeCachedCiphers inserts entry into blockCipherCache, then evicts the
+// oldest entries until the cache size is within maxCacheSize.
+func storeCachedCiphers(password string, entry *cachedCiphers) {
+	blockCipherCacheMu.Lock()
+	defer blockCipherCacheMu.Unlock()
+	if _, ok := blockCipherCache[password]; !ok {
+		blockCipherCacheQueue = append(blockCipherCacheQueue, password)
+	}
+	blockCipherCache[password] = entry
+	for len(blockCipherCache) > maxCacheSize {
+		idx := oldestCachedIndexLocked(entry.epoch, true)
+		if idx < 0 {
+			// Every remaining entry belongs to the current key epoch. Evict
+			// the oldest one anyway to keep the cache bounded. This doesn't
+			// lose correctness: the salts only depend on the password and the
+			// key epoch, so the same (password, epoch) generates the same
+			// cipher blocks again when it is requested later.
+			idx = oldestCachedIndexLocked(entry.epoch, false)
+		}
+		if idx < 0 {
+			return
+		}
+		delete(blockCipherCache, blockCipherCacheQueue[idx])
+		blockCipherCacheQueue = append(blockCipherCacheQueue[:idx], blockCipherCacheQueue[idx+1:]...)
+	}
+}
+
+// oldestCachedIndexLocked returns the index in blockCipherCacheQueue of the
+// oldest cached entry. When otherEpochOnly is true, only entries whose key
+// epoch is different from the given epoch are considered. It returns -1 if no
+// entry satisfies the condition.
+// Caller must hold blockCipherCacheMu.
+func oldestCachedIndexLocked(epoch int64, otherEpochOnly bool) int {
+	for i, password := range blockCipherCacheQueue {
+		entry, ok := blockCipherCache[password]
+		if !ok {
+			continue
+		}
+		if !otherEpochOnly || entry.epoch != epoch {
+			return i
+		}
+	}
+	return -1
 }
 
 func newBlockCipherList(password []byte, now time.Time) ([]*aeadBlockCipher, error) {

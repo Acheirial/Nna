@@ -18,6 +18,7 @@ package common
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/enfein/mieru/v3/apis/model"
@@ -62,6 +63,11 @@ func (w *UDPAssociateWrapper) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 	}
 
 	n, err = r.Read(p)
+	if err == nil && r.Len() > 0 {
+		// The payload doesn't fit into p. Report it instead of silently
+		// returning a truncated packet.
+		return 0, nil, io.ErrShortBuffer
+	}
 	// Caller may expect the returned address to be *net.UDPAddr.
 	addr = &net.UDPAddr{
 		IP:   destination.IP,

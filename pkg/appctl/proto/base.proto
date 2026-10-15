@@ -75,6 +75,10 @@ message User {
     // Stored with hex encoding.
     optional string hashedPassword = 3;
 
+    // Field number 4 was used by the removed "quotas" field.
+    // It must not be reused by a new field.
+    reserved 4;
+
     // Allow user to use private IP as the destination.
     // This field has no effect at the client side.
     optional bool allowPrivateIP = 5;

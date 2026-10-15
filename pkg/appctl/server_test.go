@@ -114,7 +114,7 @@ func TestServerApplyReject(t *testing.T) {
 			Users: []*pb.User{
 				{
 					Name:     proto.String("hello"),
-					Password: proto.String("world"),
+					Password: proto.String("world1234"),
 				},
 			},
 		}
@@ -363,7 +363,7 @@ func TestServerProxyStartFailure(t *testing.T) {
 		Users: []*pb.User{
 			{
 				Name:     proto.String("hello"),
-				Password: proto.String("world"),
+				Password: proto.String("world1234"),
 			},
 		},
 	}

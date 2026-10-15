@@ -17,6 +17,7 @@ package protocol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -39,7 +40,7 @@ const (
 	idleSessionTimeout = time.Minute
 )
 
-var packetReplayCache = replay.NewCache(4*1024*1024, cipher.KeyRefreshInterval*3)
+var packetReplayCache = replay.NewCache(64*1024, cipher.KeyRefreshInterval*3)
 
 type PacketUnderlay struct {
 	// ---- common fields ----
@@ -81,14 +82,33 @@ func NewPacketUnderlay(
 	if !block.IsStateless() {
 		return nil, fmt.Errorf("packet underlay block cipher must be stateless")
 	}
-	remoteUDPAddr, err := apicommon.ResolveUDPAddr(ctx, resolver, network, addr)
+	udpAddrs, err := apicommon.ResolveUDPAddrs(ctx, resolver, network, addr)
 	if err != nil {
-		return nil, fmt.Errorf("ResolveUDPAddr() failed: %w", err)
+		return nil, fmt.Errorf("ResolveUDPAddrs() failed: %w", err)
 	}
 
-	conn, err := packetDialer.ListenPacket(ctx, network, "", remoteUDPAddr.String())
-	if err != nil {
-		return nil, fmt.Errorf("ListenPacket() failed: %w", err)
+	// Try each resolved address in order and use the first one that the packet
+	// dialer accepts, so that a client is able to fall back from an unreachable
+	// IP address family to the next candidate.
+	var conn net.PacketConn
+	var remoteUDPAddr *net.UDPAddr
+	var listenErrs []error
+	for _, candidate := range udpAddrs {
+		c, err := packetDialer.ListenPacket(ctx, network, "", candidate.String())
+		if err != nil {
+			log.Debugf("ListenPacket() to %v failed: %v", candidate, err)
+			listenErrs = append(listenErrs, fmt.Errorf("%v: %w", candidate, err))
+			continue
+		}
+		conn = c
+		remoteUDPAddr = candidate
+		break
+	}
+	if conn == nil {
+		if len(listenErrs) == 0 {
+			return nil, fmt.Errorf("no UDP address is resolved from %s", addr)
+		}
+		return nil, fmt.Errorf("ListenPacket() failed: %w", errors.Join(listenErrs...))
 	}
 	u := &PacketUnderlay{
 		baseUnderlay:       *newBaseUnderlay(true, mtu, trafficPattern),
@@ -170,6 +190,47 @@ func (u *PacketUnderlay) AddSession(s *Session, remoteAddr net.Addr) error {
 		s.wg.Done()
 	}()
 	return nil
+}
+
+// sessionUserName returns the user name that owns the session, or an empty
+// string if the owner is not known yet.
+func sessionUserName(s *Session) string {
+	if b := s.block.Load(); b != nil {
+		if userName := (*b).BlockContext().UserName; userName != "" {
+			return userName
+		}
+	}
+	if userName := s.UserName(); userName != "" {
+		return userName
+	}
+	if policy := s.userPolicy.Load(); policy != nil {
+		return policy.Name()
+	}
+	return ""
+}
+
+// segmentUserName returns the user name authenticated by the cipher that
+// decrypted the segment. It is empty if the cipher is not available, which is
+// the case for segments received by a client.
+func segmentUserName(seg *segment) string {
+	if seg.block == nil {
+		return ""
+	}
+	return seg.block.BlockContext().UserName
+}
+
+// mayDeliverToSession reports whether seg is allowed to be delivered to s.
+// A server underlay only accepts a segment when the user name authenticated by
+// the cipher that decrypted the segment matches the user that owns the session,
+// so a session ID used by one user can't be used to inject segments of another
+// user. A client underlay holds a single user and its sessions are created
+// locally, so the check is not applicable.
+func (u *PacketUnderlay) mayDeliverToSession(s *Session, seg *segment) bool {
+	if u.isClient {
+		return true
+	}
+	segUser := segmentUserName(seg)
+	return segUser != "" && segUser == sessionUserName(s)
 }
 
 func (u *PacketUnderlay) RunEventLoop(ctx context.Context) error {
@@ -255,7 +316,12 @@ func (u *PacketUnderlay) RunEventLoop(ctx context.Context) error {
 				}
 				continue
 			}
-			u.deliverSegmentToSession(session.(*Session), seg)
+			s := session.(*Session)
+			if !u.mayDeliverToSession(s, seg) {
+				log.Debugf("%v dropped segment of session ID %d from peer %v, the session is owned by user %q but the segment is from user %q", u, das.sessionID, addr, sessionUserName(s), segmentUserName(seg))
+				continue
+			}
+			u.deliverSegmentToSession(s, seg)
 		} else {
 			log.Debugf("Ignore unknown protocol %d", seg.metadata.Protocol())
 		}
@@ -273,10 +339,19 @@ func (u *PacketUnderlay) onOpenSessionRequest(seg *segment, remoteAddr net.Addr)
 		// 0 is reserved and can't be used.
 		return fmt.Errorf("reserved session ID %d is used", sessionID)
 	}
-	_, found := u.sessionMap.Load(sessionID)
-	if found {
+	if v, found := u.sessionMap.Load(sessionID); found {
+		owner := v.(*Session)
+		if !u.mayDeliverToSession(owner, seg) {
+			// Another user sends the session ID that is already in use. Reject
+			// it here, so it can't be routed to the existing session.
+			log.Debugf("%v dropped openSessionRequest for session ID %d from user %q, the session is owned by user %q", u, sessionID, segmentUserName(seg), sessionUserName(owner))
+			return nil
+		}
 		log.Debugf("%v received openSessionRequest, but session ID %d is already used", u, sessionID)
 		return nil
+	}
+	if segmentUserName(seg) == "" {
+		return fmt.Errorf("openSessionRequest for session ID %d doesn't carry an authenticated user name", sessionID)
 	}
 	session := newSessionWithServerUserPolicy(sessionID, false, u.MTU(), seg.serverUserPolicy, nil, u.trafficPattern)
 	if err := u.AddSession(session, remoteAddr); err != nil {
@@ -331,6 +406,10 @@ func (u *PacketUnderlay) onCloseSession(seg *segment) error {
 		return nil
 	}
 	s := session.(*Session)
+	if !u.mayDeliverToSession(s, seg) {
+		log.Debugf("%v dropped close session request or response of session ID %d from peer, the session is owned by user %q but the segment is from user %q", u, sessionID, sessionUserName(s), segmentUserName(seg))
+		return nil
+	}
 	if !u.deliverSegmentToSession(s, seg) && log.IsLevelEnabled(log.TraceLevel) {
 		log.Tracef("%v ignored closeSessionRequest or closeSessionResponse segment for closed session %d", u, sessionID)
 	}

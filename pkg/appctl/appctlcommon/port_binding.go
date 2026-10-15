@@ -45,6 +45,9 @@ func FlatPortBindings(bindings []*pb.PortBinding) ([]*pb.PortBinding, error) {
 		if binding.GetProtocol() == pb.TransportProtocol_UNKNOWN_TRANSPORT_PROTOCOL {
 			return res, fmt.Errorf("protocol is not set")
 		}
+		if binding.GetPort() != 0 && binding.GetPortRange() != "" {
+			return res, fmt.Errorf("port %d can't be set with port range %q at the same time", binding.GetPort(), binding.GetPortRange())
+		}
 		if binding.GetPort() != 0 {
 			if binding.GetPort() < 1 || binding.GetPort() > 65535 {
 				return res, fmt.Errorf("port number %d is invalid", binding.GetPort())

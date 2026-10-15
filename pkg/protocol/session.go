@@ -79,6 +79,14 @@ const (
 	txTimeoutBackOff = 1.5
 	// Maximum back off duration.
 	maxBackOffDuration = 10 * time.Second
+
+	// gracefulCloseWait is the maximum time a graceful close waits for the
+	// output loop to send out the close session request.
+	gracefulCloseWait = 100 * time.Millisecond
+
+	// gracefulClosePollInterval is the interval between two checks of the
+	// close session request transmission.
+	gracefulClosePollInterval = time.Millisecond
 )
 
 type sessionState int32
@@ -134,6 +142,11 @@ type Session struct {
 	recvBuf   *segmentTree  // segments received but acknowledge is not sent
 	recvQueue *segmentTree  // segments waiting to be read by application
 	recvChan  chan *segment // channel to receive segments from underlay
+
+	// inputChan holds the segments that the session delivery loop moved from
+	// recvChan, and that wait for the input loop to process them.
+	inputChan       chan *segment
+	droppedSegments atomic.Int64 // number of segments dropped by the underlay
 
 	packetOutputWakeup chan struct{} // channel to wake up the packet output loop
 
@@ -209,6 +222,7 @@ func newSessionWithServerUserPolicy(
 		recvBuf:                   newSegmentTree(segmentTreeCapacity),
 		recvQueue:                 newSegmentTree(segmentTreeCapacity),
 		recvChan:                  make(chan *segment, segmentChanCapacity),
+		inputChan:                 make(chan *segment, segmentChanCapacity),
 		packetOutputWakeup:        make(chan struct{}, 1),
 		rttStat:                   rttStat,
 		cubicSendAlgorithm:        congestion.NewCubicSendAlgorithm(minWindowSize, maxWindowSize),
@@ -247,10 +261,14 @@ func (s *Session) Read(b []byte) (n int, err error) {
 		log.Tracef("%v trying to read %d bytes", s, len(b))
 	}
 
-	// Stop reading when deadline is reached.
+	// Stop reading when deadline is reached. A deadline that is already in the
+	// past is ignored, because it can be left by a previous write and the
+	// session can still be healthy.
 	var timeC <-chan time.Time
 	if readDeadline := s.readDeadline.Load(); readDeadline != 0 {
-		timeC = time.After(time.Until(time.UnixMicro(readDeadline)))
+		if d := time.Until(time.UnixMicro(readDeadline)); d > 0 {
+			timeC = time.After(d)
+		}
 	}
 
 	for {
@@ -640,7 +658,7 @@ func (s *Session) writeChunk(b []byte) (n int, err error) {
 		}
 
 		seqAfterWrite, err := s.sendQueue.MinSeq()
-		if err != nil || seqAfterWrite > seqBeforeWrite {
+		if err != nil || int32(seqAfterWrite-seqBeforeWrite) > 0 {
 			break
 		} else {
 			time.Sleep(backPressureDelay) // add back pressure if send queue is not moving
@@ -653,14 +671,45 @@ func (s *Session) writeChunk(b []byte) (n int, err error) {
 	return len(b), nil
 }
 
+// runDeliveryLoop moves the segments received from the underlay to the input
+// queue of the session.
+//
+// Only this loop waits for the session to consume the receive buffer, so that
+// a session with a slow consumer doesn't block the underlay event loop.
+func (s *Session) runDeliveryLoop(ctx context.Context) {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.closedChan:
+			return
+		case seg := <-s.recvChan:
+			select {
+			case s.inputChan <- seg:
+			case <-ctx.Done():
+				return
+			case <-s.closedChan:
+				return
+			}
+		}
+	}
+}
+
 func (s *Session) runInputLoop(ctx context.Context) error {
+	// Move the segments received from the underlay to the input queue in a
+	// separate goroutine, so that a session with a slow consumer only blocks
+	// its own delivery loop instead of the underlay event loop.
+	s.wg.Add(1)
+	go s.runDeliveryLoop(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-s.closedChan:
 			return nil
-		case seg := <-s.recvChan:
+		case seg := <-s.inputChan:
 			if err := s.input(seg); err != nil {
 				err = fmt.Errorf("input() failed: %w", err)
 				log.Debugf("%v %v", s, err)
@@ -1080,7 +1129,7 @@ func (s *Session) inputData(seg *segment) error {
 			for {
 				seg2, deleted := s.sendBuf.DeleteMinIf(func(iter *segment) bool {
 					seq, _ := iter.Seq()
-					return seq < unAckSeq
+					return int32(seq-unAckSeq) < 0
 				})
 				if !deleted {
 					break
@@ -1164,7 +1213,7 @@ func (s *Session) inputAck(seg *segment) error {
 		for {
 			seg2, deleted := s.sendBuf.DeleteMinIf(func(iter *segment) bool {
 				seq, _ := iter.Seq()
-				return seq < unAckSeq
+				return int32(seq-unAckSeq) < 0
 			})
 			if !deleted {
 				break
@@ -1177,7 +1226,7 @@ func (s *Session) inputAck(seg *segment) error {
 		// Update acknowledge count.
 		s.sendBuf.Ascend(func(iter *segment) bool {
 			seq, _ := iter.Seq()
-			if seq > unAckSeq {
+			if int32(seq-unAckSeq) > 0 {
 				return false
 			}
 			if seq == unAckSeq {
@@ -1292,12 +1341,16 @@ func (s *Session) closeWithError(err error) error {
 				s.oLock.Unlock()
 			} else {
 				s.oLock.Unlock()
-				for i := 0; i < 1000; i++ {
-					time.Sleep(time.Millisecond)
-					if s.lastSend.Load() >= closeRequestSeq {
+				// Wait for the output loop to send out the close session
+				// request. The wait must be short, because the connection may
+				// be already broken.
+				deadline := time.Now().Add(gracefulCloseWait)
+				for time.Now().Before(deadline) {
+					if int32(s.lastSend.Load()-closeRequestSeq) >= 0 {
 						gracefulCloseSuccess = true
 						break
 					}
+					time.Sleep(gracefulClosePollInterval)
 				}
 			}
 		} else {
@@ -1361,13 +1414,13 @@ func (s *Session) moveRecvBufToRecvQueue() error {
 		nextRecv := s.nextRecv.Load()
 		seg, deleted := s.recvBuf.DeleteMinIf(func(iter *segment) bool {
 			seq, _ := iter.Seq()
-			return seq <= nextRecv
+			return int32(seq-nextRecv) <= 0
 		})
 		if seg == nil || !deleted {
 			return nil
 		}
 		seq, _ := seg.Seq()
-		if seq < nextRecv {
+		if int32(seq-nextRecv) < 0 {
 			continue // ignore this segment
 		}
 		if !s.recvQueue.Insert(seg) {

@@ -27,6 +27,7 @@ import (
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/enfein/mieru/v3/pkg/log"
 	"github.com/enfein/mieru/v3/pkg/rng"
 	"github.com/enfein/mieru/v3/pkg/stderror"
 )
@@ -36,6 +37,10 @@ const (
 	sessionChanCapacity = 64
 
 	sessionCleanInterval = 5 * time.Second
+
+	// droppedSegmentLogInterval is the number of dropped segments between two
+	// debug log messages.
+	droppedSegmentLogInterval = 100
 )
 
 var (
@@ -47,6 +52,12 @@ type baseUnderlay struct {
 	isClient bool
 	mtu      int
 	done     chan struct{} // if the underlay is closed
+
+	// rawConn is the network connection that this underlay reads from and
+	// writes to. The underlay releases it when it is closed, even if the event
+	// loop hasn't started yet. The concrete underlay types set this field when
+	// they are created.
+	rawConn io.Closer
 
 	sessionMap     sync.Map      // Map<sessionID, *Session>
 	readySessions  chan *Session // sessions that completed handshake and ready for consume
@@ -88,6 +99,7 @@ func (b *baseUnderlay) Accept() (net.Conn, error) {
 }
 
 // Close implements net.Listener interface. The caller must hold closeMutex lock.
+// Close is idempotent: the second and later calls return nil immediately.
 func (b *baseUnderlay) Close() error {
 	select {
 	case <-b.done:
@@ -95,12 +107,36 @@ func (b *baseUnderlay) Close() error {
 	default:
 	}
 
+	// Release the underlying network connection first. The event loop may not
+	// have started yet, so this is the only chance to release the socket file
+	// descriptor. Closing the connection also unblocks the pending I/O of the
+	// event loop and of the sessions. The event loop may close the connection
+	// again when it stops, which is safe.
+	if b.rawConn != nil {
+		if err := b.rawConn.Close(); err != nil && !stderror.IsClosed(err) {
+			log.Debugf("Failed to close the underlying connection: %v", err)
+		}
+	}
+
+	// Close the sessions concurrently. Closing one session waits for the
+	// session goroutines to stop, so closing the sessions one after another
+	// makes the cost of Close() grow linearly with the number of sessions.
+	sessions := make([]*Session, 0, b.SessionCount())
 	b.sessionMap.Range(func(k, v any) bool {
-		s := v.(*Session)
-		s.Close()
-		s.wg.Wait()
+		sessions = append(sessions, v.(*Session))
 		return true
 	})
+	var wg sync.WaitGroup
+	for _, s := range sessions {
+		wg.Add(1)
+		go func(s *Session) {
+			defer wg.Done()
+			s.Close()
+			s.wg.Wait()
+		}(s)
+	}
+	wg.Wait()
+
 	close(b.done)
 	return nil
 }
@@ -194,9 +230,52 @@ func (b *baseUnderlay) Done() chan struct{} {
 	return b.done
 }
 
-// deliverSegmentToSession blocks for live sessions to preserve back pressure,
-// but returns when the session or underlay has been closed.
+// deliverSegmentToSession hands one segment to the given session.
+//
+// The segment is put into the session receive buffer, and it is moved to the
+// input loop by the session delivery loop. The underlay event loop never runs
+// the session input loop itself, so that one session with a slow consumer
+// can't stop the underlay from serving the other sessions.
+//
+// The packet transport is lossy, so a segment is dropped when the session
+// receive buffer is full, which means that the input loop of the session is
+// too far behind. The peer retransmits the segment if it is not acknowledged.
+// The stream transport is reliable, so the caller waits for room in the
+// receive buffer instead.
+//
+// The return value is false when the segment is not queued, which happens when
+// the session or the underlay is closed, and when a packet transport segment
+// is dropped.
 func (b *baseUnderlay) deliverSegmentToSession(s *Session, seg *segment) bool {
+	if s == nil {
+		return false
+	}
+	// Don't queue segments for a closed session or a closed underlay. This
+	// check also makes the return value deterministic when the segment is
+	// still buffered.
+	select {
+	case <-s.closedChan:
+		return false
+	case <-b.done:
+		return false
+	default:
+	}
+	if s.transportProtocol == common.PacketTransport {
+		select {
+		case s.recvChan <- seg:
+			return true
+		case <-s.closedChan:
+			return false
+		case <-b.done:
+			return false
+		default:
+		}
+		n := s.droppedSegments.Add(1)
+		if n == 1 || n%droppedSegmentLogInterval == 0 {
+			log.Debugf("Session %d dropped %d segments because the receive buffer is full", s.id, n)
+		}
+		return false
+	}
 	select {
 	case s.recvChan <- seg:
 		return true

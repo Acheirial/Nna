@@ -17,6 +17,7 @@ package socks5
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net"
@@ -137,15 +138,20 @@ func (s *Server) handleAuthentication(conn net.Conn) error {
 		}
 
 		// Verify user and password.
-		userStr := string(user)
-		passwordStr := string(password)
+		// The credentials are compared in constant time, and the loop is not
+		// stopped at the first match, so that the response time doesn't leak
+		// which credential is registered.
+		authenticated := 0
 		for _, c := range s.config.AuthOpts.IngressCredentials {
-			if c.User == userStr && c.Password == passwordStr {
-				if _, err := conn.Write([]byte{constant.Socks5UserPassAuthVersion, constant.Socks5AuthSuccess}); err != nil {
-					return fmt.Errorf("write user password authentication success response failed: %w", err)
-				}
-				return nil
+			userMatch := subtle.ConstantTimeCompare([]byte(c.User), user)
+			passwordMatch := subtle.ConstantTimeCompare([]byte(c.Password), password)
+			authenticated |= userMatch & passwordMatch
+		}
+		if authenticated == 1 {
+			if _, err := conn.Write([]byte{constant.Socks5UserPassAuthVersion, constant.Socks5AuthSuccess}); err != nil {
+				return fmt.Errorf("write user password authentication success response failed: %w", err)
 			}
+			return nil
 		}
 		if _, err := conn.Write([]byte{constant.Socks5UserPassAuthVersion, constant.Socks5AuthFailure}); err != nil {
 			return fmt.Errorf("write user password authentication failure response failed: %w", err)

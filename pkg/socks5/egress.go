@@ -18,6 +18,7 @@ package socks5
 import (
 	"bytes"
 	"context"
+	"fmt"
 	mrand "math/rand"
 	"net"
 	"strings"
@@ -106,24 +107,10 @@ func (s *Server) rejectPrivateAndLoopbackIPAction(_ context.Context, in egress.I
 		// For user privacy, we only check some well-known local domain names.
 		// DNS names are case-insensitive and a trailing dot denotes the same
 		// absolute name, so normalize the name before matching.
-		domainName := strings.ToLower(strings.TrimSuffix(req.DstAddr.FQDN, "."))
-		isWellKnownIPv4LocalDomainName := false
-		isWellKnownIPv6LocalDomainName := false
-		for _, d := range wellKnownIPv4LocalDomainNames {
-			if domainName == d {
-				isWellKnownIPv4LocalDomainName = true
-				break
-			}
-		}
-		for _, d := range wellKnownIPv6LocalDomainNames {
-			if domainName == d {
-				isWellKnownIPv6LocalDomainName = true
-				break
-			}
-		}
-		if isWellKnownIPv4LocalDomainName {
+		domainName := normalizeDomainName(req.DstAddr.FQDN)
+		if matchLocalDomainName(domainName, wellKnownIPv4LocalDomainNames) {
 			ip = net.ParseIP("127.0.0.1")
-		} else if isWellKnownIPv6LocalDomainName {
+		} else if matchLocalDomainName(domainName, wellKnownIPv6LocalDomainNames) {
 			ip = net.ParseIP("::1")
 		} else {
 			return egress.Action{
@@ -136,47 +123,151 @@ func (s *Server) rejectPrivateAndLoopbackIPAction(_ context.Context, in egress.I
 		}
 	}
 
-	if !ip.IsPrivate() && !ip.IsLoopback() {
-		return egress.Action{
-			Action: appctlpb.EgressAction_DIRECT,
+	// Load user information. An unknown or unregistered user is not allowed to
+	// access a non-public address.
+	allowPrivateIP := false
+	allowLoopbackIP := false
+	if userName := in.Env["user"]; userName != "" {
+		if user, ok := s.config.Users[userName]; ok {
+			allowPrivateIP = user.GetAllowPrivateIP()
+			allowLoopbackIP = user.GetAllowLoopbackIP()
 		}
 	}
-
-	// For testing propose, allow bypassing the user check below.
-	if ip.IsLoopback() && s.config.AllowLoopbackDestination {
-		return egress.Action{
-			Action: appctlpb.EgressAction_DIRECT,
-		}
-	}
-
-	// Load user information.
-	userName, ok := in.Env["user"]
-	if !ok || userName == "" {
-		// User name is unknown.
-		// By default, we reject the request.
-		return egress.Action{
-			Action: appctlpb.EgressAction_REJECT,
-		}
-	}
-	user, ok := s.config.Users[userName]
-	if !ok {
-		// User is not registered.
-		// By default, we reject the request.
-		return egress.Action{
-			Action: appctlpb.EgressAction_REJECT,
-		}
-	}
-	if ip.IsPrivate() && user.GetAllowPrivateIP() {
-		return egress.Action{
-			Action: appctlpb.EgressAction_DIRECT,
-		}
-	} else if ip.IsLoopback() && user.GetAllowLoopbackIP() {
+	if allowIPAccess(classifyIP(ip), allowPrivateIP, allowLoopbackIP, s.config.AllowLoopbackDestination) {
 		return egress.Action{
 			Action: appctlpb.EgressAction_DIRECT,
 		}
 	}
 	return egress.Action{
 		Action: appctlpb.EgressAction_REJECT,
+	}
+}
+
+// ipScope classifies an IP address for the egress policy check.
+type ipScope int
+
+const (
+	// ipScopePublic means the address is neither private, loopback, nor unspecified.
+	ipScopePublic ipScope = iota
+	// ipScopePrivate means the address is a private, link local, or carrier
+	// grade NAT address.
+	ipScopePrivate
+	// ipScopeLoopback means the address is a loopback address.
+	ipScopeLoopback
+	// ipScopeUnspecified means the address is an unspecified address such as
+	// 0.0.0.0 or ::, which is equivalent to a local address on Linux.
+	ipScopeUnspecified
+)
+
+func (s ipScope) String() string {
+	switch s {
+	case ipScopePrivate:
+		return "private"
+	case ipScopeLoopback:
+		return "loopback"
+	case ipScopeUnspecified:
+		return "unspecified"
+	default:
+		return "public"
+	}
+}
+
+// cgnatIPv4 is the carrier grade NAT address range defined in RFC 6598.
+// net.IP.IsPrivate() doesn't cover it.
+var cgnatIPv4 = mustParseCIDR("100.64.0.0/10")
+
+func mustParseCIDR(s string) *net.IPNet {
+	_, ipNet, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse CIDR %q: %v", s, err))
+	}
+	return ipNet
+}
+
+// classifyIP classifies a destination IP address for the egress policy check.
+func classifyIP(ip net.IP) ipScope {
+	switch {
+	case ip.IsUnspecified():
+		// The unspecified address is not a public address. On Linux,
+		// connecting to 0.0.0.0 or :: reaches a local address.
+		return ipScopeUnspecified
+	case ip.IsLoopback():
+		return ipScopeLoopback
+	case ip.IsPrivate(), ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast(), cgnatIPv4.Contains(ip):
+		// net.IP.IsPrivate() covers RFC 1918 and RFC 4193 addresses, but not
+		// IPv6 link local (RFC 4291), IPv4 link local (RFC 3927) or CGNAT
+		// (RFC 6598) ranges. Those ranges reach local services and cloud
+		// provider metadata endpoints such as 169.254.169.254, so they are
+		// treated as private addresses.
+		return ipScopePrivate
+	}
+	return ipScopePublic
+}
+
+// allowIPAccess checks whether an address of the given scope can be accessed
+// according to the egress policy.
+// allowLoopbackDestination is for testing purpose only.
+func allowIPAccess(scope ipScope, allowPrivateIP, allowLoopbackIP, allowLoopbackDestination bool) bool {
+	switch scope {
+	case ipScopePublic:
+		return true
+	case ipScopePrivate:
+		return allowPrivateIP
+	case ipScopeLoopback:
+		return allowLoopbackIP || allowLoopbackDestination
+	case ipScopeUnspecified:
+		// The user never asked for the unspecified address explicitly, so
+		// accessing it requires opting in to the loopback policy.
+		return allowLoopbackIP || allowLoopbackDestination
+	}
+	return false
+}
+
+// normalizeDomainName returns the canonical form of a DNS name. DNS names are
+// case-insensitive and a trailing dot denotes the same absolute name.
+func normalizeDomainName(name string) string {
+	return strings.ToLower(strings.TrimSuffix(name, "."))
+}
+
+// matchLocalDomainName checks whether the normalized domain name is one of the
+// well-known local domain names, or a subdomain of it.
+func matchLocalDomainName(domainName string, names []string) bool {
+	for _, d := range names {
+		if domainName == d || strings.HasSuffix(domainName, "."+d) {
+			return true
+		}
+	}
+	return false
+}
+
+// udpDestinationChecker checks whether a SOCKS5 UDP datagram can be sent to a
+// destination IP address.
+type udpDestinationChecker func(ip net.IP) error
+
+// newUDPDestinationChecker returns the checker of the UDP datagrams relayed by
+// a SOCKS5 UDP association, according to the egress policy of the given user.
+// A UDP association is checked once when it is established, but every datagram
+// can be sent to a different destination, so each datagram must be checked
+// separately.
+// The user information is loaded once, so the returned checker is cheap to
+// call for every datagram.
+func (s *Server) newUDPDestinationChecker(userName string) udpDestinationChecker {
+	allowPrivateIP := false
+	allowLoopbackIP := false
+	if user, ok := s.config.Users[userName]; ok {
+		allowPrivateIP = user.GetAllowPrivateIP()
+		allowLoopbackIP = user.GetAllowLoopbackIP()
+	}
+	allowLoopbackDestination := s.config.AllowLoopbackDestination
+	return func(ip net.IP) error {
+		if ip == nil {
+			return fmt.Errorf("destination IP address is unknown")
+		}
+		scope := classifyIP(ip)
+		if allowIPAccess(scope, allowPrivateIP, allowLoopbackIP, allowLoopbackDestination) {
+			return nil
+		}
+		return fmt.Errorf("destination %v is a %s address and it is rejected by egress policy", ip, scope)
 	}
 }
 
@@ -228,10 +319,18 @@ func (s *Server) matchEgressRule(addr net.IP, domain string, rule *appctlpb.Egre
 			}
 		}
 	} else if domain != "" {
-		// Domain name based rule.
+		// Domain name based rule. Normalize the names before comparing,
+		// because DNS names are case-insensitive and a trailing dot denotes
+		// the same absolute name. Otherwise a rule that rejects "blocked.com"
+		// can be bypassed with "BLOCKED.COM".
+		domain = normalizeDomainName(domain)
 		for _, d := range rule.GetDomainNames() {
 			if d == "*" {
 				return true
+			}
+			d = normalizeDomainName(d)
+			if d == "" {
+				continue
 			}
 			if domain == d || strings.HasSuffix(domain, "."+d) {
 				return true

@@ -240,7 +240,11 @@ func StoreServerConfig(config *pb.ServerConfig) error {
 	if config == nil {
 		return fmt.Errorf("ServerConfig is nil")
 	}
-	config.Users = appctlcommon.HashUserPasswords(config.GetUsers(), false)
+	users, err := appctlcommon.HashUserPasswords(config.GetUsers(), false)
+	if err != nil {
+		return err
+	}
+	config.Users = users
 
 	fileName, fileType, err := serverConfigFilePath()
 	if err != nil {
@@ -392,7 +396,7 @@ func DeleteServerUsers(names []string) error {
 // A server config patch must satisfy:
 // 1. listen IP address is valid
 // 2. port bindings are valid
-// 3. users are valid
+// 3. user names are unique, and users are valid
 // 4. if set, MTU is valid
 // 5. for each egress proxy
 // 5.1. name is not empty
@@ -414,10 +418,15 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 	if _, err := appctlcommon.FlatPortBindings(patch.GetPortBindings()); err != nil {
 		return err
 	}
+	usedUserNames := map[string]bool{}
 	for _, user := range patch.GetUsers() {
 		if err := appctlcommon.ValidateServerConfigSingleUser(user); err != nil {
 			return err
 		}
+		if _, found := usedUserNames[user.GetName()]; found {
+			return fmt.Errorf("found duplicate user name %q", user.GetName())
+		}
+		usedUserNames[user.GetName()] = true
 	}
 	if patch.GetMtu() != 0 && (patch.GetMtu() < 1280 || patch.GetMtu() > 1500) {
 		return fmt.Errorf("MTU value %d is out of range, valid range is [1280, 1500]", patch.GetMtu())

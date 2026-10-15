@@ -24,6 +24,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
 	"github.com/enfein/mieru/v3/apis/constant"
@@ -35,11 +36,13 @@ import (
 
 // RunUDPAssociateLoop exchanges socks5 UDP packets between a socks5 proxy client and a mieru proxy server,
 // the proxy server is connected via the PacketOverStreamTunnel.
-func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamTunnel, resolver apicommon.DNSResolver) error {
+// check verifies whether a UDP datagram can be sent to a destination address.
+// A nil check allows all the destinations.
+func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamTunnel, resolver apicommon.DNSResolver, check udpDestinationChecker) error {
 	var udpErr atomic.Value
 
 	// addrMap maps the UDPAddr in string to the bytes in UDP associate header.
-	var addrMap sync.Map
+	addrMap := newUDPAddrTable()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -60,15 +63,24 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 
 			datagram, err := parseSocks5UDPDatagram(buf[:n])
 			if err != nil {
-				udpErr.Store(err)
-				return
+				// A malformed datagram only drops this packet, it doesn't
+				// terminate the whole UDP association.
+				log.Debugf("UDP associate %v dropped invalid packet: %v", udpConn.LocalAddr(), err)
+				continue
 			}
 			dstAddr, err := resolveSocks5UDPAddr(context.Background(), resolver, datagram.Addr)
 			if err != nil {
 				log.Debugf("UDP associate %v ResolveUDPAddr() failed: %v", udpConn.LocalAddr(), err)
 				continue
 			}
-			addrMap.Store(dstAddr.String(), datagram.Header)
+			if err := checkUDPDestination(check, dstAddr); err != nil {
+				log.Debugf("UDP associate %v dropped packet to %v: %v", udpConn.LocalAddr(), dstAddr, err)
+				continue
+			}
+			if !addrMap.store(dstAddr.String(), datagram.Header) {
+				log.Debugf("UDP associate %v dropped packet to %v: too many destination addresses", udpConn.LocalAddr(), dstAddr)
+				continue
+			}
 			_, err = udpConn.WriteToUDP(datagram.Payload, dstAddr)
 			if err != nil {
 				log.Debugf("UDP associate [%v - %v] WriteToUDP() failed: %v", udpConn.LocalAddr(), dstAddr, err)
@@ -95,13 +107,13 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 				}
 				return
 			}
-			var header []byte
-			v, ok := addrMap.Load(addr.String())
-			if ok {
-				header = v.([]byte)
-			} else {
-				header = udpAddrToHeader(addr)
-				addrMap.Store(addr.String(), header)
+			// Only the response of a destination that we sent a datagram to is
+			// relayed back. Otherwise an off-path host can inject data to the
+			// socks5 client by sending a datagram to this UDP listener.
+			header, ok := addrMap.load(addr.String())
+			if !ok {
+				log.Debugf("UDP associate %v dropped packet from unexpected endpoint %v", udpConn.LocalAddr(), addr)
+				continue
 			}
 			_, err = conn.Write(append(append([]byte(nil), header...), buf[:n]...))
 			if err != nil {
@@ -166,13 +178,20 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 		defer wg.Done()
 		buf := make([]byte, 1<<16)
 		for {
-			n, _, err := udpConn.ReadFromUDP(buf)
+			n, addr, err := udpConn.ReadFromUDP(buf)
 			if err != nil {
 				if !stderror.IsEOF(err) && !stderror.IsClosed(err) {
 					log.Debugf("UDP forwarding %v ReadFromUDP() failed: %v", udpConn.LocalAddr(), err)
 				}
 				closeAll(err)
 				return
+			}
+			// Only relay the response of the downstream socks5 proxy server.
+			// Otherwise an off-path host can inject data to the mieru proxy
+			// client by sending a datagram to this UDP listener.
+			if !sameUDPAddr(addr, downstreamAddr) {
+				log.Debugf("UDP forwarding %v dropped packet from unexpected endpoint %v", udpConn.LocalAddr(), addr)
+				continue
 			}
 			_, err = conn.Write(buf[:n])
 			if err != nil {
@@ -247,7 +266,12 @@ func TransceiveUDPPacket(conn *net.UDPConn, proxyAddr, dstAddr *net.UDPAddr, pay
 // runUDPAssociateDatagramLoop exchanges RFC 1928 SOCKS5 UDP datagrams between
 // a SOCKS5 proxy client and UDP destinations until the TCP control connection
 // is closed.
-func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, resolver apicommon.DNSResolver) error {
+// req is the UDP associate request sent by the client. It may declare the IP
+// address that the client sends datagrams from, which is used to reject
+// datagrams sent by other hosts.
+// check verifies whether a UDP datagram can be sent to a destination address.
+// A nil check allows all the destinations.
+func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, req *model.Request, resolver apicommon.DNSResolver, check udpDestinationChecker) error {
 	if resolver == nil {
 		resolver = &net.Resolver{}
 	}
@@ -265,8 +289,13 @@ func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, resolv
 		monitorWG.Wait()
 	}()
 
+	// clientAddr is the UDP endpoint of the SOCKS5 client. It is learned from
+	// the first datagram sent by the client.
 	var clientAddr *net.UDPAddr
-	targetAddrs := make(map[string]struct{})
+	// clientIP is the source IP address declared in the associate request. If
+	// it is set, datagrams from other IP addresses are rejected.
+	clientIP := associateClientIP(req)
+	targetAddrs := newUDPAddrTable()
 	buf := make([]byte, 1<<16)
 	for {
 		n, addr, err := udpConn.ReadFromUDP(buf)
@@ -278,6 +307,10 @@ func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, resolv
 		}
 
 		if clientAddr == nil || sameUDPAddr(addr, clientAddr) {
+			if clientIP != nil && !addr.IP.Equal(clientIP) {
+				log.Debugf("UDP datagram relay %v dropped packet from unexpected source %v", udpConn.LocalAddr(), addr)
+				continue
+			}
 			dstAddr, payload, err := parseUDPAssociateDatagram(buf[:n], resolver)
 			if err != nil {
 				log.Debugf("UDP datagram relay %v dropped invalid packet from %v: %v", udpConn.LocalAddr(), addr, err)
@@ -290,17 +323,24 @@ func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, resolv
 					Zone: addr.Zone,
 				}
 			}
+			if err := checkUDPDestination(check, dstAddr); err != nil {
+				log.Debugf("UDP datagram relay %v dropped packet to %v: %v", udpConn.LocalAddr(), dstAddr, err)
+				continue
+			}
+			if !targetAddrs.store(dstAddr.String(), nil) {
+				log.Debugf("UDP datagram relay %v dropped packet to %v: too many destination addresses", udpConn.LocalAddr(), dstAddr)
+				continue
+			}
 
 			_, err = udpConn.WriteToUDP(payload, dstAddr)
 			if err != nil {
 				log.Debugf("UDP datagram relay [%v - %v] WriteToUDP() failed: %v", udpConn.LocalAddr(), dstAddr, err)
 				continue
 			}
-			targetAddrs[dstAddr.String()] = struct{}{}
 			continue
 		}
 
-		if _, ok := targetAddrs[addr.String()]; !ok {
+		if _, ok := targetAddrs.load(addr.String()); !ok {
 			log.Debugf("UDP datagram relay %v dropped packet from unexpected endpoint %v", udpConn.LocalAddr(), addr)
 			continue
 		}
@@ -310,6 +350,120 @@ func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, resolv
 		if err != nil {
 			log.Debugf("UDP datagram relay [%v - %v] WriteToUDP() to client failed: %v", udpConn.LocalAddr(), clientAddr, err)
 			continue
+		}
+	}
+}
+
+// associateClientIP returns the IP address that the SOCKS5 client declares to
+// send UDP datagrams from, according to the UDP associate request. It returns
+// nil when the request doesn't declare one, in which case the client endpoint
+// is learned from the first datagram.
+// The port declared in the request is intentionally ignored, because it is not
+// reliable: some SOCKS5 clients, including the mieru socks5 client dialer, put
+// the destination address and port there instead of the source endpoint.
+func associateClientIP(req *model.Request) net.IP {
+	if req == nil {
+		return nil
+	}
+	ip := req.DstAddr.IP
+	if len(ip) == 0 || ip.IsUnspecified() {
+		return nil
+	}
+	return ip
+}
+
+// checkUDPDestination returns an error when the egress policy of the UDP
+// association rejects the destination address. A nil check allows all the
+// destinations.
+func checkUDPDestination(check udpDestinationChecker, addr *net.UDPAddr) error {
+	if check == nil || addr == nil || addr.IP == nil {
+		return nil
+	}
+	return check(addr.IP)
+}
+
+// maxUDPAddrTableSize is the maximum number of remote UDP endpoints that a
+// single UDP association tracks. Without a limit, a peer can grow the table
+// without bound by sending datagrams to many different destinations.
+const maxUDPAddrTableSize = 4096
+
+// udpAddrTableIdleTimeout is the idle timeout of a remote UDP endpoint in the
+// table created by udpAddrTable.
+const udpAddrTableIdleTimeout = 5 * time.Minute
+
+// udpAddrTableSweepInterval is the minimum interval between two sweeps that
+// evict the idle entries of a udpAddrTable. It bounds the cost of the sweep.
+const udpAddrTableSweepInterval = time.Minute
+
+// udpAddrTable maps a remote UDP endpoint to a value, such as the header used
+// to relay the response. The table is bounded in size, and the entries that
+// are not active are evicted.
+type udpAddrTable struct {
+	mu        sync.Mutex
+	entries   map[string]*udpAddrTableEntry
+	lastSweep time.Time
+}
+
+type udpAddrTableEntry struct {
+	value    []byte
+	lastSeen time.Time
+}
+
+func newUDPAddrTable() *udpAddrTable {
+	return &udpAddrTable{
+		entries: make(map[string]*udpAddrTableEntry),
+	}
+}
+
+// load returns the value associated with key, and marks the entry as active.
+func (t *udpAddrTable) load(key string) ([]byte, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	t.sweepLocked(now)
+	e, ok := t.entries[key]
+	if !ok {
+		return nil, false
+	}
+	e.lastSeen = now
+	return e.value, true
+}
+
+// store adds key to the table. It returns false if the table is full, and key
+// was not in the table.
+func (t *udpAddrTable) store(key string, value []byte) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	t.sweepLocked(now)
+	if e, ok := t.entries[key]; ok {
+		e.lastSeen = now
+		if value != nil {
+			e.value = value
+		}
+		return true
+	}
+	if len(t.entries) >= maxUDPAddrTableSize {
+		return false
+	}
+	t.entries[key] = &udpAddrTableEntry{
+		value:    value,
+		lastSeen: now,
+	}
+	return true
+}
+
+// sweepLocked evicts the entries that are idle, at most once per
+// udpAddrTableSweepInterval.
+// Caller must hold t.mu.
+func (t *udpAddrTable) sweepLocked(now time.Time) {
+	if now.Sub(t.lastSweep) < udpAddrTableSweepInterval {
+		return
+	}
+	t.lastSweep = now
+	for k, e := range t.entries {
+		if now.Sub(e.lastSeen) > udpAddrTableIdleTimeout {
+			delete(t.entries, k)
 		}
 	}
 }
@@ -381,9 +535,6 @@ func parseSocks5UDPDatagram(pkt []byte) (*socks5UDPDatagram, error) {
 		return nil, err
 	}
 	headerLen := len(pkt) - r.Len()
-	if len(pkt) < headerLen {
-		return nil, stderror.ErrNoEnoughData
-	}
 
 	return &socks5UDPDatagram{
 		Addr:    dst,

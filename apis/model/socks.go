@@ -42,6 +42,10 @@ func ReadSocks5Request(reader io.Reader) (*Request, error) {
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return nil, err
 	}
+	version := header[0]
+	if version != constant.Socks5Version {
+		return nil, fmt.Errorf("invalid version: %d", version)
+	}
 	dstAddr, addrRaw, err := readSocks5AddrAfterType(reader, header[3])
 	if err != nil {
 		return nil, err

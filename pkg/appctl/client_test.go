@@ -74,7 +74,7 @@ func TestClientApplyReject(t *testing.T) {
 					ProfileName: proto.String("default"),
 					User: &pb.User{
 						Name:     proto.String("hello"),
-						Password: proto.String("world"),
+						Password: proto.String("world1234"),
 					},
 					Servers: []*pb.ServerEndpoint{
 						{

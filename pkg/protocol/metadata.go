@@ -260,6 +260,7 @@ func (das *dataAckStruct) Unmarshal(b []byte) error {
 	var lowEntropyMask uint32
 	var extractedPayloadLen uint16
 	var lowEntropyMaskRotation uint8
+	payloadLen := binary.BigEndian.Uint16(b[22:])
 	if isLowEntropyProtocol(protocol) {
 		lowEntropyMode = b[1]
 		lowEntropyMask = binary.BigEndian.Uint32(b[25:])
@@ -268,7 +269,7 @@ func (das *dataAckStruct) Unmarshal(b []byte) error {
 		candidate := &dataAckStruct{
 			baseStruct:             baseStruct{protocol: b[0]},
 			lowEntropyMode:         lowEntropyMode,
-			payloadLen:             binary.BigEndian.Uint16(b[22:]),
+			payloadLen:             payloadLen,
 			lowEntropyMask:         lowEntropyMask,
 			extractedPayloadLen:    extractedPayloadLen,
 			lowEntropyMaskRotation: lowEntropyMaskRotation,
@@ -276,6 +277,8 @@ func (das *dataAckStruct) Unmarshal(b []byte) error {
 		if err := validateLowEntropyDataAckMetadata(candidate); err != nil {
 			return err
 		}
+	} else if int(payloadLen) > maxPDU {
+		return fmt.Errorf("payload length %d exceeds maximum %d", payloadLen, maxPDU)
 	}
 
 	// Do unmarshal.
@@ -288,7 +291,7 @@ func (das *dataAckStruct) Unmarshal(b []byte) error {
 	das.windowSize = binary.BigEndian.Uint16(b[18:])
 	das.fragment = b[20]
 	das.prefixLen = b[21]
-	das.payloadLen = binary.BigEndian.Uint16(b[22:])
+	das.payloadLen = payloadLen
 	das.suffixLen = b[24]
 	das.lowEntropyMask = lowEntropyMask
 	das.extractedPayloadLen = extractedPayloadLen

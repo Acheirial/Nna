@@ -17,9 +17,11 @@ package protocol
 
 import "fmt"
 
-// validateNewServerSessionSegment enforces the only protocol that may create a
-// server session. Callers run this after payload authentication and padding
-// validation, immediately before initial protocol dispatch.
+// validateNewServerSessionSegment enforces the requirements of the only
+// protocol that may create a server session. Callers run this after payload
+// authentication and padding validation, immediately before initial protocol
+// dispatch, and only when the segment protocol is openSessionRequest; every
+// other protocol is handled by the existing dispatch logic.
 func validateNewServerSessionSegment(seg *segment) error {
 	if seg == nil || seg.metadata == nil {
 		return fmt.Errorf("new server session segment is nil")

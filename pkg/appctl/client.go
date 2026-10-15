@@ -138,7 +138,11 @@ func StoreClientConfig(config *pb.ClientConfig) error {
 	}
 
 	for _, profile := range config.GetProfiles() {
-		profile.User = appctlcommon.HashUserPassword(profile.GetUser(), true)
+		user, err := appctlcommon.HashUserPassword(profile.GetUser(), true)
+		if err != nil {
+			return err
+		}
+		profile.User = user
 	}
 
 	var b []byte
@@ -255,13 +259,18 @@ func DeleteClientConfigProfile(profileName string) error {
 //
 // A client config patch must satisfy:
 // 1. it has 0 or more profile
-// 2. each profile is valid
+// 2. profile names are unique, and each profile is valid
 // 3. for each socks5 authentication, the user and password are not empty
 func ValidateClientConfigPatch(patch *pb.ClientConfig) error {
+	usedProfileNames := map[string]bool{}
 	for _, profile := range patch.GetProfiles() {
 		if err := appctlcommon.ValidateClientConfigSingleProfile(profile); err != nil {
 			return err
 		}
+		if _, found := usedProfileNames[profile.GetProfileName()]; found {
+			return fmt.Errorf("found duplicate profile name %q", profile.GetProfileName())
+		}
+		usedProfileNames[profile.GetProfileName()] = true
 	}
 	for _, auth := range patch.GetSocks5Authentication() {
 		if auth.GetUser() == "" {

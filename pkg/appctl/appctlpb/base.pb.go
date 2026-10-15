@@ -1083,7 +1083,7 @@ const file_appctl_proto_base_proto_rawDesc = "" +
 	"\x05_portB\v\n" +
 	"\t_protocolB\f\n" +
 	"\n" +
-	"_portRange\"\x99\x02\n" +
+	"_portRange\"\x9f\x02\n" +
 	"\x04User\x12\x17\n" +
 	"\x04name\x18\x01 \x01(\tH\x00R\x04name\x88\x01\x01\x12\x1f\n" +
 	"\bpassword\x18\x02 \x01(\tH\x01R\bpassword\x88\x01\x01\x12+\n" +
@@ -1094,7 +1094,7 @@ const file_appctl_proto_base_proto_rawDesc = "" +
 	"\t_passwordB\x11\n" +
 	"\x0f_hashedPasswordB\x11\n" +
 	"\x0f_allowPrivateIPB\x12\n" +
-	"\x10_allowLoopbackIP\"V\n" +
+	"\x10_allowLoopbackIPJ\x04\b\x04\x10\x05\"V\n" +
 	"\x04Auth\x12\x17\n" +
 	"\x04user\x18\x01 \x01(\tH\x00R\x04user\x88\x01\x01\x12\x1f\n" +
 	"\bpassword\x18\x02 \x01(\tH\x01R\bpassword\x88\x01\x01B\a\n" +

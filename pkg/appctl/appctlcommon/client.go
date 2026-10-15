@@ -22,7 +22,6 @@ import (
 	"strconv"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
 	"github.com/enfein/mieru/v3/apis/model"
 	"github.com/enfein/mieru/v3/apis/trafficpattern"
 	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
@@ -37,10 +36,12 @@ import (
 //
 // It validates:
 //   - profile name is not empty
-//   - user name is not empty
+//   - user name is not empty, and its length is not greater than 64 bytes
 //   - user has either a password or a hashed password
-//   - user name length is not greater than 64 bytes
-//   - user password (if set) length is not greater than 64 bytes
+//   - user password (if set) is strong enough, and is consistent with the
+//     hashed password if both are set
+//   - user hashed password (if set) is a hex encoded SHA-256 digest
+//   - if set, multiplexing level is valid
 //   - it has at least 1 server, and for each server:
 //     1. the server has either IP address or domain name
 //     2. if set, server's IP address is parsable
@@ -53,18 +54,11 @@ func ValidateClientConfigSingleProfile(profile *pb.ClientProfile) error {
 	if name == "" {
 		return fmt.Errorf("profile name is not set")
 	}
-	user := profile.GetUser()
-	if user.GetName() == "" {
-		return fmt.Errorf("user name is not set")
+	if err := validateUserCredentials(profile.GetUser()); err != nil {
+		return err
 	}
-	if user.GetPassword() == "" && user.GetHashedPassword() == "" {
-		return fmt.Errorf("user password is not set")
-	}
-	if len(user.GetName()) > constant.MaxUserNameLen {
-		return fmt.Errorf("user name exceeds %d bytes", constant.MaxUserNameLen)
-	}
-	if user.GetPassword() != "" && len(user.GetPassword()) > 64 {
-		return fmt.Errorf("user password exceeds 64 bytes")
+	if _, err := clientMultiplexFactor(profile.GetMultiplexing().GetLevel()); err != nil {
+		return err
 	}
 	servers := profile.GetServers()
 	if len(servers) == 0 {
@@ -153,16 +147,9 @@ func NewClientMuxFromProfile(activeProfile *pb.ClientProfile, dialer apicommon.D
 	mux = mux.SetClientUserNamePassword(user.GetName(), hashedPassword)
 
 	// Set multiplex factor.
-	multiplexFactor := 1
-	switch activeProfile.GetMultiplexing().GetLevel() {
-	case pb.MultiplexingLevel_MULTIPLEXING_OFF:
-		multiplexFactor = 0
-	case pb.MultiplexingLevel_MULTIPLEXING_LOW:
-		multiplexFactor = 1
-	case pb.MultiplexingLevel_MULTIPLEXING_MIDDLE:
-		multiplexFactor = 2
-	case pb.MultiplexingLevel_MULTIPLEXING_HIGH:
-		multiplexFactor = 3
+	multiplexFactor, err := clientMultiplexFactor(activeProfile.GetMultiplexing().GetLevel())
+	if err != nil {
+		return nil, err
 	}
 	mux = mux.SetClientMultiplexFactor(multiplexFactor)
 
@@ -173,6 +160,22 @@ func NewClientMuxFromProfile(activeProfile *pb.ClientProfile, dialer apicommon.D
 	}
 	mux.SetEndpoints(endpoints)
 	return mux, nil
+}
+
+// clientMultiplexFactor returns the mux multiplex factor of a multiplexing level.
+func clientMultiplexFactor(level pb.MultiplexingLevel) (int, error) {
+	switch level {
+	case pb.MultiplexingLevel_MULTIPLEXING_DEFAULT, pb.MultiplexingLevel_MULTIPLEXING_LOW:
+		return 1, nil
+	case pb.MultiplexingLevel_MULTIPLEXING_OFF:
+		return 0, nil
+	case pb.MultiplexingLevel_MULTIPLEXING_MIDDLE:
+		return 2, nil
+	case pb.MultiplexingLevel_MULTIPLEXING_HIGH:
+		return 3, nil
+	default:
+		return 0, fmt.Errorf("multiplexing level %s is invalid", level.String())
+	}
 }
 
 func validateClientProfileDialer(profile *pb.ClientProfile) error {

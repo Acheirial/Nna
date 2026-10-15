@@ -60,7 +60,7 @@ func TestDataAckStruct(t *testing.T) {
 		windowSize: uint16(mrand.Uint32()),
 		fragment:   uint8(mrand.Uint32()),
 		prefixLen:  uint8(mrand.Uint32()),
-		payloadLen: uint16(mrand.Uint32()),
+		payloadLen: uint16(mrand.Intn(maxPDU + 1)),
 		suffixLen:  uint8(mrand.Uint32()),
 	}
 	b := s.Marshal()
@@ -79,6 +79,15 @@ func TestDataAckStruct(t *testing.T) {
 			t.Errorf("String() = %q, want low entropy field %q omitted", s.String(), field)
 		}
 	}
+	t.Run("payload_len_exceeds_max_pdu", func(t *testing.T) {
+		oversized := &dataAckStruct{
+			baseStruct: baseStruct{protocol: uint8(dataServerToClient)},
+			payloadLen: maxPDU + 1,
+		}
+		if err := (&dataAckStruct{}).Unmarshal(oversized.Marshal()); err == nil {
+			t.Fatal("Unmarshal() succeeded, want error")
+		}
+	})
 }
 
 func TestDataAckProtocolClassifiers(t *testing.T) {

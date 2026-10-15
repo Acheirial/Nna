@@ -279,13 +279,10 @@ var clientRunFunc = func(s []string) error {
 	if err != nil {
 		return fmt.Errorf(stderror.GetClientPidFilePathFailedErr, err)
 	}
-	if running, pid := appctl.IsAppRunning(pidFilePath); running && pid != os.Getpid() {
-		return fmt.Errorf("mieru client is already running with PID %d", pid)
-	}
-	if err = appctl.WritePidFile(pidFilePath); err != nil {
+	if err = appctl.AcquirePidFile(pidFilePath); err != nil {
 		return fmt.Errorf(stderror.WriteClientPidFileFailedErr, err)
 	}
-	defer appctl.RemovePidFile(pidFilePath)
+	defer appctl.RemoveOwnPidFile(pidFilePath)
 
 	// Set logging level based on client config.
 	loggingLevel := config.GetLoggingLevel().String()
@@ -369,11 +366,15 @@ var clientRunFunc = func(s []string) error {
 	// Wait until a stop signal is received.
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+	var serveFailed error
 	select {
 	case sig := <-stopChan:
 		log.Infof("received signal %v, stop mieru client", sig)
 	case err := <-serveErr:
-		log.Fatalf("run socks5 server failed: %v", err)
+		// Don't call log.Fatalf here, which exits the process without running
+		// the deferred pid file removal, and leaves a stale pid file.
+		serveFailed = err
+		log.Errorf("run socks5 server failed: %v", err)
 	}
 
 	if err := socks5Server.Close(); err != nil {
@@ -386,6 +387,9 @@ var clientRunFunc = func(s []string) error {
 	log.Infof("mieru client socks5 server is stopped")
 
 	log.Infof("mieru client exit now")
+	if serveFailed != nil {
+		return fmt.Errorf("run socks5 server failed: %w", serveFailed)
+	}
 	return nil
 }
 

@@ -70,6 +70,9 @@ func (ms *mieruServer) Store(config *ServerConfig) error {
 	if config == nil {
 		return fmt.Errorf("%w: server config is nil", ErrInvalidServerConfig)
 	}
+	if ms.running.Load() {
+		return ErrStoreServerConfigAfterStart
+	}
 	if err := validateServerConfig(config.Config); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidServerConfig, err)
 	}
@@ -130,6 +133,9 @@ func (ms *mieruServer) IsRunning() bool {
 }
 
 func (ms *mieruServer) Accept() (net.Conn, *model.Request, error) {
+	if ms.mux == nil {
+		return nil, nil, ErrServerIsNotRunning
+	}
 	conn, err := ms.mux.Accept()
 	if err != nil {
 		return nil, nil, err

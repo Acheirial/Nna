@@ -18,6 +18,7 @@
 package appctl
 
 import (
+	"errors"
 	"syscall"
 )
 
@@ -31,7 +32,9 @@ func daemonSysProcAttr() *syscall.SysProcAttr {
 func processAlive(pid int) bool {
 	h, err := syscall.OpenProcess(syscall.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		return false
+		// A process owned by another user can't be opened due to the lack of
+		// permission, but it is still running.
+		return errors.Is(err, syscall.ERROR_ACCESS_DENIED)
 	}
 	syscall.CloseHandle(h)
 	return true

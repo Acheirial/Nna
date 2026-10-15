@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/enfein/mieru/v3/apis/constant"
 	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 )
 
@@ -39,22 +38,11 @@ func ValidateServerListenIPAddress(address string) error {
 // ValidateServerConfigSingleUser validates a single server config user.
 //
 // It validates:
-//   - user name is not empty
+//   - user name is not empty, and its length is not greater than 64 bytes
 //   - user has either a password or a hashed password
-//   - user name length is not greater than 64 bytes
-//   - user password (if set) length is not greater than 64 bytes
+//   - user password (if set) is strong enough, and is consistent with the
+//     hashed password if both are set
+//   - user hashed password (if set) is a hex encoded SHA-256 digest
 func ValidateServerConfigSingleUser(user *pb.User) error {
-	if user.GetName() == "" {
-		return fmt.Errorf("user name is not set")
-	}
-	if user.GetPassword() == "" && user.GetHashedPassword() == "" {
-		return fmt.Errorf("user password is not set")
-	}
-	if len(user.GetName()) > constant.MaxUserNameLen {
-		return fmt.Errorf("user name exceeds %d bytes", constant.MaxUserNameLen)
-	}
-	if user.GetPassword() != "" && len(user.GetPassword()) > 64 {
-		return fmt.Errorf("user password exceeds 64 bytes")
-	}
-	return nil
+	return validateUserCredentials(user)
 }

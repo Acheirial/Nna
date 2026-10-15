@@ -164,6 +164,19 @@ var serverHelpFunc = func(s []string) error {
 }
 
 var serverStartFunc = func(s []string) error {
+	// Load and verify server config, so that an invalid config is reported
+	// immediately, instead of waiting for the daemon to start and time out.
+	config, err := appctl.LoadServerConfig()
+	if err != nil {
+		if err == stderror.ErrFileNotExist {
+			return fmt.Errorf(stderror.ServerConfigNotExist)
+		}
+		return fmt.Errorf(stderror.GetServerConfigFailedErr, err)
+	}
+	if err = appctl.ValidateFullServerConfig(config); err != nil {
+		return fmt.Errorf(stderror.ValidateFullServerConfigFailedErr, err)
+	}
+
 	pidFilePath := appctl.ServerPidFilePath()
 	if running, _ := appctl.IsAppRunning(pidFilePath); running {
 		log.Infof("mita server is running")
@@ -199,13 +212,10 @@ var serverRunFunc = func(s []string) error {
 	// Write the pid file, so that the start, stop and status commands
 	// can control this process.
 	pidFilePath := appctl.ServerPidFilePath()
-	if running, pid := appctl.IsAppRunning(pidFilePath); running && pid != os.Getpid() {
-		return fmt.Errorf("mita server is already running with PID %d", pid)
-	}
-	if err = appctl.WritePidFile(pidFilePath); err != nil {
+	if err = appctl.AcquirePidFile(pidFilePath); err != nil {
 		return fmt.Errorf(stderror.WriteServerPidFileFailedErr, err)
 	}
-	defer appctl.RemovePidFile(pidFilePath)
+	defer appctl.RemoveOwnPidFile(pidFilePath)
 
 	// Set logging level based on server config.
 	loggingLevel := config.GetLoggingLevel().String()

@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DNSResolver provides a way to look up IP addresses from host name.
@@ -92,8 +93,48 @@ type ClientDNSConfig struct {
 	BypassDialerDNS bool
 }
 
-// ResolveTCPAddr returns a TCP address using the DNSResolver.
-func ResolveTCPAddr(ctx context.Context, r DNSResolver, network, address string) (*net.TCPAddr, error) {
+// defaultDNSResolveTimeout is the timeout applied to a DNS lookup when the
+// caller provided a context without a deadline.
+const defaultDNSResolveTimeout = 10 * time.Second
+
+// withDNSResolveTimeout returns a context that is guaranteed to have a deadline.
+// If ctx already has a deadline, ctx is returned as is. Otherwise
+// defaultDNSResolveTimeout is applied so that the DNS lookup is bounded.
+//
+// The returned context.CancelFunc must be called to release resources.
+func withDNSResolveTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultDNSResolveTimeout)
+}
+
+// sortIPs returns a new slice with IPv4 addresses placed before IPv6 addresses.
+// The relative order of addresses within the same IP family is preserved.
+func sortIPs(ips []net.IP) []net.IP {
+	sorted := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			sorted = append(sorted, ip)
+		}
+	}
+	for _, ip := range ips {
+		if ip.To4() == nil {
+			sorted = append(sorted, ip)
+		}
+	}
+	return sorted
+}
+
+// ResolveTCPAddrs returns all TCP addresses of the given network and address
+// using the DNSResolver.
+//
+// If the host in address is a literal IP address, at most one address is
+// returned. Otherwise all IP addresses returned by the DNSResolver are used,
+// with IPv4 addresses placed before IPv6 addresses.
+//
+// If ctx has no deadline, a default timeout is applied to the DNS lookup.
+func ResolveTCPAddrs(ctx context.Context, r DNSResolver, network, address string) ([]*net.TCPAddr, error) {
 	dnsQueryNetwork := "ip"
 	switch network {
 	case "tcp":
@@ -116,12 +157,14 @@ func ResolveTCPAddr(ctx context.Context, r DNSResolver, network, address string)
 		return nil, err
 	}
 	if host == "" {
-		return &net.TCPAddr{Port: port}, nil
+		return []*net.TCPAddr{{Port: port}}, nil
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		return &net.TCPAddr{IP: net.IP(ip.AsSlice()), Port: port, Zone: ip.Zone()}, nil
+		return []*net.TCPAddr{{IP: net.IP(ip.AsSlice()), Port: port, Zone: ip.Zone()}}, nil
 	}
 
+	ctx, cancel := withDNSResolveTimeout(ctx)
+	defer cancel()
 	ips, err := r.LookupIP(ctx, dnsQueryNetwork, host)
 	if err != nil {
 		return nil, err
@@ -130,11 +173,33 @@ func ResolveTCPAddr(ctx context.Context, r DNSResolver, network, address string)
 		return nil, &net.AddrError{Err: "IP address not found", Addr: address}
 	}
 
-	return &net.TCPAddr{IP: ips[0], Port: port}, nil
+	ips = sortIPs(ips)
+	addrs := make([]*net.TCPAddr, 0, len(ips))
+	for _, ip := range ips {
+		addrs = append(addrs, &net.TCPAddr{IP: ip, Port: port})
+	}
+	return addrs, nil
 }
 
-// ResolveUDPAddr returns a UDP address using the DNSResolver.
-func ResolveUDPAddr(ctx context.Context, r DNSResolver, network, address string) (*net.UDPAddr, error) {
+// ResolveTCPAddr returns a TCP address using the DNSResolver.
+// It returns the first TCP address resolved by ResolveTCPAddrs.
+func ResolveTCPAddr(ctx context.Context, r DNSResolver, network, address string) (*net.TCPAddr, error) {
+	addrs, err := ResolveTCPAddrs(ctx, r, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return addrs[0], nil
+}
+
+// ResolveUDPAddrs returns all UDP addresses of the given network and address
+// using the DNSResolver.
+//
+// If the host in address is a literal IP address, at most one address is
+// returned. Otherwise all IP addresses returned by the DNSResolver are used,
+// with IPv4 addresses placed before IPv6 addresses.
+//
+// If ctx has no deadline, a default timeout is applied to the DNS lookup.
+func ResolveUDPAddrs(ctx context.Context, r DNSResolver, network, address string) ([]*net.UDPAddr, error) {
 	dnsQueryNetwork := "ip"
 	switch network {
 	case "udp":
@@ -157,12 +222,14 @@ func ResolveUDPAddr(ctx context.Context, r DNSResolver, network, address string)
 		return nil, err
 	}
 	if host == "" {
-		return &net.UDPAddr{Port: port}, nil
+		return []*net.UDPAddr{{Port: port}}, nil
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
-		return &net.UDPAddr{IP: net.IP(ip.AsSlice()), Port: port, Zone: ip.Zone()}, nil
+		return []*net.UDPAddr{{IP: net.IP(ip.AsSlice()), Port: port, Zone: ip.Zone()}}, nil
 	}
 
+	ctx, cancel := withDNSResolveTimeout(ctx)
+	defer cancel()
 	ips, err := r.LookupIP(ctx, dnsQueryNetwork, host)
 	if err != nil {
 		return nil, err
@@ -171,7 +238,22 @@ func ResolveUDPAddr(ctx context.Context, r DNSResolver, network, address string)
 		return nil, &net.AddrError{Err: "IP address not found", Addr: address}
 	}
 
-	return &net.UDPAddr{IP: ips[0], Port: port}, nil
+	ips = sortIPs(ips)
+	addrs := make([]*net.UDPAddr, 0, len(ips))
+	for _, ip := range ips {
+		addrs = append(addrs, &net.UDPAddr{IP: ip, Port: port})
+	}
+	return addrs, nil
+}
+
+// ResolveUDPAddr returns a UDP address using the DNSResolver.
+// It returns the first UDP address resolved by ResolveUDPAddrs.
+func ResolveUDPAddr(ctx context.Context, r DNSResolver, network, address string) (*net.UDPAddr, error) {
+	addrs, err := ResolveUDPAddrs(ctx, r, network, address)
+	if err != nil {
+		return nil, err
+	}
+	return addrs[0], nil
 }
 
 // ForbidDefaultResolver causes the process to panic if

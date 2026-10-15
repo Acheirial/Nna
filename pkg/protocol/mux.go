@@ -561,6 +561,7 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 			sessionCleanTicker: time.NewTicker(sessionCleanInterval),
 			serverUsers:        &m.serverUsers,
 		}
+		setUnderlayRawConn(underlay)
 		log.Infof("Created new server underlay %v", underlay)
 		m.mu.Lock()
 		select {
@@ -617,12 +618,33 @@ func (m *Mux) serverWrapTCPConn(rawConn net.Conn, mtu int, trafficPattern *appct
 	if rawConn != nil {
 		source = serveruser.SourceFromAddr(rawConn.RemoteAddr())
 	}
-	return &StreamUnderlay{
+	underlay := &StreamUnderlay{
 		baseUnderlay:       *newBaseUnderlay(false, mtu, trafficPattern),
 		conn:               rawConn,
 		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
 		serverUsers:        &m.serverUsers,
 		serverUserSource:   source,
+	}
+	setUnderlayRawConn(underlay)
+	return underlay
+}
+
+// setUnderlayRawConn makes the base underlay of the given underlay own the
+// underlying network connection. The underlay releases the connection when it
+// is closed, even if the event loop hasn't started yet, so that the socket
+// file descriptor is never leaked. The event loop also closes the connection
+// when it stops, which is harmless because a connection can be closed more
+// than once.
+func setUnderlayRawConn(underlay Underlay) {
+	switch u := underlay.(type) {
+	case *StreamUnderlay:
+		if u.conn != nil {
+			u.baseUnderlay.rawConn = u.conn
+		}
+	case *PacketUnderlay:
+		if u.conn != nil {
+			u.baseUnderlay.rawConn = u.conn
+		}
 	}
 }
 
@@ -675,6 +697,7 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 		return nil, fmt.Errorf("unsupport transport protocol %v", p.TransportProtocol())
 	}
 
+	setUnderlayRawConn(underlay)
 	m.mu.Lock()
 	m.underlays = append(m.underlays, underlay)
 	m.mu.Unlock()

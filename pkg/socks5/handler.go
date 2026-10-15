@@ -123,6 +123,18 @@ func (s *Server) handleAssociate(ctx context.Context, req *model.Request, proxyC
 	return s.handleAssociatePacketOverStream(ctx, req, proxyConn)
 }
 
+// udpAssociateChecker returns the egress policy check applied to every
+// datagram of the UDP association created on the given connection. The user
+// information is resolved once, so the returned checker is cheap to call for
+// every datagram.
+func (s *Server) udpAssociateChecker(conn net.Conn) udpDestinationChecker {
+	userName := ""
+	if userCtx, ok := conn.(apicommon.UserContext); ok {
+		userName = userCtx.UserName()
+	}
+	return s.newUDPDestinationChecker(userName)
+}
+
 func (s *Server) handleAssociatePacketOverStream(_ context.Context, _ *model.Request, proxyConn net.Conn) error {
 	// Create a UDP listener on a random port.
 	// All the requests associated to this connection will go through this port.
@@ -144,10 +156,10 @@ func (s *Server) handleAssociatePacketOverStream(_ context.Context, _ *model.Req
 		return fmt.Errorf("failed to send reply: %w", err)
 	}
 
-	return RunUDPAssociateLoop(udpConn, apicommon.NewPacketOverStreamTunnel(proxyConn), s.config.Resolver)
+	return RunUDPAssociateLoop(udpConn, apicommon.NewPacketOverStreamTunnel(proxyConn), s.config.Resolver, s.udpAssociateChecker(proxyConn))
 }
 
-func (s *Server) handleAssociateDatagram(_ context.Context, _ *model.Request, proxyConn net.Conn) error {
+func (s *Server) handleAssociateDatagram(_ context.Context, req *model.Request, proxyConn net.Conn) error {
 	// Create a UDP listener on a random port.
 	// All the requests associated to this connection will go through this port.
 	udpConn, err := net.ListenUDP("udp", nil)
@@ -166,7 +178,7 @@ func (s *Server) handleAssociateDatagram(_ context.Context, _ *model.Request, pr
 		return fmt.Errorf("failed to send reply: %w", err)
 	}
 
-	return runUDPAssociateDatagramLoop(udpConn, proxyConn, s.config.Resolver)
+	return runUDPAssociateDatagramLoop(udpConn, proxyConn, req, s.config.Resolver, s.udpAssociateChecker(proxyConn))
 }
 
 // handleForwarding forward the request to the egress proxy.
@@ -205,6 +217,7 @@ func (s *Server) handleForwarding(req *model.Request, proxyConn net.Conn, proxy 
 	case constant.Socks5UDPAssociateCmd:
 		return s.handleForwardingUDP(req, proxyConn, egressConn)
 	default:
+		egressConn.Close()
 		return fmt.Errorf("unsupported command: %v", req.Command)
 	}
 }

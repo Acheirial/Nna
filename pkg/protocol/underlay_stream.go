@@ -41,7 +41,7 @@ const (
 	streamOverhead = MetadataLength + cipher.DefaultOverhead*2
 )
 
-var streamReplayCache = replay.NewCache(4*1024*1024, cipher.KeyRefreshInterval*3)
+var streamReplayCache = replay.NewCache(64*1024, cipher.KeyRefreshInterval*3)
 
 type StreamUnderlay struct {
 	baseUnderlay
@@ -87,18 +87,33 @@ func NewStreamUnderlay(
 	if block.IsStateless() {
 		return nil, fmt.Errorf("stream underlay block cipher must be stateful")
 	}
-	remote := addr
+	remotes := []string{addr}
 	if dnsConfig == nil || (!dnsConfig.BypassDialerDNS) {
-		remoteTCPAddr, err := apicommon.ResolveTCPAddr(ctx, resolver, network, addr)
+		remoteTCPAddrs, err := apicommon.ResolveTCPAddrs(ctx, resolver, network, addr)
 		if err != nil {
-			return nil, fmt.Errorf("ResolveTCPAddr() failed: %w", err)
+			return nil, fmt.Errorf("ResolveTCPAddrs() failed: %w", err)
 		}
-		remote = remoteTCPAddr.String()
+		// Try every resolved address in order and keep the first established
+		// connection, so a broken address family doesn't prevent the working one
+		// from being used.
+		remotes = make([]string, 0, len(remoteTCPAddrs))
+		for _, remoteTCPAddr := range remoteTCPAddrs {
+			remotes = append(remotes, remoteTCPAddr.String())
+		}
 	}
 
-	conn, err := dialer.DialContext(ctx, network, remote)
+	var conn net.Conn
+	var err error
+	var dialErrs []error
+	for _, remote := range remotes {
+		conn, err = dialer.DialContext(ctx, network, remote)
+		if err == nil {
+			break
+		}
+		dialErrs = append(dialErrs, err)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("DialContext() failed: %w", err)
+		return nil, fmt.Errorf("DialContext() failed: %w", errors.Join(dialErrs...))
 	}
 	t := &StreamUnderlay{
 		baseUnderlay:       *newBaseUnderlay(true, mtu, trafficPattern),
@@ -227,8 +242,16 @@ func (t *StreamUnderlay) RunEventLoop(ctx context.Context) error {
 			log.Tracef("%v received %v", t, seg)
 		}
 		if seg.serverUserAuthentication.Valid() {
-			if err := validateNewServerSessionSegment(seg); err != nil {
+			if err := validateServerSegmentDirection(seg); err != nil {
 				return stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
+			}
+			// Only openSessionRequest may create a new server session. Other
+			// protocols, such as the closeSessionRequest sent by a client that
+			// closes before its first write, are handled by the dispatch below.
+			if seg.metadata.Protocol() == openSessionRequest {
+				if err := validateNewServerSessionSegment(seg); err != nil {
+					return stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
+				}
 			}
 		}
 		if isSessionProtocol(seg.metadata.Protocol()) {
@@ -464,7 +487,6 @@ func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
 		}
 		t.inBytes.Add(int64(len(encryptedPayload)))
-		streamReplayCache.IsDuplicate(encryptedPayload[:cipher.DefaultOverhead], replay.EmptyTag)
 		decryptedPayload, err = t.recv.Decrypt(encryptedPayload)
 		if err != nil {
 			err = fmt.Errorf("Decrypt() failed: %w", err)
@@ -515,7 +537,6 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 				return nil, stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
 			}
 		}
-		streamReplayCache.IsDuplicate(encryptedPayload[:cipher.DefaultOverhead], replay.EmptyTag)
 		decryptedPayload, err = t.recv.Decrypt(encryptedPayload)
 		if err != nil {
 			err = fmt.Errorf("Decrypt() failed: %w", err)
@@ -641,8 +662,8 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 			offset += wirePayloadLen
 		}
 		copy(dataToSend[offset:], padding2)
-		if _, err := t.conn.Write(dataToSend); err != nil {
-			return fmt.Errorf("Write() failed: %w", err)
+		if err := t.writeWithPossibleFragment(dataToSend); err != nil {
+			return err
 		}
 		t.outBytes.Add(int64(len(dataToSend)))
 	} else {

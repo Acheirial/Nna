@@ -152,7 +152,8 @@ func (s *segment) Less(other *segment) bool {
 	if err != nil {
 		panic(fmt.Sprintf("%v Seq() failed: %v", other, err))
 	}
-	return mySeq < otherSeq
+	// Compare sequence numbers in a wrap-around safe way.
+	return int32(mySeq-otherSeq) < 0
 }
 
 func (s *segment) String() string {
@@ -308,7 +309,7 @@ func (t *segmentTree) MinSeq() (uint32, error) {
 	return seg.Seq()
 }
 
-// MinSeq returns the maximum sequence number in the SegmentTree.
+// MaxSeq returns the maximum sequence number in the SegmentTree.
 func (t *segmentTree) MaxSeq() (uint32, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
