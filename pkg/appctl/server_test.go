@@ -266,33 +266,6 @@ func TestServerApplyReject(t *testing.T) {
 	}
 }
 
-func TestServerDeleteUser(t *testing.T) {
-	beforeServerTest(t)
-	defer afterServerTest(t)
-
-	if err := StoreServerConfig(&pb.ServerConfig{Users: []*pb.User{
-		{Name: proto.String("user1"), Password: proto.String("password1")},
-		{Name: proto.String("user2"), Password: proto.String("password2")},
-	}}); err != nil {
-		t.Fatalf("StoreServerConfig() failed: %v", err)
-	}
-
-	names := []string{"user2", "user3", "user4"}
-	if err := DeleteServerUsers(names); err != nil {
-		t.Errorf("DeleteUsers() failed: %v", err)
-	}
-	config, err := LoadServerConfig()
-	if err != nil {
-		t.Fatalf("LoadServerConfig() failed: %v", err)
-	}
-	if len(config.GetUsers()) != 1 {
-		t.Fatalf("want 1 user, got %d user(s)", len(config.GetUsers()))
-	}
-	if config.GetUsers()[0].GetName() != "user1" {
-		t.Errorf("want user name %q, got %q", "user1", config.GetUsers()[0].GetName())
-	}
-}
-
 func TestStoreServerConfigHashesPasswords(t *testing.T) {
 	beforeServerTest(t)
 	defer afterServerTest(t)
@@ -408,6 +381,19 @@ func afterServerTest(t *testing.T) {
 	if err := deleteServerConfigFile(); err != nil {
 		t.Fatalf("failed to clean server config file after the test")
 	}
+}
+
+// deleteServerConfigFile deletes the server config file.
+func deleteServerConfigFile() error {
+	path, _, err := serverConfigFilePath()
+	if err != nil {
+		return fmt.Errorf("serverConfigFilePath() failed: %w", err)
+	}
+	err = os.Remove(path)
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func TestServerListenIPAddressConfig(t *testing.T) {

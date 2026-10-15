@@ -16,6 +16,7 @@
 package appctl
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -352,62 +353,6 @@ func TestClientStoreConfigToJSON(t *testing.T) {
 	afterClientTest(t)
 }
 
-func TestClientDeleteProfile(t *testing.T) {
-	beforeClientTest(t)
-
-	configFile := "testdata/client_before_delete_profile.json"
-	if err := ApplyJSONClientConfig(configFile); err != nil {
-		t.Fatalf("ApplyJSONClientConfig(%q) failed: %v", configFile, err)
-	}
-	if err := DeleteClientConfigProfile("default"); err != nil {
-		t.Errorf("DeleteClientConfigProfile(%q) failed: %v", "default", err)
-	}
-	if err := DeleteClientConfigProfile("this profile doesn't exist"); err != nil {
-		t.Errorf("DeleteClientConfigProfile(%q) failed: %v", "this profile doesn't exist", err)
-	}
-	got, err := LoadClientConfig()
-	if err != nil {
-		t.Errorf("LoadClientConfig() failed: %v", err)
-	}
-
-	// Compare the result with client_after_delete_profile.json
-	wantFile := "testdata/client_after_delete_profile.json"
-	if err := deleteClientConfigFile(); err != nil {
-		t.Fatalf("failed to delete client config file")
-	}
-	if err := StoreClientConfig(&pb.ClientConfig{}); err != nil {
-		t.Fatalf("failed to create empty client config file")
-	}
-	if err := ApplyJSONClientConfig(wantFile); err != nil {
-		t.Fatalf("ApplyJSONClientConfig(%q) failed: %v", wantFile, err)
-	}
-	want, err := LoadClientConfig()
-	if err != nil {
-		t.Errorf("LoadClientConfig() failed: %v", err)
-	}
-	if !proto.Equal(got, want) {
-		gotJSON, _ := common.MarshalJSON(got)
-		wantJSON, _ := common.MarshalJSON(want)
-		t.Errorf("client config doesn't equal:\ngot = %v\nwant = %v", string(gotJSON), string(wantJSON))
-	}
-
-	afterClientTest(t)
-}
-
-func TestClientDeleteProfileRejectActiveProfile(t *testing.T) {
-	beforeClientTest(t)
-
-	configFile := "testdata/client_before_delete_profile.json"
-	if err := ApplyJSONClientConfig(configFile); err != nil {
-		t.Fatalf("ApplyJSONClientConfig(%q) failed: %v", configFile, err)
-	}
-	if err := DeleteClientConfigProfile("new"); err == nil {
-		t.Errorf("want error in DeleteClientConfigProfile(%q), got no error", "new")
-	}
-
-	afterClientTest(t)
-}
-
 func beforeClientTest(t *testing.T) {
 	dir := os.TempDir()
 	if dir == "" {
@@ -426,4 +371,17 @@ func afterClientTest(t *testing.T) {
 	if err := deleteClientConfigFile(); err != nil {
 		t.Fatalf("failed to clean client config file after the test")
 	}
+}
+
+// deleteClientConfigFile deletes the client config file.
+func deleteClientConfigFile() error {
+	path, _, err := clientConfigFilePath()
+	if err != nil {
+		return fmt.Errorf("clientConfigFilePath() failed: %w", err)
+	}
+	err = os.Remove(path)
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }

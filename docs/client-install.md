@@ -82,11 +82,19 @@ mieru replace config <FILE>
 3. 在 `profiles` -> `servers` -> `ipAddress` 属性中，填写代理服务器的公网地址。支持 IPv4 和 IPv6 地址。
 4. 【可选】如果你为代理服务器注册了域名，请在 `profiles` -> `servers` -> `domainName` 中填写域名。否则，请勿修改这个属性。
 5. 在 `profiles` -> `servers` -> `portBindings` -> `port` 中填写 mita 监听的 TCP 或 UDP 端口号。这个端口号必须与代理服务器中的设置相同。如果想要监听连续的端口号，也可以改为使用 `portRange` 属性。
-6. 【可选】请为 `profiles` -> `mtu` 属性中指定一个从 1280 到 1400 之间的值。默认值为 1400。这个值必须与代理服务器相同。
+6. 【可选】请为 `profiles` -> `mtu` 属性中指定一个从 1280 到 1500 之间的值。默认值为 1400。这个值必须与代理服务器相同；只有两端取值一致，才能避免因分片导致的性能下降。
 7. 【可选】如果想要调整多路复用的频率，是更多地创建新连接，还是更多地重用旧连接，可以为 `profiles` -> `multiplexing` -> `level` 属性设定一个值。这里可以使用的值包括 `MULTIPLEXING_OFF`, `MULTIPLEXING_LOW`, `MULTIPLEXING_MIDDLE`, `MULTIPLEXING_HIGH`。其中 `MULTIPLEXING_OFF` 会关闭多路复用功能。默认值为 `MULTIPLEXING_LOW`。
 8. 【可选】如果想开启 0-RTT 握手，请将 `profiles` -> `handshakeMode` 属性的值设置为 `HANDSHAKE_NO_WAIT`，否则请设置为 `HANDSHAKE_STANDARD`。默认值为 `HANDSHAKE_STANDARD`。
 9. 请为 `socks5Port` 属性指定一个从 1025 到 65535 之间的数值。
 10. 【可选】如果客户端需要为局域网中的其他设备提供代理服务，请将 `socks5ListenLAN` 属性设置为 `true`。
+
+用户与端口设置的取值需通过校验，否则 `mieru apply config` 会报错：
+
+- `profiles` -> `user` -> `name` 不能为空，且不超过 64 字节。
+- `user` 必须设置 `password` 或 `hashedPassword` 之一。`password` 是明文口令，长度必须在 8 到 64 字节之间，不能全部由数字组成，也不能是同一个字符的重复。`hashedPassword` 是口令 SHA-256 摘要的十六进制表示，必须恰好为 64 个十六进制字符（32 字节）。如果同时设置 `password` 和 `hashedPassword`，两者必须一致。
+- 同一份配置中不允许存在同名的 profile。
+- 每条 `portBindings` 不能同时设置 `port` 和 `portRange`。
+- `multiplexing` -> `level` 只接受 `MULTIPLEXING_OFF`、`MULTIPLEXING_LOW`、`MULTIPLEXING_MIDDLE`、`MULTIPLEXING_HIGH` 等合法的枚举值，非法取值会报错。
 
 > **注意**：本版本已移除 HTTP / HTTPS 代理功能、客户端自动更新检查功能与本地控制接口，配置中不再支持 `httpProxyPort`、`httpProxyListenLAN`、`noCheckUpdate`、`rpcPort` 和客户端 `advancedSettings` 字段。如果你从旧版本升级，请先从配置文件中删除这些字段，否则 `mieru apply config`、`mieru import config` 或 `mieru run` 会报未知字段（unknown field）错误。
 
@@ -118,7 +126,7 @@ mieru start
 mieru run
 ```
 
-mieru 客户端不会与系统一同启动。在重新启动计算机后，需要手动使用 `mieru start` 指令启动客户端。客户端守护进程的 pid 记录在客户端配置目录下的 `mieru.pid` 文件中。
+mieru 客户端不会与系统一同启动。在重新启动计算机后，需要手动使用 `mieru start` 指令启动客户端。`mieru start` 会先加载并校验客户端配置，配置非法时立即报错、不会启动守护进程。客户端守护进程的 pid 记录在客户端配置目录下的 `mieru.pid` 文件中。该文件在 Linux 上记录进程号与进程的启动时刻（格式为 `<pid> <starttime>`），`mieru stop` 在发送信号前会核对进程身份，避免误伤恰好复用了同一 PID 的其他进程；在无法获取启动时刻的平台上，该文件退化为只记录进程号。文件路径保持不变，仍为客户端配置目录下的 `mieru.pid`。
 
 如果需要停止 mieru 客户端，请输入指令
 
@@ -152,7 +160,9 @@ curl -x socks5://127.0.0.1:1080 https://example.com
 
 Chrome / Firefox 等浏览器可以通过安装插件，使用 socks5 代理访问网站。关于 socks5 代理的地址，请填写 `127.0.0.1:xxxx`，其中 `xxxx` 是客户端设置中 `socks5Port` 的值。
 
-mieru 不使用 socks5 用户名和密码进行身份验证。
+默认情况下，mieru 不要求应用程序提供 socks5 用户名和密码；如需开启验证，请参见下文 [socks5 用户名和密码验证](#socks5-用户名和密码验证)。
+
+客户端内置的 socks5 服务端只接受版本号为 `5` 的请求，其他版本字节会被拒绝。对于 socks5 UDP ASSOCIATE，客户端会按请求中声明的客户端地址校验数据报来源，来源不符的数据报会被丢弃。
 
 ## Clash 设置
 

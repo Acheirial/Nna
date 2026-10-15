@@ -230,31 +230,6 @@ func ApplyURLClientConfig(u string) error {
 	return applyClientConfig(c)
 }
 
-// DeleteClientConfigProfile deletes a profile stored in client config.
-// The profile to delete can't be the active profile.
-func DeleteClientConfigProfile(profileName string) error {
-	config, err := LoadClientConfig()
-	if err != nil {
-		return fmt.Errorf("LoadClientConfig() failed: %w", err)
-	}
-	if config.GetActiveProfile() == profileName {
-		return fmt.Errorf("activeProfile %q can't be deleted", profileName)
-	}
-	profiles := config.GetProfiles()
-	updated := make([]*pb.ClientProfile, 0)
-	for _, profile := range profiles {
-		if profile.GetProfileName() == profileName {
-			continue
-		}
-		updated = append(updated, profile)
-	}
-	config.Profiles = updated
-	if err = StoreClientConfig(config); err != nil {
-		return fmt.Errorf("StoreClientConfig() failed: %w", err)
-	}
-	return nil
-}
-
 // ValidateClientConfigPatch validates a patch of client config.
 //
 // A client config patch must satisfy:
@@ -455,17 +430,4 @@ func mergeClientConfigByProfile(dst, src *pb.ClientConfig) {
 
 	dst.Socks5ListenLAN = socks5ListenLAN
 	dst.Socks5Authentication = socks5Authentication
-}
-
-// deleteClientConfigFile deletes the client config file.
-func deleteClientConfigFile() error {
-	path, _, err := clientConfigFilePath()
-	if err != nil {
-		return fmt.Errorf("clientConfigFilePath() failed: %w", err)
-	}
-	err = os.Remove(path)
-	if err != nil && os.IsNotExist(err) {
-		return nil
-	}
-	return err
 }

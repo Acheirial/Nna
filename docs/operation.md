@@ -27,7 +27,7 @@
 mita status
 ```
 
-如果输出 `mita server status is "RUNNING"`，说明代理服务正在运行。如果输出 `"STOPPED"`，说明守护进程没有在运行，可以用 `mita start` 启动。
+如果输出 `mita server status is "RUNNING"`，说明代理服务正在运行。如果输出 `"STOPPED"`，说明守护进程没有在运行，可以用 `mita start` 启动。`mita start`（以及 `mieru start`）会先校验配置，配置非法时立即报错且不会启动守护进程，因此如果 `start` 立即失败，请先检查配置。
 
 ### 客户端
 
@@ -142,7 +142,7 @@ mieru apply config <client_config.json>
 | 2 | `mita status`（服务器端） | 确认代理服务处于 `RUNNING` 状态。 |
 | 3 | `mieru status`（客户端） | 确认客户端已启动。 |
 | 4 | `mieru describe config` 与 `mita describe config` | 对比**端口**、**协议**、**用户名**和**密码**，必须完全一致。 |
-| 5 | `date`（两端均执行） | 确认系统时间偏差在几分钟以内。 |
+| 5 | `date`（两端均执行） | 确认两端时钟偏差不超过 1 分钟；偏差超过 1 分钟会握手失败。 |
 | 6 | 在两端启用调试日志并重启 | 在日志中查找 `handshake`、`cipher` 或 `underlay` 相关错误；服务器的解密失败通常表现为无法识别用户或密钥不匹配。 |
 | 7 | 检查服务器防火墙 | 确认配置文件里 `portBindings` 声明的 TCP / UDP 端口对公网开放。 |
 
@@ -160,7 +160,7 @@ mieru apply config <client_config.json>
 | 可能原因 | 如何检查 | 解决方法 |
 |----------|----------|----------|
 | TCP 拥塞控制未使用 BBR | `sysctl net.ipv4.tcp_congestion_control` | 参见 [BBR 拥塞控制算法](./server-install.md#bbr-拥塞控制算法)。 |
-| MTU 不匹配导致分片 | `ping -M do -s 1372 <server>`（Linux） | 在两端将 `mtu` 设为 1280 后再次测试。 |
+| MTU 不匹配导致分片 | `ping -M do -s 1372 <server>`（Linux） | 在两端将 `mtu` 设为相同的值（取值范围 1280 到 1500，例如 1280）后再次测试。 |
 | 多路复用过于激进 | 调试日志显示短时间内建立大量连接 | 将 `multiplexing` 的 `level` 降为 `MULTIPLEXING_LOW` 或 `MULTIPLEXING_MIDDLE`。 |
 | 服务器负载过高 | `top` / `uptime` 查看 CPU 与负载 | 减少单机用户数量，或增加服务器数量分摊流量。 |
 | 加密与填充开销 | 启用了低熵模式或较大的填充长度 | 参见[流量模式](./traffic-pattern.md)，适当降低填充与低熵模式的强度。 |

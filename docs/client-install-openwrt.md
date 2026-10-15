@@ -16,6 +16,6 @@ OpenWrt 是一个极简 Linux 环境，在 OpenWrt 环境运行 mieru 客户端�
 
 ## 启动客户端
 
-需要启动和停止客户端时，请勿使用 `mieru start` 和 `mieru stop` 指令。请将项目根目录下的 `configs/examples/etc_initd_mieru` 文件复制并保存至 `/etc/init.d/mieru` 文件，并赋予可执行权限。此后，mieru 客户端将在 OpenWrt 开机后自行启动。
+需要启动和停止客户端时，请通过 init 脚本操作，不要绕过它直接调用 `mieru start` 或 `mieru stop`（脚本内部正是用这两条指令管理进程与 pid 文件）。请将项目根目录下的 `configs/examples/etc_initd_mieru` 文件复制并保存至 `/etc/init.d/mieru` 文件，并赋予可执行权限。此后，mieru 客户端将在 OpenWrt 开机后自行启动。
 
 如果需要手动启动或停止 mieru 客户端，可以使用指令 `/etc/init.d/mieru start` 和 `/etc/init.d/mieru stop`。

@@ -28,6 +28,7 @@ import (
 	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/common"
 	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/mathext"
 	"github.com/enfein/mieru/v3/pkg/protocol/serveruser"
 	"github.com/enfein/mieru/v3/pkg/replay"
 	"github.com/enfein/mieru/v3/pkg/stderror"
@@ -713,8 +714,14 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 
 	if ss, ok := toSessionStruct(seg.metadata); ok {
 		maxPaddingSize := maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(ss.payloadLen), 0, u.trafficPattern, endPadding)
+		// The padding strategy depends on the bit distribution of the
+		// plaintext data to protect. The metadata is marshalled again below
+		// with the final suffix length.
+		existingData := make([]byte, 0, MetadataLength+len(seg.payload))
+		existingData = append(existingData, seg.metadata.Marshal()...)
+		existingData = append(existingData, seg.payload...)
 		padding := newPadding(
-			buildRecommendedPaddingOpts(maxPaddingSize, packetOverhead+int(ss.payloadLen), blockCipher.BlockContext().UserName),
+			buildRecommendedPaddingOpts(maxPaddingSize, existingData, blockCipher.BlockContext().UserName),
 		)
 		ss.suffixLen = uint8(len(padding))
 		if log.IsLevelEnabled(log.TraceLevel) {
@@ -751,13 +758,19 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 				return fmt.Errorf("prepare low entropy payload failed: %w", err)
 			}
 		}
+		maxMiddlePaddingSize := maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(das.payloadLen), 0, u.trafficPattern, middlePadding)
 		padding1 := newPadding(paddingOpts{
-			maxLen: maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(das.payloadLen), 0, u.trafficPattern, middlePadding),
-			ascii:  &asciiPaddingOpts{},
+			maxLen: maxMiddlePaddingSize,
+			ascii: &asciiPaddingOpts{
+				minConsecutiveASCIILen: mathext.Min(maxMiddlePaddingSize, recommendedConsecutiveASCIILen),
+			},
 		})
+		maxEndPaddingSize := maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(das.payloadLen), len(padding1), u.trafficPattern, endPadding)
 		padding2 := newPadding(paddingOpts{
-			maxLen: maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(das.payloadLen), len(padding1), u.trafficPattern, endPadding),
-			ascii:  &asciiPaddingOpts{},
+			maxLen: maxEndPaddingSize,
+			ascii: &asciiPaddingOpts{
+				minConsecutiveASCIILen: mathext.Min(maxEndPaddingSize, recommendedConsecutiveASCIILen),
+			},
 		})
 		das.prefixLen = uint8(len(padding1))
 		das.suffixLen = uint8(len(padding2))

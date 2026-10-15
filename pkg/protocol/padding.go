@@ -55,6 +55,9 @@ type asciiPaddingOpts struct {
 
 type entropyPaddingOpts struct {
 	// The existing data that the padding will be attached to.
+	//
+	// It must be the real content to protect instead of a random buffer,
+	// otherwise the padding degenerates into a constant block.
 	existingData []byte
 
 	// The target probability of bit 0 or bit 1, whichever is lower,
@@ -105,33 +108,58 @@ func maxPaddingSize(mtu int, transport common.TransportProtocol, fragmentSize in
 	return mathext.Min(res-int(existingPaddingSize), 255)
 }
 
-func buildRecommendedPaddingOpts(maxLen, randomDataLen int, strategySource string) paddingOpts {
+func buildRecommendedPaddingOpts(maxLen int, existingData []byte, strategySource string) paddingOpts {
+	asciiOpts := paddingOpts{
+		maxLen: maxLen,
+		ascii: &asciiPaddingOpts{
+			minConsecutiveASCIILen: mathext.Min(maxLen, recommendedConsecutiveASCIILen),
+		},
+	}
+
 	// strategySource decides the padding strategy.
-	strategy := rng.FixedIntV(2, strategySource)
-	if strategy == 0 {
+	if rng.FixedIntV(2, strategySource) == 0 {
 		// Use ASCII.
-		return paddingOpts{
-			maxLen: maxLen,
-			ascii: &asciiPaddingOpts{
-				minConsecutiveASCIILen: mathext.Min(maxLen, recommendedConsecutiveASCIILen),
-			},
-		}
-	} else {
-		// Use entropy.
-		randomData := make([]byte, randomDataLen)
-		for {
-			if _, err := crand.Read(randomData); err == nil {
-				break
-			}
-		}
+		return asciiOpts
+	}
+
+	// Use entropy. The bit distribution of existingData decides how many
+	// bits in the padding are set to the less frequent bit value.
+	if _, _, minPaddingBytes := entropyPaddingParams(existingData, recommendedTargetProbability); minPaddingBytes < maxLen {
 		return paddingOpts{
 			maxLen: maxLen,
 			entropy: &entropyPaddingOpts{
-				existingData:      randomData,
+				existingData:      existingData,
 				targetProbability: recommendedTargetProbability,
 			},
 		}
 	}
+
+	// The target probability can't be reached with maxLen bytes of padding.
+	// In this case the entropy padding is a constant block of the more
+	// frequent bit value, which is easy to locate, so use the ASCII strategy
+	// instead.
+	return asciiOpts
+}
+
+// entropyPaddingParams returns the bit value with the lower probability in
+// data, the number of such bits in data, and the shortest padding length in
+// bytes that is needed to lower the probability of that bit in data plus
+// padding to targetProbability.
+func entropyPaddingParams(data []byte, targetProbability float64) (lowerBit byte, lowerBitCount, minPaddingBytes int) {
+	dist := common.ToBitDistribution(data)
+	lowerBitCount = dist.Bit0Count
+	if dist.Bit1 < dist.Bit0 {
+		lowerBit = byte(1)
+		lowerBitCount = dist.Bit1Count
+	}
+
+	// Let x = lowerBitCount, t = targetProbability, e = data bits, p = padding bits.
+	// We need to find p that satisfy x = t * (e + p).
+	// Solve the equation gives p = x / t - e.
+	minPaddingBits := int(float64(lowerBitCount)/targetProbability - float64(len(data)*8))
+	minPaddingBits = mathext.Max(minPaddingBits, 0)
+	minPaddingBytes = (minPaddingBits + 7) / 8
+	return
 }
 
 func newPadding(opts paddingOpts) []byte {
@@ -140,7 +168,12 @@ func newPadding(opts paddingOpts) []byte {
 			panic(fmt.Sprintf("Invalid padding options: maxLen %d is smaller than minConsecutiveASCIILen %d", opts.maxLen, opts.ascii.minConsecutiveASCIILen))
 		}
 
-		length := rng.Intn(opts.maxLen-opts.ascii.minConsecutiveASCIILen+1) + opts.ascii.minConsecutiveASCIILen
+		// Pick the length uniformly from [lower, maxLen]. The lower bound is
+		// at least 1 so that a zero length padding, which reveals the exact
+		// payload length, is not generated.
+		lower := mathext.Max(opts.ascii.minConsecutiveASCIILen, 1)
+		lower = mathext.Min(lower, opts.maxLen)
+		length := lower + mrand.Intn(opts.maxLen-lower+1)
 		p := make([]byte, length)
 		for {
 			if _, err := crand.Read(p); err == nil {
@@ -158,57 +191,82 @@ func newPadding(opts paddingOpts) []byte {
 			panic(fmt.Sprintf("Invalid padding options: targetProbability %f is out of range (0.0, 0.5]", opts.entropy.targetProbability))
 		}
 
-		currentBitDistribution := common.ToBitDistribution(opts.entropy.existingData)
+		lowerBit, lowerBitCount, minPaddingBytes := entropyPaddingParams(opts.entropy.existingData, opts.entropy.targetProbability)
 
-		// Determine which bit (0 or 1) has the lower probability.
-		lowerBit := byte(0)
-		lowerBitCount := currentBitDistribution.Bit0Count
-		if currentBitDistribution.Bit1 < currentBitDistribution.Bit0 {
-			lowerBit = byte(1)
-			lowerBitCount = currentBitDistribution.Bit1Count
-		}
-
-		// Let x = lowerBitCount, t = targetProbability, e = existingData bits, p = padding bits.
-		// We need to find p that satisfy x = t * (e + p).
-		// Solve the equation gives p = x / t - e.
-		minPaddingBits := int(float64(lowerBitCount)/opts.entropy.targetProbability - float64(len(opts.entropy.existingData)*8))
-		minPaddingBits = mathext.Max(minPaddingBits, 0)
-		minPaddingBytes := (minPaddingBits + 7) / 8
-
-		// Determine the padding length.
-		var length int
-		if minPaddingBytes >= opts.maxLen {
-			length = opts.maxLen
-		} else {
-			length = rng.Intn(opts.maxLen-minPaddingBytes+1) + minPaddingBytes
-		}
+		// Pick the padding length uniformly from [lower, maxLen]. The lower
+		// bound is at least 1 so that a zero length padding, which reveals
+		// the exact payload length, is not generated. It is also at least
+		// minPaddingBytes+1, otherwise the padding contains no bit with the
+		// lower probability and degenerates into a constant block.
+		lower := mathext.Max(minPaddingBytes+1, 1)
+		lower = mathext.Min(lower, opts.maxLen)
+		length := lower + mrand.Intn(opts.maxLen-lower+1)
 		p := make([]byte, length)
 
-		// Determine the number of bits that can flip in the padding.
+		// Determine the number of bits in the padding that use the bit value
+		// with the lower probability in the existing data.
 		flip := mathext.Max(int(float64(len(opts.entropy.existingData)+length)*8*opts.entropy.targetProbability)-lowerBitCount, 0)
 		flip = mathext.Min(flip, length*8)
 
-		if lowerBit == 0 {
-			// Set all the bits in the padding to be 1.
-			common.FillBytes(p, 0xFF)
-
-			// Change at most flip bits in p to bit 0.
-			for i := 0; i < flip; i++ {
-				j := mrand.Intn(len(p) * 8)
-				byteIndex := j / 8
-				bitIndex := j % 8
-				p[byteIndex] &^= (1 << bitIndex)
-			}
-		} else {
-			// Change at most flip bits in p to bit 1.
-			for i := 0; i < flip; i++ {
-				j := mrand.Intn(len(p) * 8)
-				byteIndex := j / 8
-				bitIndex := j % 8
-				p[byteIndex] |= (1 << bitIndex)
+		// Fill the padding with random bytes and then adjust the number of
+		// lower probability bits to exactly flip. Different from filling
+		// every bit with the higher probability value, the padding bytes have
+		// no constant block texture as long as the target probability is
+		// reachable within maxLen, i.e. flip is not 0. When maxLen is too
+		// small to dilute the lower probability bit, the padding is the best
+		// effort fill of the higher probability bit.
+		for {
+			if _, err := crand.Read(p); err == nil {
+				break
 			}
 		}
+		setBitCount(p, lowerBit, flip)
 		return p
 	}
 	panic("Detailed padding options are not provided")
+}
+
+// setBitCount rewrites p, so that exactly want bits are equal to bit and the
+// remaining bits are equal to the other bit value. want is clamped to
+// [0, len(p)*8]. The rewritten positions are selected in a random order, thus
+// the byte distribution of p stays close to uniform.
+func setBitCount(p []byte, bit byte, want int) {
+	if bit != 0 && bit != 1 {
+		panic(fmt.Sprintf("Invalid bit value %d", bit))
+	}
+	maxWant := len(p) * 8
+	if want < 0 {
+		want = 0
+	}
+	if want > maxWant {
+		want = maxWant
+	}
+	dist := common.ToBitDistribution(p)
+	count := dist.Bit0Count
+	if bit == 1 {
+		count = dist.Bit1Count
+	}
+	if count == want {
+		return
+	}
+
+	// The bits equal to src are rewritten to the other bit value. The
+	// distance between count and want is the number of bits to rewrite.
+	delta := count - want
+	src := bit
+	if delta < 0 {
+		delta = -delta
+		src = 1 - bit
+	}
+	start := mrand.Intn(maxWant)
+	for i := 0; i < maxWant && delta > 0; i++ {
+		j := (start + i) % maxWant
+		byteIndex := j / 8
+		bitIndex := uint(j % 8)
+		if (p[byteIndex]>>bitIndex)&1 != src {
+			continue
+		}
+		p[byteIndex] ^= 1 << bitIndex
+		delta--
+	}
 }

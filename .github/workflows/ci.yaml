@@ -8,9 +8,10 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v6
       - name: Set up Go
+        # Keep the toolchain in sync with go.mod and with the other workflows.
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - name: Build binaries and run unit tests
         run: make lib
       - name: Upload code coverage

@@ -1,5 +1,12 @@
+# Benchmarks are indicative only: GitHub-hosted runner performance is noisy and
+# changes between runner images, so treat the results as a trend to look back at
+# rather than a stable performance gate.
 name: benchmark
-on: workflow_dispatch
+on:
+  # Triggered manually and once a week, so the benchmarks don't rot.
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'
 jobs:
   run-benchmark:
     runs-on: ubuntu-latest

@@ -13,41 +13,32 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//go:build android || darwin || linux
+//go:build android || darwin || dragonfly || freebsd || linux || netbsd || openbsd
 
 package sockopts
 
 import (
-	"syscall"
+	"fmt"
 
 	"golang.org/x/sys/unix"
 )
 
-// ReuseAddrPort sets SO_REUSEADDR and SO_REUSEPORT options to a given connection.
-func ReuseAddrPort() Control {
-	return func(_, _ string, conn syscall.RawConn) error {
-		var err error
-		conn.Control(func(fd uintptr) { err = ReuseAddrPortRawErr()(fd) })
-		return err
+// setReuseSockopts sets SO_REUSEADDR, and optionally SO_REUSEPORT, to fd.
+//
+// This file covers Linux, Android, macOS, iOS, and the BSDs, where
+// golang.org/x/sys/unix exposes SO_REUSEPORT. Android satisfies the linux build
+// tag and iOS satisfies the darwin build tag. AIX and z/OS expose the constant
+// too, but mieru is not built or released for them, so their implementation and
+// behavior are not verified, and they are handled in reuse.go.
+func setReuseSockopts(fd uintptr, reusePort bool) error {
+	if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		return fmt.Errorf("setsockopt SO_REUSEADDR failed: %w", err)
 	}
-}
-
-func ReuseAddrPortRaw() RawControl {
-	return func(fd uintptr) {
-		ReuseAddrPortRawErr()(fd)
-	}
-}
-
-func ReuseAddrPortRawErr() RawControlErr {
-	return func(fd uintptr) error {
-		// Set SO_REUSEADDR
-		if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
-			return err
-		}
-		// Set SO_REUSEPORT
-		if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
-			return err
-		}
+	if !reusePort {
 		return nil
 	}
+	if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+		return fmt.Errorf("setsockopt SO_REUSEPORT failed: %w", err)
+	}
+	return nil
 }

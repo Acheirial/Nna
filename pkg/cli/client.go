@@ -320,8 +320,16 @@ var clientRunFunc = func(s []string) error {
 		Resolver:         resolver,
 		HandshakeTimeout: 10 * time.Second,
 	}
-	if activeProfile.GetHandshakeMode() == appctlpb.HandshakeMode_HANDSHAKE_NO_WAIT {
+	// HANDSHAKE_DEFAULT and HANDSHAKE_STANDARD are equivalent: both use the
+	// standard handshake that waits for the server. An unknown mode is rejected
+	// instead of silently falling back to the standard handshake.
+	switch activeProfile.GetHandshakeMode() {
+	case appctlpb.HandshakeMode_HANDSHAKE_DEFAULT, appctlpb.HandshakeMode_HANDSHAKE_STANDARD:
+		// Use the default handshake behavior.
+	case appctlpb.HandshakeMode_HANDSHAKE_NO_WAIT:
 		socks5Config.HandshakeNoWait = true
+	default:
+		return fmt.Errorf("invalid handshake mode %d in profile %q", activeProfile.GetHandshakeMode(), activeProfile.GetProfileName())
 	}
 	socks5Server, err := socks5.New(socks5Config)
 	if err != nil {
@@ -388,7 +396,7 @@ var clientRunFunc = func(s []string) error {
 
 	log.Infof("mieru client exit now")
 	if serveFailed != nil {
-		return fmt.Errorf("run socks5 server failed: %w", serveFailed)
+		return fmt.Errorf(stderror.RunSocks5ServerFailedErr, serveFailed)
 	}
 	return nil
 }

@@ -16,31 +16,8 @@
 package common
 
 import (
-	"bytes"
 	"testing"
 )
-
-func TestFillBytes(t *testing.T) {
-	tests := []struct {
-		name  string
-		input []byte
-		value byte
-		want  []byte
-	}{
-		{"Fill with zero", make([]byte, 5), 0, []byte{0, 0, 0, 0, 0}},
-		{"Fill with one", make([]byte, 5), 1, []byte{1, 1, 1, 1, 1}},
-		{"Fill with 0xFF", make([]byte, 5), 0xFF, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			FillBytes(tt.input, tt.value)
-			if !bytes.Equal(tt.input, tt.want) {
-				t.Errorf("FillBytes() = %v, want %v", tt.input, tt.want)
-			}
-		})
-	}
-}
 
 func TestIsBitsAllZero(t *testing.T) {
 	tests := []struct {

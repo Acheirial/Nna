@@ -51,6 +51,14 @@ func NewConfig(original *appctlpb.TrafficPattern) (*Config, error) {
 		effective: proto.Clone(original).(*appctlpb.TrafficPattern),
 	}
 	c.generateImplicitTrafficPattern()
+	// Validate() only checks cross-field constraints when both fields are set
+	// explicitly. Implicit generation may still produce an invalid combination,
+	// e.g. a generated nonce minLen greater than a user provided maxLen, so
+	// normalize the generated pattern and validate the effective result again.
+	c.normalizeImplicitTrafficPattern()
+	if err := Validate(c.effective); err != nil {
+		return nil, fmt.Errorf("generated TrafficPattern is invalid: %w", err)
+	}
 	return c, nil
 }
 
@@ -118,6 +126,23 @@ func (c *Config) generateImplicitTrafficPattern() {
 	c.generateNoncePattern(seed, unlockAll)
 	c.generatePaddingPattern(seed, unlockAll)
 	c.generateLowEntropyPattern(seed, unlockAll)
+}
+
+// normalizeImplicitTrafficPattern fixes the cross-field constraint violations
+// that Validate() cannot catch on the original pattern. It leaves an already
+// valid effective pattern unchanged.
+func (c *Config) normalizeImplicitTrafficPattern() {
+	n := c.effective.GetNonce()
+	if n == nil {
+		return
+	}
+	if n.MinLen != nil && n.MaxLen != nil && n.GetMinLen() > n.GetMaxLen() {
+		// The implicitly generated minLen exceeds the maxLen provided by the
+		// user. The explicit maxLen takes precedence, so lower minLen to match
+		// it rather than producing an invalid range (which would be silently
+		// clamped at runtime).
+		n.MinLen = proto.Int32(n.GetMaxLen())
+	}
 }
 
 func (c *Config) generateTCPFragment(seed int, unlockAll bool) {

@@ -361,36 +361,6 @@ func MergeServerConfig(dst, src *pb.ServerConfig) error {
 	return nil
 }
 
-// DeleteServerUsers deletes the list of users from server config.
-func DeleteServerUsers(names []string) error {
-	config, err := LoadServerConfig()
-	if err != nil {
-		return fmt.Errorf("LoadServerConfig() failed: %w", err)
-	}
-	users := config.GetUsers()
-	remaining := make([]*pb.User, 0)
-	// The complexity of the following algorithm is O(total_users * users_to_delete).
-	// This seems to be high, however in reality the number of users to delete is typically 1,
-	// so it is faster than using a set to find the difference, then sort the users by name.
-	for _, user := range users {
-		shouldDelete := false
-		for _, toDelete := range names {
-			if user.GetName() == toDelete {
-				shouldDelete = true
-				break
-			}
-		}
-		if !shouldDelete {
-			remaining = append(remaining, user)
-		}
-	}
-	config.Users = remaining
-	if err := StoreServerConfig(config); err != nil {
-		return fmt.Errorf("StoreServerConfig() failed: %w", err)
-	}
-	return nil
-}
-
 // ValidateServerConfigPatch validates a patch of server config.
 //
 // A server config patch must satisfy:
@@ -409,7 +379,7 @@ func DeleteServerUsers(names []string) error {
 // 6.1. each IP range is either "*" or a valid IP CIDR
 // 6.2. each domain name is not empty, and does not begin or end with a dot
 // 6.3. if the action is "PROXY", the proxy is defined
-// 7. DNS host mapping is valid
+// 7. DNS configuration is valid
 // 8. if set, traffic pattern is valid
 func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 	if err := appctlcommon.ValidateServerListenIPAddress(patch.GetListenIPAddress()); err != nil {
@@ -495,6 +465,9 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 	if _, err := appctlcommon.TransformDNSHosts(patch.GetDns()); err != nil {
 		return fmt.Errorf("invalid DNS configuration: %w", err)
 	}
+	if err := common.ValidateDualStackPreference(common.DualStackPreference(patch.GetDns().GetDualStack())); err != nil {
+		return fmt.Errorf("invalid DNS configuration: %w", err)
+	}
 	if err := trafficpattern.Validate(patch.GetTrafficPattern()); err != nil {
 		return fmt.Errorf("invalid traffic pattern: %w", err)
 	}
@@ -545,17 +518,4 @@ func serverConfigFilePath() (string, ConfigFileType, error) {
 		return cachedServerConfigFilePath, FindConfigFileType(cachedServerConfigFilePath), nil
 	}
 	return "", INVALID_CONFIG_FILE_TYPE, fmt.Errorf("server config file path is empty")
-}
-
-// deleteServerConfigFile deletes the server config file.
-func deleteServerConfigFile() error {
-	path, _, err := serverConfigFilePath()
-	if err != nil {
-		return fmt.Errorf("serverConfigFilePath() failed: %w", err)
-	}
-	err = os.Remove(path)
-	if err != nil && os.IsNotExist(err) {
-		return nil
-	}
-	return err
 }

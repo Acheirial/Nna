@@ -1,5 +1,9 @@
 name: fuzzing
-on: workflow_dispatch
+on:
+  # Triggered manually and once a week, so the fuzz targets don't rot.
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
 jobs:
   run-fuzzing:
     runs-on: ubuntu-latest

@@ -355,6 +355,10 @@ func TestDiscoverySharedCredentialContextsAreIndependent(t *testing.T) {
 	}
 }
 
+// assertDiscovery verifies the discovered identity, the number of cipher
+// trials and the candidate phase of tryState that produced the match.
+// wantOrigin is asserted through discoveryResult.origin, which exists only so
+// tests can observe the phase order.
 func assertDiscovery(t *testing.T, result discoveryResult, wantUser string, wantOrigin matchOrigin, wantAttempts int) {
 	t.Helper()
 	if result.block == nil || !bytes.Equal(result.decryptedMetadata, newDummyMetadata()) {

@@ -26,7 +26,6 @@ import (
 
 func main() {
 	appctl.RecordAppStartTime()
-	appctl.SetAppType(appctl.SERVER_APP)
 	debug.SetGCPercent(90)
 	cli.RegisterServerCommands()
 	err := cli.ParseAndExecute()

@@ -15,13 +15,6 @@
 
 package common
 
-// FillBytes fills the byte slice with the given value.
-func FillBytes(b []byte, value byte) {
-	for i := range b {
-		b[i] = value
-	}
-}
-
 // IsBitsAllZero returns true if all bits in the slice are zero.
 func IsBitsAllZero(b []byte) bool {
 	for _, v := range b {

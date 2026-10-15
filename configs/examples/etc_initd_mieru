@@ -5,12 +5,13 @@ STOP=01
 
 MIERU_BIN="/usr/bin/mieru"
 MIERU_CONFIG="/etc/mieru_client_config.json"
-PID_FILE="/var/run/mieru.pid"
 
 start() {
     echo "Starting mieru client..."
+    # The pid file is maintained by mieru itself (<config dir>/mieru.pid),
+    # so this script must not create or delete a pid file of its own.
     export MIERU_CONFIG_JSON_FILE=$MIERU_CONFIG
-    start-stop-daemon -S -b -m -p "$PID_FILE" -x "$MIERU_BIN" -- run
+    "$MIERU_BIN" start
     RC=$?
     if [ $RC -eq 0 ]; then
         echo "mieru client is started"
@@ -23,11 +24,11 @@ start() {
 
 stop() {
     echo "Stopping mieru client..."
-    start-stop-daemon -K -p "$PID_FILE"
+    # mieru reads its own pid file and sends SIGTERM to the daemon.
+    "$MIERU_BIN" stop
     RC=$?
     if [ $RC -eq 0 ]; then
         echo "mieru client is stopped"
-        rm -f "$PID_FILE"
     else
         echo "failed to stop mieru client"
     fi

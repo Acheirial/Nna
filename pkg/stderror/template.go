@@ -29,6 +29,7 @@ const (
 	IPAddressNotFound                  = "IP address not found from domain name %q"
 	LookupIPFailedErr                  = "look up IP address failed: %w"
 	ParseIPFailed                      = "parse IP address failed"
+	RunSocks5ServerFailedErr           = "run socks5 server failed: %w"
 	SegmentSizeTooBig                  = "segment size too big"
 	ServerConfigNotExist               = "mita server config file doesn't exist"
 	ServerNotRunning                   = "mita server is not running"

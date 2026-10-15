@@ -44,11 +44,6 @@ linters:
               desc: "apis/server should not depend on pkg/appctl"
             - pkg: github.com/enfein/mieru/v3/pkg/cli$
               desc: "apis/server should not depend on pkg/cli"
-        pkg-deque:
-          files:
-            - "**/pkg/deque/**"
-          allow:
-            - $gostd
         pkg-log:
           files:
             - "**/pkg/log/**"

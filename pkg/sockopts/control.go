@@ -49,10 +49,44 @@ func ApplyUDPControl(c *net.UDPConn, controlFunc Control) error {
 	return controlFunc(c.LocalAddr().Network(), c.LocalAddr().String(), rawConn)
 }
 
+// ReuseAddrPort sets SO_REUSEADDR and SO_REUSEPORT options to a given connection.
+//
+// SO_REUSEPORT allows more than one socket to bind to the same address and
+// port. Another local process can join the same group and receive a part of the
+// traffic of this socket, so only use this control for a listener when this
+// risk is accepted.
+//
+// The options are not set on platforms where they are not supported.
+func ReuseAddrPort() Control {
+	return controlFromRawErr(ReuseAddrPortRawErr())
+}
+
+// ReuseAddrPortRaw is the same as ReuseAddrPort, but ignores error.
+func ReuseAddrPortRaw() RawControl {
+	return func(fd uintptr) {
+		ReuseAddrPortRawErr()(fd)
+	}
+}
+
+// ReuseAddrPortRawErr is the same as ReuseAddrPort, but returns error.
+func ReuseAddrPortRawErr() RawControlErr {
+	return func(fd uintptr) error {
+		return setReuseSockopts(fd, true)
+	}
+}
+
 // DefaultDialerControl is the default control function for dialer.
+//
+// It sets SO_REUSEADDR, which allows a socket to bind to a local address that
+// is still in the TIME_WAIT state. SO_REUSEPORT is not set, because a dialer
+// socket does not need it, and because rejecting every new connection when an
+// optional option can not be set is worse than not setting the option.
+//
+// If the MIERU_PROTECT_PATH environment variable is set (the Android VPN
+// service), the file descriptor is also sent to that path.
 func DefaultDialerControl() Control {
 	return func(network, address string, c syscall.RawConn) error {
-		if err := c.Control(ReuseAddrPortRaw()); err != nil {
+		if err := applyRawControlErr(c, reuseAddrRawErr()); err != nil {
 			return err
 		}
 		if path, found := os.LookupEnv("MIERU_PROTECT_PATH"); found {
@@ -65,8 +99,54 @@ func DefaultDialerControl() Control {
 }
 
 // DefaultListenerControl is the default control function for listener.
+//
+// It only sets SO_REUSEADDR, which is enough to bind to a local address that is
+// still in the TIME_WAIT state, so a listener can be restarted after the
+// previous process exited. SO_REUSEPORT is intentionally not set, because it
+// allows other local processes to bind the same address and port, and to steal
+// a part of the traffic of this listener. Use ReusePortListenerControl() when
+// zero down time restart is required and the risk is accepted.
 func DefaultListenerControl() Control {
-	return func(network, address string, c syscall.RawConn) error {
-		return c.Control(ReuseAddrPortRaw())
+	return controlFromRawErr(reuseAddrRawErr())
+}
+
+// ReusePortListenerControl is the listener control function that sets both
+// SO_REUSEADDR and SO_REUSEPORT.
+//
+// SO_REUSEPORT allows a new process to bind the same address and port while the
+// old process is still listening, which enables zero down time restart. The
+// cost is that any local process can join the same listening group and receive
+// a part of the traffic of this listener, and the operating system does not
+// always verify the identity of the process. Only use this control when the
+// risk is accepted, for example on a server that has no untrusted local user.
+//
+// The control is a no-op on platforms without SO_REUSEPORT, for example
+// Windows. The listener still works there, but zero down time restart is not
+// supported.
+func ReusePortListenerControl() Control {
+	return controlFromRawErr(ReuseAddrPortRawErr())
+}
+
+// controlFromRawErr converts a RawControlErr to a Control.
+func controlFromRawErr(rawControl RawControlErr) Control {
+	return func(_, _ string, c syscall.RawConn) error {
+		return applyRawControlErr(c, rawControl)
+	}
+}
+
+// applyRawControlErr runs rawControl on the file descriptor of c, and returns
+// the error reported by either rawControl or c.Control().
+func applyRawControlErr(c syscall.RawConn, rawControl RawControlErr) error {
+	var err error
+	if controlErr := c.Control(func(fd uintptr) { err = rawControl(fd) }); controlErr != nil {
+		return fmt.Errorf("Control() failed: %w", controlErr)
+	}
+	return err
+}
+
+// reuseAddrRawErr sets SO_REUSEADDR, but not SO_REUSEPORT, to fd.
+func reuseAddrRawErr() RawControlErr {
+	return func(fd uintptr) error {
+		return setReuseSockopts(fd, false)
 	}
 }

@@ -92,25 +92,34 @@ func TestHelperServeConn(conn io.ReadWriteCloser) error {
 
 // TestHelperServer is a testing server.
 type TestHelperServer struct {
-	done chan struct{}
+	done     chan struct{}
+	serveErr chan error
 }
 
 // NewTestHelperServer initializes a new testing server.
 func NewTestHelperServer() *TestHelperServer {
-	return &TestHelperServer{done: make(chan struct{})}
+	return &TestHelperServer{
+		done:     make(chan struct{}),
+		serveErr: make(chan error, 1),
+	}
 }
 
 // Serve serves incoming connections.
 func (s *TestHelperServer) Serve(l net.Listener) error {
-	var connErr error
 	for {
+		// done is checked before the connection error, so closing the server
+		// always wins over a pending connection failure.
 		select {
 		case <-s.done:
 			return nil
 		default:
 		}
-		if connErr != nil {
-			return connErr
+		// serveErr is buffered with capacity 1, so it reports the first
+		// connection error and drops the later ones.
+		select {
+		case err := <-s.serveErr:
+			return err
+		default:
 		}
 		conn, err := l.Accept()
 		if err != nil {
@@ -122,7 +131,12 @@ func (s *TestHelperServer) Serve(l net.Listener) error {
 		go func() {
 			err := TestHelperServeConn(conn)
 			if err != nil && !stderror.IsEOF(err) && !stderror.IsClosed(err) {
-				connErr = err
+				// The buffered channel keeps the first error and never blocks
+				// the connection goroutine.
+				select {
+				case s.serveErr <- err:
+				default:
+				}
 			}
 		}()
 	}

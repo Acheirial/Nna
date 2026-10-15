@@ -75,11 +75,13 @@ type Source struct {
 	valid bool
 }
 
+// matchOrigin identifies the candidate phase of tryState that matched. It is
+// recorded only so tests can observe the phase order; identity resolution,
+// caching and authentication don't depend on this value.
 type matchOrigin uint8
 
 const (
-	matchUnknown matchOrigin = iota
-	matchCachedHint
+	matchCachedHint matchOrigin = iota
 	matchRegistryHint
 	matchCachedFallback
 	matchRegistryFallback
@@ -88,7 +90,9 @@ const (
 // discoveryResult contains only the matched identity and immutable
 // policy needed after discovery. generation is retained only while the caller
 // validates and commits initial authentication; established connections and
-// sessions must not retain it.
+// sessions must not retain it. origin records which candidate phase of
+// tryState matched; it is for test observation of the phase order only and
+// is never read by production code.
 type discoveryResult struct {
 	block             cipher.BlockCipher
 	decryptedMetadata []byte
@@ -106,7 +110,6 @@ type discoveryResult struct {
 type Authentication struct {
 	userID     uint32
 	policy     Policy
-	origin     matchOrigin
 	generation *state
 	source     Source
 }
@@ -115,7 +118,6 @@ func (r discoveryResult) authentication(source Source) Authentication {
 	return Authentication{
 		userID:     r.userID,
 		policy:     r.policy,
-		origin:     r.origin,
 		generation: r.generation,
 		source:     source,
 	}

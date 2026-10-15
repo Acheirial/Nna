@@ -16,6 +16,7 @@
 package common
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 )
@@ -52,8 +53,24 @@ func MaybeDecorateIPv6(addr string) string {
 	return addr
 }
 
+// ValidateDualStackPreference returns an error if the given preference is not
+// one of the supported DualStackPreference values. The error message contains
+// the invalid value.
+func ValidateDualStackPreference(preference DualStackPreference) error {
+	switch preference {
+	case USE_FIRST_IP, PREFER_IPv4, PREFER_IPv6, ONLY_IPv4, ONLY_IPv6:
+		return nil
+	default:
+		return fmt.Errorf("invalid DNS dual stack preference: %d", preference)
+	}
+}
+
 // SelectIPFromList selects an IP address from a list of IP addresses
 // based on the given DualStackPreference.
+//
+// It returns nil if the list is empty, if no IP address matches the
+// preference, or if the preference is not a known value. An unknown
+// preference is not silently treated as USE_FIRST_IP.
 func SelectIPFromList(ips []net.IP, strategy DualStackPreference) net.IP {
 	if len(ips) == 0 {
 		return nil
@@ -73,6 +90,8 @@ func SelectIPFromList(ips []net.IP, strategy DualStackPreference) net.IP {
 	}
 
 	switch strategy {
+	case USE_FIRST_IP:
+		return ips[0]
 	case PREFER_IPv4:
 		if ipv4 != nil {
 			return ipv4
@@ -88,6 +107,6 @@ func SelectIPFromList(ips []net.IP, strategy DualStackPreference) net.IP {
 	case ONLY_IPv6:
 		return ipv6
 	default:
-		return ips[0]
+		return nil
 	}
 }
