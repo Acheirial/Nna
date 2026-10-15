@@ -55,6 +55,17 @@ type BlockCipher interface {
 	// This method is not supported by stateful BlockCipher.
 	DecryptWithNonce(ciphertext, nonce []byte) ([]byte, error)
 
+	// EncryptPayloadWithNonce encrypts a payload with a nonce derived from the given message nonce.
+	// The derived nonce is the message nonce with a single byte XORed with a
+	// constant value, so a message nonce is never used to encrypt both the
+	// metadata and the payload of the same message.
+	// This method is not supported by stateful BlockCipher.
+	EncryptPayloadWithNonce(dst, nonce, plaintext []byte) error
+
+	// DecryptPayloadWithNonce decrypts a payload encrypted by EncryptPayloadWithNonce.
+	// This method is not supported by stateful BlockCipher.
+	DecryptPayloadWithNonce(ciphertext, nonce []byte) ([]byte, error)
+
 	// DecryptStatelessTo decrypts ciphertext with its prepended nonce and
 	// appends the plaintext to dst.
 	// It MUST only be called on a stateless cipher that is not being mutated

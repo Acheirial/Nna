@@ -824,8 +824,8 @@ func buildPacketLowEntropyWireWithMetadataMutation(t *testing.T, payload []byte,
 	}
 	nonce := encryptedMetadata[:cipher.DefaultNonceSize]
 	encryptedPayload := make([]byte, len(payload)+block.Overhead())
-	if err := block.EncryptWithNonce(encryptedPayload[:0], nonce, payload); err != nil {
-		t.Fatalf("EncryptWithNonce(payload) failed: %v", err)
+	if err := block.EncryptPayloadWithNonce(encryptedPayload[:0], nonce, payload); err != nil {
+		t.Fatalf("EncryptPayloadWithNonce(payload) failed: %v", err)
 	}
 	encoded, err := encodeLowEntropyPayloadWithPaddingBit(encryptedPayload[:len(payload)], appctlpb.LowEntropyMode(das.lowEntropyMode), das.lowEntropyMask, appctlpb.LowEntropyMaskRotation(das.lowEntropyMaskRotation), 0)
 	if err != nil {

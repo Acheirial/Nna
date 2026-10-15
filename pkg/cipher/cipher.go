@@ -192,12 +192,67 @@ func (c *aeadBlockCipher) DecryptWithNonce(ciphertext, nonce []byte) ([]byte, er
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.enableImplicitNonce {
-		return nil, fmt.Errorf("EncryptWithNonce() is not supported when implicit nonce is enabled")
+		return nil, fmt.Errorf("DecryptWithNonce() is not supported when implicit nonce is enabled")
 	}
 	if len(nonce) != c.NonceSize() {
 		return nil, fmt.Errorf("want nonce size %d, got %d", c.NonceSize(), len(nonce))
 	}
 	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cipher.AEAD.Open() failed: %w", err)
+	}
+	return plaintext, nil
+}
+
+const (
+	// payloadNonceOffset is the index of the nonce byte changed to derive the
+	// payload nonce from the message nonce.
+	//
+	// The user hint occupies the last 4 nonce bytes, and the nonce pattern
+	// rewrites at most the first 12 nonce bytes (NoncePattern minLen and maxLen
+	// are limited to 12), so byte 16 belongs to neither of them.
+	payloadNonceOffset = 16
+	// payloadNonceMask is XORed with the byte at payloadNonceOffset. Any non
+	// zero value works, it only needs to guarantee that the derived nonce is
+	// different from the message nonce.
+	payloadNonceMask = 0x01
+)
+
+// payloadNonce derives the nonce used to encrypt or decrypt the payload of a
+// message from the nonce used to encrypt or decrypt its metadata.
+func payloadNonce(nonce []byte) []byte {
+	derived := make([]byte, len(nonce))
+	copy(derived, nonce)
+	derived[payloadNonceOffset] ^= payloadNonceMask
+	return derived
+}
+
+func (c *aeadBlockCipher) EncryptPayloadWithNonce(dst, nonce, plaintext []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.enableImplicitNonce {
+		return fmt.Errorf("EncryptPayloadWithNonce() is not supported when implicit nonce is enabled")
+	}
+	if len(nonce) != c.NonceSize() {
+		return fmt.Errorf("want nonce size %d, got %d", c.NonceSize(), len(nonce))
+	}
+	if cap(dst)-len(dst) < len(plaintext)+c.aead.Overhead() {
+		return errDestinationTooSmall
+	}
+	c.aead.Seal(dst, payloadNonce(nonce), plaintext, nil)
+	return nil
+}
+
+func (c *aeadBlockCipher) DecryptPayloadWithNonce(ciphertext, nonce []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.enableImplicitNonce {
+		return nil, fmt.Errorf("DecryptPayloadWithNonce() is not supported when implicit nonce is enabled")
+	}
+	if len(nonce) != c.NonceSize() {
+		return nil, fmt.Errorf("want nonce size %d, got %d", c.NonceSize(), len(nonce))
+	}
+	plaintext, err := c.aead.Open(nil, payloadNonce(nonce), ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cipher.AEAD.Open() failed: %w", err)
 	}

@@ -572,7 +572,7 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 	if ss, ok := toSessionStruct(seg.metadata); ok {
 		maxPaddingSize := maxPaddingSizeWithTrafficPattern(t.mtu, t.TransportProtocol(), int(ss.payloadLen), 0, t.trafficPattern, endPadding)
 		// The padding strategy depends on the bit distribution of the
-		// plaintext data to protect. The metadata is marshalled again below
+		// plaintext data to protect. The metadata is marshaled again below
 		// with the final suffix length.
 		existingData := make([]byte, 0, MetadataLength+len(seg.payload))
 		existingData = append(existingData, seg.metadata.Marshal()...)

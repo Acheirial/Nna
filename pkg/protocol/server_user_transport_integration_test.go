@@ -506,8 +506,8 @@ func buildServerUserPacketWire(t *testing.T, credential []byte, userName string,
 	wire := append([]byte(nil), encryptedMetadata...)
 	if len(payload) > 0 {
 		encryptedPayload := make([]byte, len(payload)+block.Overhead())
-		if err := block.EncryptWithNonce(encryptedPayload[:0], nonce, payload); err != nil {
-			t.Fatalf("EncryptWithNonce(payload) failed: %v", err)
+		if err := block.EncryptPayloadWithNonce(encryptedPayload[:0], nonce, payload); err != nil {
+			t.Fatalf("EncryptPayloadWithNonce(payload) failed: %v", err)
 		}
 		wire = append(wire, encryptedPayload...)
 	}

@@ -594,9 +594,9 @@ func (u *PacketUnderlay) parseSessionSegment(ss *sessionStruct, nonce, remaining
 			}
 		}
 		encryptedPayload := remaining[:ss.payloadLen+cipher.DefaultOverhead]
-		decryptedPayload, err = blockCipher.DecryptWithNonce(encryptedPayload, nonce)
+		decryptedPayload, err = blockCipher.DecryptPayloadWithNonce(encryptedPayload, nonce)
 		if err != nil {
-			return nil, fmt.Errorf("DecryptWithNonce() failed: %w", err)
+			return nil, fmt.Errorf("DecryptPayloadWithNonce() failed: %w", err)
 		}
 		if int(ss.payloadLen)+cipher.DefaultOverhead+int(ss.suffixLen) != len(remaining) {
 			return nil, fmt.Errorf("padding: size not match")
@@ -651,9 +651,9 @@ func (u *PacketUnderlay) parseDataAckSegment(das *dataAckStruct, nonce, remainin
 				return nil, fmt.Errorf("decode low entropy payload failed: %w", err)
 			}
 		}
-		decryptedPayload, err = blockCipher.DecryptWithNonce(encryptedPayload, nonce)
+		decryptedPayload, err = blockCipher.DecryptPayloadWithNonce(encryptedPayload, nonce)
 		if err != nil {
-			return nil, fmt.Errorf("DecryptWithNonce() failed: %w", err)
+			return nil, fmt.Errorf("DecryptPayloadWithNonce() failed: %w", err)
 		}
 	} else {
 		if int(das.suffixLen) != len(remaining) {
@@ -715,7 +715,7 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 	if ss, ok := toSessionStruct(seg.metadata); ok {
 		maxPaddingSize := maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(ss.payloadLen), 0, u.trafficPattern, endPadding)
 		// The padding strategy depends on the bit distribution of the
-		// plaintext data to protect. The metadata is marshalled again below
+		// plaintext data to protect. The metadata is marshaled again below
 		// with the final suffix length.
 		existingData := make([]byte, 0, MetadataLength+len(seg.payload))
 		existingData = append(existingData, seg.metadata.Marshal()...)
@@ -741,8 +741,10 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		nonce := dataToSend[:blockCipher.NonceSize()]
 		offset := encryptedMetadataLen
 		if len(seg.payload) > 0 {
-			if err := blockCipher.EncryptWithNonce(dataToSend[offset:offset], nonce, seg.payload); err != nil {
-				return fmt.Errorf("EncryptWithNonce() failed: %w", err)
+			// The payload must not reuse the metadata nonce, so encrypt it
+			// with a nonce derived from the message nonce.
+			if err := blockCipher.EncryptPayloadWithNonce(dataToSend[offset:offset], nonce, seg.payload); err != nil {
+				return fmt.Errorf("EncryptPayloadWithNonce() failed: %w", err)
 			}
 			offset += encryptedPayloadLen
 		}
@@ -795,8 +797,10 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		offset := encryptedMetadataLen
 		offset += copy(dataToSend[offset:], padding1)
 		if len(seg.payload) > 0 {
-			if err := blockCipher.EncryptWithNonce(dataToSend[offset:offset], nonce, seg.payload); err != nil {
-				return fmt.Errorf("EncryptWithNonce() failed: %w", err)
+			// The payload must not reuse the metadata nonce, so encrypt it
+			// with a nonce derived from the message nonce.
+			if err := blockCipher.EncryptPayloadWithNonce(dataToSend[offset:offset], nonce, seg.payload); err != nil {
+				return fmt.Errorf("EncryptPayloadWithNonce() failed: %w", err)
 			}
 			if lowEntropy {
 				encryptedPayloadLen := len(seg.payload) + blockCipher.Overhead()
