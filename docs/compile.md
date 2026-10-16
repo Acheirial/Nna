@@ -5,9 +5,13 @@
 编译所需的软件包括：
 
 - git
-- go (version >= 1.20)
+- go (version >= 1.26)
 - make
 - curl（仅在重新生成 protobuf 代码时需要）
+
+项目的 Go 版本由 `go.mod` 决定：`go` 指令声明语言版本（当前为 `go 1.26`），`toolchain` 指令声明构建所需的工具链版本（当前为 `toolchain go1.26.9`）。如果本机安装的 Go 版本低于该工具链版本，`go` 命令会自动下载并使用对应的工具链（`GOTOOLCHAIN=auto`）；在无法访问互联网的环境中，请预先安装 Go 1.26.9 或更新版本。构建时不要再使用 Go 1.25 及更早的版本。
+
+CI（GitHub Actions）通过 `actions/setup-go@v6` 并设置 `go-version-file: go.mod` 安装 Go，因此 CI 使用的版本始终与 `go.mod` 保持一致，无需在工作流中重复维护版本号。
 
 编译时，进入项目根目录，运行指令 `make` 即可。`make` 默认构建 `bin` 目标，编译结果会存放在项目根目录下的 `bin` 文件夹，包含客户端 `bin/mieru` 和服务器 `bin/mita`。
 

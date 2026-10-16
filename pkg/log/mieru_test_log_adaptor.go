@@ -30,7 +30,9 @@ var _ io.Writer = testingAdaptor{}
 
 func (a testingAdaptor) Write(p []byte) (n int, err error) {
 	s := string(p)
-	a.t.Logf(s)
+	// The format string must be constant so that the go vet printf
+	// check stays happy with the Go 1.24 and later toolchains.
+	a.t.Logf("%s", s)
 	return len(p), nil
 }
 

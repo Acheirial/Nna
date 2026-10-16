@@ -19,4 +19,8 @@ package log
 
 import "reflect"
 
+// pointerKind is the reflect kind of a pointer. The value is defined per
+// toolchain version, so it can't be inlined at the use sites.
+//
+//nolint:govet // govet wants reflect.Ptr inlined, which would defeat the version split.
 const pointerKind = reflect.Ptr
