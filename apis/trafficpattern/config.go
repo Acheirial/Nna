@@ -16,7 +16,6 @@
 package trafficpattern
 
 import (
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -62,38 +61,9 @@ func NewConfig(original *appctlpb.TrafficPattern) (*Config, error) {
 	return c, nil
 }
 
-// Original returns the original traffic pattern.
-func (c *Config) Original() *appctlpb.TrafficPattern {
-	return c.original
-}
-
 // Effective returns the effective traffic pattern.
 func (c *Config) Effective() *appctlpb.TrafficPattern {
 	return c.effective
-}
-
-// Encode returns a base64 encoded string of the traffic pattern
-// from the protobuf message.
-func Encode(pattern *appctlpb.TrafficPattern) string {
-	b, err := proto.Marshal(pattern)
-	if err != nil {
-		return ""
-	}
-	return base64.StdEncoding.EncodeToString(b)
-}
-
-// Decode decodes the base64 encoded string of the traffic pattern
-// into the protobuf message.
-func Decode(encoded string) (*appctlpb.TrafficPattern, error) {
-	b, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("decode base64 string failed: %w", err)
-	}
-	pattern := &appctlpb.TrafficPattern{}
-	if err := proto.Unmarshal(b, pattern); err != nil {
-		return nil, fmt.Errorf("proto.Unmarshal() failed: %w", err)
-	}
-	return pattern, nil
 }
 
 // Validate validates the traffic pattern protobuf message.

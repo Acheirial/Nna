@@ -40,14 +40,6 @@ func TestSocks5RequestHelpers(t *testing.T) {
 	if !bytes.Equal(req.Raw, input) {
 		t.Errorf("got raw %v, want %v", req.Raw, input)
 	}
-
-	var output bytes.Buffer
-	if err := WriteSocks5Request(&output, req.Command, req.DstAddr); err != nil {
-		t.Fatalf("WriteSocks5Request() failed: %v", err)
-	}
-	if !bytes.Equal(output.Bytes(), input) {
-		t.Errorf("got output %v, want %v", output.Bytes(), input)
-	}
 }
 
 func TestRequestReadWrite(t *testing.T) {
@@ -109,66 +101,6 @@ func TestRequestReadWrite(t *testing.T) {
 		if !bytes.Equal(outputBytes, tc.input) {
 			t.Errorf("got %v, want %v", outputBytes, tc.input)
 		}
-	}
-}
-
-func TestRequestToNetAddrSpec(t *testing.T) {
-	addr := AddrSpec{
-		FQDN: "example.com",
-		Port: 80,
-	}
-	testCases := []struct {
-		name    string
-		req     Request
-		want    NetAddrSpec
-		wantErr bool
-	}{
-		{
-			name: "connect command",
-			req: Request{
-				Command: constant.Socks5ConnectCmd,
-				DstAddr: addr,
-			},
-			want: NetAddrSpec{
-				AddrSpec: addr,
-				Net:      "tcp",
-			},
-			wantErr: false,
-		},
-		{
-			name: "udp associate command",
-			req: Request{
-				Command: constant.Socks5UDPAssociateCmd,
-				DstAddr: addr,
-			},
-			want: NetAddrSpec{
-				AddrSpec: addr,
-				Net:      "udp",
-			},
-			wantErr: false,
-		},
-		{
-			name: "unsupported command",
-			req: Request{
-				Command: constant.Socks5BindCmd,
-				DstAddr: addr,
-			},
-			want:    NetAddrSpec{},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.req.ToNetAddrSpec()
-			if (err != nil) != tc.wantErr {
-				t.Errorf("ToNetAddrSpec() error = %v, wantErr %v", err, tc.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("ToNetAddrSpec() = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }
 

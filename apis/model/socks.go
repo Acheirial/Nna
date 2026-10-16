@@ -80,15 +80,6 @@ func (r *Request) ReadFromSocks5(reader io.Reader) error {
 	return nil
 }
 
-// WriteSocks5Request writes a socks5 request.
-func WriteSocks5Request(writer io.Writer, command byte, dst AddrSpec) error {
-	req := &Request{
-		Command: command,
-		DstAddr: dst,
-	}
-	return req.WriteToSocks5(writer)
-}
-
 // WriteToSocks5 writes a socks5 request.
 func (r *Request) WriteToSocks5(writer io.Writer) error {
 	var buf bytes.Buffer
@@ -101,24 +92,6 @@ func (r *Request) WriteToSocks5(writer io.Writer) error {
 	r.Raw = buf.Bytes()
 	_, err := writer.Write(r.Raw)
 	return err
-}
-
-// ToNetAddrSpec converts a socks5 request to a NetAddrSpec object.
-func (r Request) ToNetAddrSpec() (NetAddrSpec, error) {
-	switch r.Command {
-	case constant.Socks5ConnectCmd:
-		return NetAddrSpec{
-			AddrSpec: r.DstAddr,
-			Net:      "tcp",
-		}, nil
-	case constant.Socks5UDPAssociateCmd:
-		return NetAddrSpec{
-			AddrSpec: r.DstAddr,
-			Net:      "udp",
-		}, nil
-	default:
-		return NetAddrSpec{}, fmt.Errorf("unsupported socks5 command: %d", r.Command)
-	}
 }
 
 type Response struct {
