@@ -24,8 +24,9 @@ COPY bin/mieru bin/mita bin/httpserver bin/sockshttpclient bin/socksudpclient bi
     test/deploy/basic/client_mix.json test/deploy/basic/server_mix.json \
     test/deploy/basic/client_tcp.json test/deploy/basic/client_tcp_no_wait.json test/deploy/basic/server_tcp.json \
     test/deploy/basic/client_udp.json test/deploy/basic/client_udp_no_wait.json test/deploy/basic/server_udp.json \
+    test/deploy/basic/client_aes.json test/deploy/basic/server_aes.json \
     test/deploy/basic/libtest.sh test/deploy/basic/test_mix_udp_associate.sh \
-    test/deploy/basic/test_tcp.sh test/deploy/basic/test_udp.sh \
+    test/deploy/basic/test_tcp.sh test/deploy/basic/test_udp.sh test/deploy/basic/test_aes.sh \
     test/deploy/basic/test.sh /test/
 
 # Create mita user and server config directory.

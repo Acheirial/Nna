@@ -1,0 +1,40 @@
+{
+    "listenIPAddress": "127.0.0.1",
+    "portBindings": [
+        {
+            "portRange": "9999-10000",
+            "protocol": "TCP"
+        },
+        {
+            "port": 10001,
+            "protocol": "TCP"
+        },
+        {
+            "port": 10002,
+            "protocol": "TCP"
+        },
+        {
+            "port": 10003,
+            "protocol": "TCP"
+        }
+    ],
+    "cipherSuites": [
+        "CIPHER_SUITE_AES_256_GCM"
+    ],
+    "users": [
+        {
+            "name": "user1",
+            "password": "password1",
+            "allowLoopbackIP": true
+        }
+    ],
+    "advancedSettings": {
+        "userHintIsMandatory": true
+    },
+    "loggingLevel": "DEBUG",
+    "trafficPattern": {
+        "lowEntropy": {
+            "mode": "LOW_ENTROPY_MODE_56"
+        }
+    }
+}

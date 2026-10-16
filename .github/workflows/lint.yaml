@@ -1,5 +1,23 @@
 name: lint
-on: [push, pull_request, workflow_dispatch]
+
+on:
+  # PR branches are covered by `pull_request`, so `push` is limited to main to
+  # avoid running the linter twice for the same commit.
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# A newer run of the same branch or PR replaces an older one, but a push to main
+# is never cancelled so that every commit on main is verified to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
   run-lint:
     runs-on: ubuntu-latest
@@ -13,3 +31,8 @@ jobs:
           go-version-file: go.mod
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v8
+        with:
+          # Pinned so the lint gate is reproducible. golangci-lint v2.9.0 is the
+          # first release that supports Go 1.26 (the toolchain required by
+          # go.mod); v2.14.0 is the latest upstream release.
+          version: v2.14.0

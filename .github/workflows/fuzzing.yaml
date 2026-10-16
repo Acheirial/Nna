@@ -2,12 +2,31 @@ name: fuzzing
 on:
   # Triggered manually and once a week, so the fuzz targets don't rot.
   workflow_dispatch:
+    inputs:
+      fuzz_time:
+        description: 'Value passed to go test -fuzztime (for example 120s or 600s).'
+        required: false
+        default: '600s'
   schedule:
     - cron: '0 3 * * 1'
+
+# A new run supersedes an older one; every run is only a best effort trend, so
+# cancelling a stale weekly run is fine.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  run-fuzzing:
+  discover_fuzz_targets:
+    name: discover fuzz targets
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    outputs:
+      # JSON array of {"pkg": <package>, "target": <fuzz target>}.
+      targets: ${{ steps.list.outputs.targets }}
     steps:
       - name: Check out repository code
         uses: actions/checkout@v6
@@ -15,5 +34,42 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Run fuzz tests
-        run: make fuzz
+      - name: List fuzz targets
+        # `make fuzz-matrix` walks FUZZ_PACKAGES, so a fuzz target added to or
+        # removed from the repository is picked up automatically. It fails when
+        # a package does not compile or has no fuzz target, instead of silently
+        # narrowing the matrix.
+        id: list
+        run: |
+          set -euo pipefail
+          targets=$(make -s fuzz-matrix)
+          if [ "$targets" = "[]" ]; then
+            echo "::error::no fuzz target found in FUZZ_PACKAGES"
+            exit 1
+          fi
+          echo "fuzz targets: $targets"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  run-fuzzing:
+    name: ${{ matrix.target.pkg }} - ${{ matrix.target.target }}
+    needs: discover_fuzz_targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Fuzz every target even when one of them finds a failure.
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.discover_fuzz_targets.outputs.targets) }}
+    env:
+      # The weekly run uses a short fuzztime, a manual run gets the full one
+      # (600s by default).
+      FUZZ_TIME: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fuzz_time || '120s' }}"
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Run fuzz target
+        run: make fuzz-one PKG=${{ matrix.target.pkg }} FUZZ=${{ matrix.target.target }}

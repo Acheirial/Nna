@@ -5,12 +5,31 @@ name: benchmark
 on:
   # Triggered manually and once a week, so the benchmarks don't rot.
   workflow_dispatch:
+    inputs:
+      bench_time:
+        description: 'Value passed to go test -benchtime (for example 1s or 10s).'
+        required: false
+        default: '10s'
   schedule:
     - cron: '0 4 * * 1'
+
+# A new run supersedes an older one; every run is only a best effort trend, so
+# cancelling a stale weekly run is fine.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   run-benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The weekly run only needs a trend and uses a short benchtime, a manual
+      # run gets the full benchtime (10s by default).
+      BENCH_TIME: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.bench_time || '1s' }}"
     steps:
       - name: Check out repository code
         uses: actions/checkout@v6
@@ -18,5 +37,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Show benchmark settings
+        run: echo "BENCH_TIME=$BENCH_TIME"
       - name: Run benchmark
         run: make bench

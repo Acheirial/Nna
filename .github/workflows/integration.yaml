@@ -1,16 +1,52 @@
 name: 'integration test'
-on: [push, pull_request, workflow_dispatch]
+
+on:
+  # PR branches are covered by `pull_request`, so `push` is limited to main to
+  # avoid running the integration tests twice for the same commit.
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# A newer run of the same branch or PR replaces an older one, but a push to main
+# is never cancelled so that every commit on main is verified to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
   run-test:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The image is built by docker/build-push-action below, not by the
+      # Makefile, so override the tag that `make ...` uses by default.
+      TEST_CONTAINER_IMAGE: mieru_basic:${{ github.sha }}
     strategy:
+      # Run every script of the basic suite even when one of them fails.
       fail-fast: false
       matrix:
+        # Each entry runs one script of test/deploy/basic/test.sh in its own
+        # container. The scripts themselves are used unchanged, only the
+        # wrapper around them changes, so no assertion is lost.
         include:
-          - name: basic
-            target: run-container-test-basic
+          - name: basic - TCP
+            script: test_tcp.sh
+            cache_scope: tcp
+          - name: basic - UDP
+            script: test_udp.sh
+            cache_scope: udp
+          - name: basic - UDP associate
+            script: test_mix_udp_associate.sh
+            cache_scope: mix-udp-associate
+          - name: basic - AES
+            script: test_aes.sh
+            cache_scope: aes
     steps:
       - name: Check out repository code
         uses: actions/checkout@v6
@@ -18,5 +54,31 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Build test binaries
+        run: make test-binary
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build integration test image
+        # The image is built from the binaries of the checked out commit and
+        # from test/deploy/basic/Dockerfile only, so every matrix entry ends up
+        # with the same image content under the same tag
+        # (mieru_basic:${{ github.sha }}), and the test step can reuse it.
+        # The layers are cached in the GitHub Actions cache; every matrix entry
+        # uses its own cache scope, so the parallel jobs never overwrite each
+        # other's cache while still starting warm on the next run.
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: test/deploy/basic/Dockerfile
+          load: true
+          tags: ${{ env.TEST_CONTAINER_IMAGE }}
+          cache-from: type=gha,scope=integration-${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=integration-${{ matrix.cache_scope }}
+      - name: Show integration test image
+        # Fails early when the image is missing, and logs the image actually
+        # used by the test step below.
+        run: docker image inspect --format '{{.Id}}' "$TEST_CONTAINER_IMAGE"
       - name: Run integration test
-        run: make ${{ matrix.target }}
+        # Runs ${{ matrix.script }} inside the image, together with the helper
+        # servers that test.sh starts, and with the same startup timings.
+        run: make run-container-test-script TEST_SCRIPT=${{ matrix.script }}

@@ -1,21 +1,70 @@
 name: CI
-on: [push, pull_request, workflow_dispatch]
+
+on:
+  # PR branches are covered by `pull_request`, so `push` is limited to main to
+  # avoid running every job twice for the same commit.
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# A newer run of the same branch or PR replaces an older one, but a push to main
+# is never cancelled so that every commit on main is verified to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
+  # This job replaces the first half of the old single `run-build` job and keeps
+  # its id and therefore its status check name. The second half is the
+  # `run-test` job below; the two run in parallel and share the setup-go cache.
   run-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+      - name: Set up Go
+        # Keep the toolchain in sync with go.mod and with the other workflows.
+        # setup-go caches GOCACHE/GOMODCACHE with a key derived from go.sum, so
+        # this job and the run-test job share the same cache.
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        # A real gate: `make fmt` would silently rewrite unformatted sources.
+        run: make fmt-check
+      - name: Run go vet
+        run: make vet
+      - name: Build all packages
+        run: make compile
+
+  run-test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Check out repository code
         uses: actions/checkout@v6
       - name: Set up Go
-        # Keep the toolchain in sync with go.mod and with the other workflows.
+        # Shares the GOCACHE/GOMODCACHE cache with the run-build job.
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Build binaries and run unit tests
-        run: make lib
+      - name: Run unit tests
+        # Runs the race detector with -count=1, so a cached test result can not
+        # hide a failure. Generates coverage.out and coverage.html.
+        run: make test
       - name: Upload code coverage
+        # Also upload for a failed run, to make it debuggable.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: coverage.html
+          path: |
+            coverage.out
+            coverage.html
+          if-no-files-found: warn

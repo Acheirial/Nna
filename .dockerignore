@@ -1,0 +1,11 @@
+# Keep the Docker build context small. The only Dockerfile in this repository
+# (test/deploy/basic/Dockerfile) copies bin/* and test/deploy/basic/* only, so
+# nothing of what is ignored below is needed to build an image. A smaller
+# context makes `docker build` and the GitHub Actions cache upload faster.
+.git
+.github
+*.md
+coverage.out
+coverage.html
+tools/build
+bin/*.exe
