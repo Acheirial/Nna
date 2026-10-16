@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
@@ -26,6 +27,41 @@ import (
 	"github.com/enfein/mieru/v3/pkg/log"
 	"github.com/enfein/mieru/v3/pkg/stderror"
 )
+
+// copyBufferSize is the size of the buffers used to move data between a user
+// connection and the proxy tunnel. It is large enough to hold one UDP datagram.
+const copyBufferSize = 1 << 16
+
+// copyBufferPool reuses the copy buffers of the SOCKS5 proxy, so that a new
+// connection doesn't allocate 64 KiB per copy direction. A buffer is only used
+// by the goroutine that takes it from the pool, and it is returned to the pool
+// after the copy loop of that goroutine ends. It is safe to hand a used buffer
+// to another connection because neither net.Conn.Write(), nor
+// PacketOverStreamTunnel.Write() keeps a reference to the data after it returns.
+var copyBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, copyBufferSize)
+		return &b
+	},
+}
+
+// getCopyBuffer returns a buffer of copyBufferSize bytes from the pool. The
+// returned pointer is the handle of the buffer and must be passed back to
+// putCopyBuffer() unchanged.
+func getCopyBuffer() *[]byte {
+	return copyBufferPool.Get().(*[]byte)
+}
+
+// putCopyBuffer returns a buffer to the pool. The caller must not use the buffer
+// after this call.
+func putCopyBuffer(p *[]byte) {
+	if p == nil || cap(*p) < copyBufferSize {
+		// Don't pool a buffer that was not allocated by this file.
+		return
+	}
+	*p = (*p)[:copyBufferSize]
+	copyBufferPool.Put(p)
+}
 
 // BidiCopyUDP does bi-directional data copy between a proxy client UDP endpoint
 // and the proxy tunnel.
@@ -35,7 +71,9 @@ func BidiCopyUDP(udpConn *net.UDPConn, tunnelConn *apicommon.PacketOverStreamTun
 
 	go func() {
 		// udpConn -> tunnelConn
-		buf := make([]byte, 1<<16)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		buf := *bufPtr
 		for {
 			n, a, err := udpConn.ReadFrom(buf)
 			if err != nil {
@@ -58,7 +96,9 @@ func BidiCopyUDP(udpConn *net.UDPConn, tunnelConn *apicommon.PacketOverStreamTun
 	}()
 	go func() {
 		// tunnelConn -> udpConn
-		buf := make([]byte, 1<<16)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		buf := *bufPtr
 		for {
 			n, err := tunnelConn.Read(buf)
 			if err != nil {
@@ -103,7 +143,9 @@ func BidiCopySocks5(conn, proxyConn io.ReadWriteCloser, pendingReq []byte) error
 
 	go func() {
 		// conn -> proxyConn
-		buf := make([]byte, 1<<16)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		buf := *bufPtr
 		reqLen := len(pendingReq)
 		if reqLen > 0 {
 			log.Debugf("HANDSHAKE_NO_WAIT mode socks5 client request: %v", pendingReq)
@@ -122,7 +164,10 @@ func BidiCopySocks5(conn, proxyConn io.ReadWriteCloser, pendingReq []byte) error
 			errCh <- fmt.Errorf("failed to write connection request to the server: %w", err)
 			return
 		}
-		_, err = io.Copy(proxyConn, conn)
+		// CopyBuffer() behaves exactly like Copy(), but it doesn't allocate a
+		// 32 KiB buffer for every connection when the reader and the writer
+		// don't implement WriterTo and ReaderFrom.
+		_, err = io.CopyBuffer(proxyConn, conn, buf)
 		proxyConn.Close()
 		errCh <- err
 	}()
@@ -136,7 +181,9 @@ func BidiCopySocks5(conn, proxyConn io.ReadWriteCloser, pendingReq []byte) error
 			return
 		}
 		log.Debugf("HANDSHAKE_NO_WAIT mode socks5 server reply: %v", connResp.Raw)
-		_, err = io.Copy(conn, proxyConn)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		_, err = io.CopyBuffer(conn, proxyConn, *bufPtr)
 		conn.Close()
 		errCh <- err
 	}()
