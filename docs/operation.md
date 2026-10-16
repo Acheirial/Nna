@@ -5,6 +5,7 @@
 - [查看运行状态](#查看运行状态)
 - [查看日志](#查看日志)
 - [打开和关闭调试日志](#打开和关闭调试日志)
+- [密码套件协商](#密码套件协商)
 - [常见问题速查](#常见问题速查)
   - [应用配置时提示 unknown field](#症状应用配置时提示-unknown-field)
   - [完全无法连接](#症状完全无法连接)
@@ -109,6 +110,17 @@ mieru start
 
 ---
 
+## 密码套件协商
+
+客户端与服务端在握手时协商密码套件。可选套件为 `CIPHER_SUITE_XCHACHA20_POLY1305`、`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`，配置字段的含义与协商规则见[密码套件](./protocol.md#密码套件)与[版本与套件协商](./protocol.md#版本与套件协商)。日常运维需要注意下面几点。
+
+1. **不再支持 v1 客户端。** 本版本使用协议版本 2 的握手，旧客户端（协议版本 1）发出的握手请求会被服务端判为「无共同版本」，服务端返回 `status` = 1 并关闭会话，因此升级**必须两端同步**：只升级一端会让所有会话在握手阶段被拒绝，现象与「完全无法连接」相同。密码套件协商也发生在协议版本 2 的握手内部，所以它不能用来兼容旧客户端。
+2. **查看生效的套件。** 服务端用 `mita describe config`，客户端用 `mieru describe config`，查看输出里的 `cipherSuites` 字段。如果没有该字段或者列表为空，说明仍在使用默认行为：客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`，服务端接受全部套件。实际使用的套件由两端在握手时协商：取两个列表的交集，按服务端偏好顺序取第一个，因此对比两端的 `cipherSuites` 就能判断会协商出哪个套件；如果两个列表没有交集，握手会失败（服务端返回 `status` = 2 并记录日志）。
+3. **建议优先使用 XChaCha20-Poly1305。** 也就是保持默认，或者把 `CIPHER_SUITE_XCHACHA20_POLY1305` 写在客户端与服务端列表的第一项。它的性能不依赖 CPU 的硬件特性；而在没有 AES 硬件指令的 CPU 上，Go 标准库中 AES-GCM 的软件实现必须使用常数时间的实现，速度会明显下降。
+4. **两端 CPU 差异较大、并且都支持 AES-NI 时，可以改用 AES-256-GCM。** 如果服务器与客户端的 CPU 都支持 AES 硬件指令（x86 的 AES-NI、ARM 的 Crypto Extension），可以把两端的 `cipherSuites` 都设置为以 `CIPHER_SUITE_AES_256_GCM` 开头的列表。只有在确认两端都有硬件加速时才建议这样做，其余情况请保留 XChaCha20-Poly1305。
+
+---
+
 ## 常见问题速查
 
 ### 症状：应用配置时提示 unknown field
@@ -141,7 +153,7 @@ mieru apply config <client_config.json>
 | 1 | `ping <server_ip>` | 确认基础网络可达性。 |
 | 2 | `mita status`（服务器端） | 确认代理服务处于 `RUNNING` 状态。 |
 | 3 | `mieru status`（客户端） | 确认客户端已启动。 |
-| 4 | `mieru describe config` 与 `mita describe config` | 对比**端口**、**协议**、**用户名**和**密码**，必须完全一致。 |
+| 4 | `mieru describe config` 与 `mita describe config` | 对比**端口**、**协议**、**用户名**和**密码**，必须完全一致；同时确认两端的 `cipherSuites` 有交集，且两端都是本版本的程序（v1 客户端不再被支持，见[密码套件协商](#密码套件协商)）。 |
 | 5 | `date`（两端均执行） | 确认两端时钟偏差不超过 1 分钟；偏差超过 1 分钟会握手失败。 |
 | 6 | 在两端启用调试日志并重启 | 在日志中查找 `handshake`、`cipher` 或 `underlay` 相关错误；服务器的解密失败通常表现为无法识别用户或密钥不匹配。 |
 | 7 | 检查服务器防火墙 | 确认配置文件里 `portBindings` 声明的 TCP / UDP 端口对公网开放。 |

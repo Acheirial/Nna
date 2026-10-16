@@ -25,5 +25,10 @@
     "mtu": 1400,
     "dns": {
         "dualStack": "PREFER_IPv4"
-    }
+    },
+    "cipherSuites": [
+        "CIPHER_SUITE_XCHACHA20_POLY1305",
+        "CIPHER_SUITE_AES_256_GCM",
+        "CIPHER_SUITE_AES_128_GCM"
+    ]
 }

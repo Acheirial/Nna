@@ -73,9 +73,13 @@ type BlockCipher interface {
 	// This code is performance sensitive and may not check all invariants.
 	DecryptStatelessTo(ciphertext, dst []byte) ([]byte, error)
 
-	// NonceSize returns the size of the nonce that must be passed to Seal
-	// and Open.
+	// NonceSize returns the size of the wire format nonce that must be passed
+	// to the Encrypt and Decrypt methods. It is DefaultNonceSize for every
+	// cipher suite.
 	NonceSize() int
+
+	// Suite returns the AEAD cipher suite used by the block cipher.
+	Suite() Suite
 
 	// Overhead returns the maximum difference between the lengths of a
 	// plaintext and its ciphertext.
@@ -135,10 +139,25 @@ func HashPassword(rawPassword, uniqueValue []byte) []byte {
 	return hashed[:]
 }
 
+// NewBlockCipherFromKey creates a BlockCipher object from an AEAD key.
+// The key is copied, so the caller can erase the input afterwards.
+// At least suite.KeyLen() key bytes must be provided, and only the first
+// suite.KeyLen() bytes are used; extra key bytes are ignored.
+func NewBlockCipherFromKey(suite Suite, key []byte, stateless bool) (BlockCipher, error) {
+	block, err := newBlockCipher(suite, key)
+	if err != nil {
+		return nil, err
+	}
+	if !stateless {
+		block.SetImplicitNonceMode(true)
+	}
+	return block, nil
+}
+
 // BlockCipherFromPassword creates a BlockCipher object from the password
-// with the default settings.
-func BlockCipherFromPassword(password []byte, stateless bool) (BlockCipher, error) {
-	entry, err := getCachedCiphers(string(password), time.Now())
+// with the supplied cipher suite and the default settings.
+func BlockCipherFromPassword(suite Suite, password []byte, stateless bool) (BlockCipher, error) {
+	entry, err := getCachedCiphers(string(password), suite, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -149,10 +168,14 @@ func BlockCipherFromPassword(password []byte, stateless bool) (BlockCipher, erro
 	return block, nil
 }
 
-// BlockCipherListFromPassword creates three BlockCipher objects using different salts
-// from the password with the default settings.
-func BlockCipherListFromPassword(password []byte, stateless bool) ([]BlockCipher, error) {
-	entry, err := getCachedCiphers(string(password), time.Now())
+// BlockCipherListFromPassword creates three BlockCipher objects of the given
+// cipher suite, using three different salts from the password with the default
+// settings. Element 0 uses the salt of the previous key refresh interval,
+// element 1 uses the salt of the current one, and element 2 uses the salt of
+// the next one, which allows a caller to handle a peer with a clock offset of
+// up to two minutes in either direction.
+func BlockCipherListFromPassword(suite Suite, password []byte, stateless bool) ([]BlockCipher, error) {
+	entry, err := getCachedCiphers(string(password), suite, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -164,33 +187,6 @@ func BlockCipherListFromPassword(password []byte, stateless bool) ([]BlockCipher
 		}
 	}
 	return blocks, nil
-}
-
-// TryDecrypt tries to decrypt the data with all possible keys generated from the password.
-// If successful, returns the block cipher as well as the decrypted results.
-func TryDecrypt(data, password []byte, stateless bool) (BlockCipher, []byte, error) {
-	if stateless {
-		entry, err := getCachedCiphers(string(password), time.Now())
-		if err != nil {
-			return nil, nil, fmt.Errorf("getBlockCipherList() failed: %w", err)
-		}
-		block, plaintext, err := selectDecryptStateless(data, nil, entry.cipherList)
-		if err != nil {
-			return nil, nil, fmt.Errorf("unable to decrypt from supplied %d cipher blocks", len(entry.cipherList))
-		}
-		return block.CloneStatelessFast(), plaintext, nil
-	}
-
-	// stateful
-	blocks, err := getBlockCipherList(string(password), stateless)
-	if err != nil {
-		return nil, nil, fmt.Errorf("getBlockCipherList() failed: %w", err)
-	}
-	block, plaintext, err := selectDecrypt(data, blocks)
-	if err != nil {
-		return nil, nil, err
-	}
-	return block, plaintext, nil
 }
 
 // CheckUserFromHint checks if the user is the one associated with the nonce.
@@ -216,23 +212,44 @@ func CheckUserFromHint(user, nonce []byte) bool {
 	return bytes.Equal(output[:NonceSuffixLenForUserHint], nonce[len(nonce)-NonceSuffixLenForUserHint:])
 }
 
-// NewStatelessDecryptor builds a StatelessDecryptor for the given password.
-// The password bytes are copied, so the caller can erase the input afterwards.
-func NewStatelessDecryptor(password []byte) (*StatelessDecryptor, error) {
+// NewStatelessDecryptor builds a StatelessDecryptor for the given cipher
+// suites and password. An empty suite list means all the supported cipher
+// suites. The password bytes are copied, so the caller can erase the input
+// afterwards.
+func NewStatelessDecryptor(suites []Suite, password []byte) (*StatelessDecryptor, error) {
 	if len(password) == 0 {
 		return nil, fmt.Errorf("password is empty")
 	}
+	if len(suites) == 0 {
+		suites = AllSuites()
+	}
+	configured := make([]Suite, len(suites))
+	for i, suite := range suites {
+		if !suite.IsValid() {
+			return nil, fmt.Errorf("invalid cipher suite %d", uint8(suite))
+		}
+		configured[i] = suite
+	}
 	p := make([]byte, len(password))
 	copy(p, password)
-	return &StatelessDecryptor{password: p}, nil
+	return &StatelessDecryptor{password: p, suites: configured}, nil
+}
+
+// preparedCiphers holds the decryption material of a StatelessDecryptor for a
+// single key epoch. It contains one list per configured cipher suite, and each
+// list contains the three time slot ciphers of that suite.
+type preparedCiphers struct {
+	lists [][]*aeadBlockCipher
+	epoch int64
 }
 
 // StatelessDecryptor is optimized and safe for concurrent decryption.
 type StatelessDecryptor struct {
-	// mu guards password. Caller must hold mu to access password.
+	// mu guards password and suites. Caller must hold mu to access them.
 	mu       sync.RWMutex
 	password []byte
-	ciphers  atomic.Pointer[cachedCiphers]
+	suites   []Suite
+	ciphers  atomic.Pointer[preparedCiphers]
 }
 
 // Clear erases the password stored in the decryptor. The decryptor must not be
@@ -247,9 +264,15 @@ func (d *StatelessDecryptor) Clear() {
 		d.password[i] = 0
 	}
 	d.password = nil
+	d.suites = nil
 	d.ciphers.Store(nil)
 }
 
+// TryDecrypt tries to decrypt the ciphertext with the three time slot ciphers
+// of every configured cipher suite, with its prepended wire format nonce.
+// The suite ciphers are tried in the configured order, and the first cipher
+// suite whose AEAD tag verifies wins. The returned BlockCipher exposes the
+// cipher suite that authenticated the ciphertext through Suite().
 func (d *StatelessDecryptor) TryDecrypt(ciphertext, dst []byte) (BlockCipher, []byte, error) {
 	return d.tryDecryptAt(ciphertext, dst, time.Now())
 }
@@ -268,18 +291,27 @@ func (d *StatelessDecryptor) tryDecryptAt(ciphertext, dst []byte, now time.Time)
 	epoch := cipherKeyEpoch(now)
 	entry := d.ciphers.Load()
 	if entry == nil || entry.epoch != epoch {
-		var err error
-		entry, err = getCachedCiphers(string(d.password), now)
-		if err != nil {
-			return nil, nil, err
+		lists := make([][]*aeadBlockCipher, 0, len(d.suites))
+		for _, suite := range d.suites {
+			cached, err := getCachedCiphers(string(d.password), suite, now)
+			if err != nil {
+				return nil, nil, err
+			}
+			lists = append(lists, cached.cipherList)
 		}
+		entry = &preparedCiphers{lists: lists, epoch: epoch}
 		d.ciphers.Store(entry)
 	}
-	block, plaintext, err := selectDecryptStateless(ciphertext, dst, entry.cipherList)
-	if err != nil {
-		return nil, nil, err
+	// The cipher suites are tried in the configured order, and the three time
+	// slots of a suite are tried by selectDecryptStateless. The first cipher
+	// suite that authenticates the ciphertext wins.
+	for _, list := range entry.lists {
+		block, plaintext, err := selectDecryptStateless(ciphertext, dst, list)
+		if err == nil {
+			return block.CloneStatelessFast(), plaintext, nil
+		}
 	}
-	return block.CloneStatelessFast(), plaintext, nil
+	return nil, nil, errUnableToDecrypt
 }
 
 func cipherKeyEpoch(t time.Time) int64 {

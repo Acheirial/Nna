@@ -71,10 +71,15 @@ func newServerProxy(config *pb.ServerConfig) (*serverProxy, error) {
 	if err != nil {
 		return nil, err
 	}
+	allowedCipherSuites, err := appctlcommon.ValidateCipherSuiteList("server config cipherSuites", config.GetCipherSuites())
+	if err != nil {
+		return nil, err
+	}
 	mux := protocol.NewMux(false).
 		SetTrafficPattern(trafficPattern).
 		SetServerUsers(appctlcommon.UserListToMap(config.GetUsers())).
 		SetServerUserHintIsMandatory(config.GetAdvancedSettings().GetUserHintIsMandatory())
+	mux.SetAllowedCipherSuites(allowedCipherSuites)
 	mtu := common.DefaultMTU
 	if config.GetMtu() != 0 {
 		mtu = int(config.GetMtu())
@@ -347,6 +352,12 @@ func MergeServerConfig(dst, src *pb.ServerConfig) error {
 	} else {
 		trafficPattern = dst.GetTrafficPattern()
 	}
+	var cipherSuites []pb.CipherSuite
+	if src.CipherSuites != nil {
+		cipherSuites = src.GetCipherSuites()
+	} else {
+		cipherSuites = dst.GetCipherSuites()
+	}
 
 	proto.Reset(dst)
 	dst.ListenIPAddress = listenIPAddress
@@ -358,6 +369,7 @@ func MergeServerConfig(dst, src *pb.ServerConfig) error {
 	dst.Egress = egress
 	dst.Dns = dns
 	dst.TrafficPattern = trafficPattern
+	dst.CipherSuites = cipherSuites
 	return nil
 }
 
@@ -381,6 +393,7 @@ func MergeServerConfig(dst, src *pb.ServerConfig) error {
 // 6.3. if the action is "PROXY", the proxy is defined
 // 7. DNS configuration is valid
 // 8. if set, traffic pattern is valid
+// 9. if set, cipher suites are valid
 func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 	if err := appctlcommon.ValidateServerListenIPAddress(patch.GetListenIPAddress()); err != nil {
 		return err
@@ -470,6 +483,9 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 	}
 	if err := trafficpattern.Validate(patch.GetTrafficPattern()); err != nil {
 		return fmt.Errorf("invalid traffic pattern: %w", err)
+	}
+	if _, err := appctlcommon.ValidateCipherSuiteList("server config cipherSuites", patch.GetCipherSuites()); err != nil {
+		return err
 	}
 	return nil
 }

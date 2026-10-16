@@ -35,12 +35,12 @@ func TestBuildStateSorted(t *testing.T) {
 		"map-key-a": {Name: proto.String("a-user"), Password: proto.String("a-password")},
 		"wrong-key": {Name: proto.String("m-user"), Password: proto.String("m-password")},
 	}
-	state := buildState(users)
+	state := buildState(users, cipher.AllSuites())
 	if len(state.users) != 3 {
 		t.Fatalf("compiled user count = %d, want 3", len(state.users))
 	}
 	for i, wantName := range []string{"a-user", "m-user", "z-user"} {
-		user := state.users[i]
+		user := &state.users[i]
 		if user.id != uint32(i+1) || user.name != wantName || user.policy.name != wantName {
 			t.Fatalf("compiled user %d = (ID %d, name %q, policy %q), want (ID %d, name %q, policy %q)", i, user.id, user.name, user.policy.name, i+1, wantName, wantName)
 		}
@@ -50,8 +50,8 @@ func TestBuildStateSorted(t *testing.T) {
 func TestBuildStateRawAndHashedCredential(t *testing.T) {
 	const name, password = "equivalent-user", "equivalent-password"
 	prepared := cipher.HashPassword([]byte(password), []byte(name))
-	rawState := buildState(userMap(&appctlpb.User{Name: proto.String(name), Password: proto.String(password)}))
-	hashedState := buildState(userMap(makeTestUser(name, prepared)))
+	rawState := buildState(userMap(&appctlpb.User{Name: proto.String(name), Password: proto.String(password)}), cipher.AllSuites())
+	hashedState := buildState(userMap(makeTestUser(name, prepared)), cipher.AllSuites())
 	if len(rawState.users) != 1 || len(hashedState.users) != 1 {
 		t.Fatalf("compiled user counts = (%d, %d), want (1, 1)", len(rawState.users), len(hashedState.users))
 	}
@@ -71,7 +71,7 @@ func TestBuildStateRejectsMalformedCredentials(t *testing.T) {
 			Name:           proto.String("wrong-length-user"),
 			HashedPassword: proto.String(hex.EncodeToString([]byte("wrong-length-secret"))),
 		},
-	})
+	}, cipher.AllSuites())
 	if len(state.users) != 0 {
 		t.Fatalf("compiled user count = %d, want 0", len(state.users))
 	}
@@ -86,7 +86,7 @@ func TestBuildStateRejectsInvalidNames(t *testing.T) {
 		"duplicate1": duplicateA,
 		"duplicate2": duplicateB,
 		"valid-key":  {Name: proto.String("valid"), Password: proto.String("password")},
-	})
+	}, cipher.AllSuites())
 	if len(state.users) != 1 || state.users[0].name != "valid" || state.users[0].id != 1 {
 		t.Fatalf("compiled users = %+v, want only valid user with ID 1", state.users)
 	}

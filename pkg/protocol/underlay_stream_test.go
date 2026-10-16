@@ -16,6 +16,7 @@
 package protocol
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/stderror"
 )
 
@@ -196,4 +198,71 @@ func (c shortReadDeadlineConn) SetReadDeadline(deadline time.Time) error {
 		deadline = time.Now().Add(100 * time.Millisecond)
 	}
 	return c.Conn.SetReadDeadline(deadline)
+}
+
+// TestStreamUnderlayReusesMessageBuffers verifies that the reusable send and
+// receive buffers of the underlay carry the full content of every message.
+// A message that reuses a buffer must not leak the bytes of the previous one,
+// whatever the size of both messages is.
+func TestStreamUnderlayReusesMessageBuffers(t *testing.T) {
+	password := cipher.HashPassword([]byte(t.Name()), []byte("user"))
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, password, false)
+	if err != nil {
+		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
+	}
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	sender := &StreamUnderlay{
+		baseUnderlay: *newBaseUnderlay(true, 1400, nil),
+		conn:         left,
+		block:        block.Clone(),
+	}
+	receiver := &StreamUnderlay{
+		baseUnderlay: *newBaseUnderlay(false, 1400, nil),
+		conn:         right,
+		serverUsers:  testServerUserRegistry(userMap(makeTestUser("user", password)), false),
+	}
+
+	// The sizes must go up and down, so that a buffer that was grown for a
+	// large message is reused by a small one and the other way round.
+	for i, size := range []int{1200, 1, 900} {
+		payload := make([]byte, size)
+		for j := range payload {
+			payload[j] = byte(i + j)
+		}
+		seg := &segment{
+			metadata: &dataAckStruct{
+				baseStruct: baseStruct{protocol: uint8(dataClientToServer)},
+				sessionID:  7,
+				seq:        uint32(i),
+				windowSize: segmentTreeCapacity,
+				payloadLen: uint16(len(payload)),
+			},
+			payload: payload,
+		}
+		writeDone := make(chan error, 1)
+		go func() {
+			writeDone <- sender.writeOneSegment(seg)
+		}()
+		received, err := receiver.readOneSegment()
+		if err != nil {
+			t.Fatalf("message %d: readOneSegment() failed: %v", i, err)
+		}
+		if err := <-writeDone; err != nil {
+			t.Fatalf("message %d: writeOneSegment() failed: %v", i, err)
+		}
+		if received.Protocol() != dataClientToServer {
+			t.Errorf("message %d: received protocol = %v, want %v", i, received.Protocol(), dataClientToServer)
+		}
+		if !bytes.Equal(received.payload, payload) {
+			t.Errorf("message %d: received %d payload bytes %v, want %v", i, len(received.payload), received.payload, payload)
+		}
+		if got := received.metadata.(*dataAckStruct).payloadLen; got != uint16(len(payload)) {
+			t.Errorf("message %d: received payload length = %d, want %d", i, got, len(payload))
+		}
+	}
+	if sender.OutBytes() != receiver.InBytes() {
+		t.Errorf("stream wire byte counts = sent %d, received %d", sender.OutBytes(), receiver.InBytes())
+	}
 }

@@ -33,7 +33,7 @@ func newUDPSessionBench(b *testing.B, sessionCount int, sameSource bool) *udpSes
 	b.Helper()
 	remoteAddr := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 20000}
 	wrongCredential := cipher.HashPassword([]byte("wrong-password"), []byte("wrong-session-user"))
-	wrongBlock, err := cipher.BlockCipherFromPassword(wrongCredential, true)
+	wrongBlock, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, wrongCredential, true)
 	if err != nil {
 		b.Fatalf("BlockCipherFromPassword(wrong) failed: %v", err)
 	}

@@ -16,13 +16,14 @@
 package cipher
 
 import (
+	"crypto/aes"
 	"crypto/cipher"
 	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"sync"
 
 	"github.com/enfein/mieru/v3/apis/constant"
@@ -30,19 +31,6 @@ import (
 	"github.com/enfein/mieru/v3/pkg/common"
 	"golang.org/x/crypto/chacha20poly1305"
 	"google.golang.org/protobuf/proto"
-)
-
-type AEADType uint8
-
-const (
-	// Not supported.
-	AES128GCM AEADType = iota + 1
-	// Not supported.
-	AES256GCM
-	// Not supported.
-	ChaCha20Poly1305
-	// Supported.
-	XChaCha20Poly1305
 )
 
 var (
@@ -54,8 +42,9 @@ var (
 
 // aeadBlockCipher implements BlockCipher interface with one AEAD algorithm.
 type aeadBlockCipher struct {
-	aead                cipher.AEAD
-	aeadType            AEADType
+	aead cipher.AEAD
+	// suite is immutable after the cipher is created.
+	suite               Suite
 	key                 [DefaultKeyLen]byte
 	enableImplicitNonce bool
 	implicitNonce       []byte
@@ -65,32 +54,80 @@ type aeadBlockCipher struct {
 	noncePatternApplied bool
 }
 
-// newXChaCha20Poly1305BlockCipher creates a new XChaCha20-Poly1305 cipher with the supplied key.
-func newXChaCha20Poly1305BlockCipher(key []byte) (*aeadBlockCipher, error) {
-	keyLen := len(key)
-	if keyLen != 32 {
-		return nil, fmt.Errorf("XChaCha20-Poly1305 key length is %d bytes, want 32 bytes", keyLen)
+// newBlockCipher creates a new AEAD block cipher with the supplied suite and key.
+// At least suite.KeyLen() key bytes must be provided, and only the first
+// suite.KeyLen() bytes are used.
+func newBlockCipher(suite Suite, key []byte) (*aeadBlockCipher, error) {
+	keyLen := suite.KeyLen()
+	if keyLen == 0 {
+		return nil, fmt.Errorf("invalid cipher suite %d", uint8(suite))
+	}
+	if len(key) < keyLen {
+		return nil, fmt.Errorf("%s key length is %d bytes, want %d bytes", suite, len(key), keyLen)
 	}
 
 	var ownedKey [DefaultKeyLen]byte
-	copy(ownedKey[:], key)
-	aead, err := chacha20poly1305.NewX(ownedKey[:])
+	copy(ownedKey[:], key[:keyLen])
+	var aead cipher.AEAD
+	var err error
+	switch suite {
+	case SuiteXChaCha20Poly1305:
+		aead, err = chacha20poly1305.NewX(ownedKey[:keyLen])
+	case SuiteAES256GCM, SuiteAES128GCM:
+		aead, err = newAESGCM(ownedKey[:keyLen])
+	}
 	if err != nil {
-		return nil, fmt.Errorf("chacha20poly1305.NewX() failed: %w", err)
+		return nil, fmt.Errorf("create %s cipher failed: %w", suite, err)
 	}
 
 	return &aeadBlockCipher{
 		aead:                aead,
-		aeadType:            XChaCha20Poly1305,
+		suite:               suite,
 		enableImplicitNonce: false,
 		key:                 ownedKey,
 		implicitNonce:       nil,
 	}, nil
 }
 
-// NonceSize returns the number of bytes used by nonce.
+// newAESGCM creates an AES-GCM AEAD with the supplied key. The key length
+// selects AES-128 or AES-256. The AEAD nonce is 12 bytes and the tag is 16
+// bytes long.
+func newAESGCM(key []byte) (cipher.AEAD, error) {
+	aesCipher, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("aes.NewCipher() failed: %w", err)
+	}
+	aead, err := cipher.NewGCM(aesCipher)
+	if err != nil {
+		return nil, fmt.Errorf("cipher.NewGCM() failed: %w", err)
+	}
+	return aead, nil
+}
+
+// newXChaCha20Poly1305BlockCipher creates a new XChaCha20-Poly1305 cipher with the supplied key.
+func newXChaCha20Poly1305BlockCipher(key []byte) (*aeadBlockCipher, error) {
+	return newBlockCipher(SuiteXChaCha20Poly1305, key)
+}
+
+// NonceSize returns the size of the wire format nonce that must be passed to
+// the Encrypt and Decrypt methods. It is DefaultNonceSize for every cipher
+// suite: the wire format always carries a 24 bytes nonce, and the AEAD nonce
+// is derived from it by aeadNonce().
 func (c *aeadBlockCipher) NonceSize() int {
-	return c.aead.NonceSize()
+	return DefaultNonceSize
+}
+
+// aeadNonce derives the AEAD nonce from the wire format nonce. See the "AEAD
+// nonce derivation" comment in suite.go for the rationale of taking the last
+// bytes of the wire format nonce.
+func (c *aeadBlockCipher) aeadNonce(wireNonce []byte) []byte {
+	return wireNonce[len(wireNonce)-c.aead.NonceSize():]
+}
+
+// Suite returns the cipher suite of the block cipher. The suite is immutable,
+// so it doesn't need to be synchronized.
+func (c *aeadBlockCipher) Suite() Suite {
+	return c.suite
 }
 
 func (c *aeadBlockCipher) Overhead() int {
@@ -100,12 +137,12 @@ func (c *aeadBlockCipher) Overhead() int {
 func (c *aeadBlockCipher) Encrypt(dst, plaintext []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var nonce []byte
+	var wireNonce []byte
 	var err error
 	needSendNonce := !c.enableImplicitNonce || len(c.implicitNonce) == 0
 	resultLen := len(plaintext) + c.aead.Overhead()
 	if needSendNonce {
-		resultLen += c.aead.NonceSize()
+		resultLen += DefaultNonceSize
 	}
 	if cap(dst)-len(dst) < resultLen {
 		return errDestinationTooSmall
@@ -117,27 +154,26 @@ func (c *aeadBlockCipher) Encrypt(dst, plaintext []byte) error {
 				return fmt.Errorf("newNonce() failed: %w", err)
 			}
 			c.implicitNonce = c.addUserHintToNonce(c.implicitNonce)
-			nonce = c.implicitNonce
 		} else {
 			c.increaseNonce()
-			nonce = c.implicitNonce
 		}
+		wireNonce = c.implicitNonce
 	} else {
 		start := len(dst)
-		dst = dst[:start+c.aead.NonceSize()]
-		nonce = dst[start:]
-		if err = c.newNonceTo(nonce); err != nil {
+		dst = dst[:start+DefaultNonceSize]
+		wireNonce = dst[start:]
+		if err = c.newNonceTo(wireNonce); err != nil {
 			return fmt.Errorf("newNonceTo() failed: %w", err)
 		}
-		nonce = c.addUserHintToNonce(nonce)
+		wireNonce = c.addUserHintToNonce(wireNonce)
 	}
 
 	if needSendNonce {
 		if c.enableImplicitNonce {
-			dst = append(dst, nonce...)
+			dst = append(dst, wireNonce...)
 		}
 	}
-	c.aead.Seal(dst, nonce, plaintext, nil)
+	c.aead.Seal(dst, c.aeadNonce(wireNonce), plaintext, nil)
 	return nil
 }
 
@@ -153,35 +189,35 @@ func (c *aeadBlockCipher) EncryptWithNonce(dst, nonce, plaintext []byte) error {
 	if cap(dst)-len(dst) < len(plaintext)+c.aead.Overhead() {
 		return errDestinationTooSmall
 	}
-	c.aead.Seal(dst, nonce, plaintext, nil)
+	c.aead.Seal(dst, c.aeadNonce(nonce), plaintext, nil)
 	return nil
 }
 
 func (c *aeadBlockCipher) Decrypt(ciphertext []byte) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var nonce []byte
+	var wireNonce []byte
 	if c.enableImplicitNonce {
 		if len(c.implicitNonce) == 0 {
-			if len(ciphertext) < c.NonceSize() {
+			if len(ciphertext) < DefaultNonceSize {
 				return nil, errCiphertextTooShort
 			}
-			c.implicitNonce = make([]byte, c.NonceSize())
-			copy(c.implicitNonce, []byte(ciphertext[:c.NonceSize()]))
-			ciphertext = ciphertext[c.NonceSize():]
+			c.implicitNonce = make([]byte, DefaultNonceSize)
+			copy(c.implicitNonce, ciphertext[:DefaultNonceSize])
+			ciphertext = ciphertext[DefaultNonceSize:]
 		} else {
 			c.increaseNonce()
 		}
-		nonce = c.implicitNonce
+		wireNonce = c.implicitNonce
 	} else {
-		if len(ciphertext) < c.NonceSize() {
+		if len(ciphertext) < DefaultNonceSize {
 			return nil, errCiphertextTooShort
 		}
-		nonce = ciphertext[:c.NonceSize()]
-		ciphertext = ciphertext[c.NonceSize():]
+		wireNonce = ciphertext[:DefaultNonceSize]
+		ciphertext = ciphertext[DefaultNonceSize:]
 	}
 
-	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := c.aead.Open(nil, c.aeadNonce(wireNonce), ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cipher.AEAD.Open() failed: %w", err)
 	}
@@ -197,7 +233,7 @@ func (c *aeadBlockCipher) DecryptWithNonce(ciphertext, nonce []byte) ([]byte, er
 	if len(nonce) != c.NonceSize() {
 		return nil, fmt.Errorf("want nonce size %d, got %d", c.NonceSize(), len(nonce))
 	}
-	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := c.aead.Open(nil, c.aeadNonce(nonce), ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cipher.AEAD.Open() failed: %w", err)
 	}
@@ -209,8 +245,15 @@ const (
 	// payload nonce from the message nonce.
 	//
 	// The user hint occupies the last 4 nonce bytes, and the nonce pattern
-	// rewrites at most the first 12 nonce bytes (NoncePattern minLen and maxLen
-	// are limited to 12), so byte 16 belongs to neither of them.
+	// rewrites at most the first maxNoncePatternLen (12) nonce bytes, so byte 16
+	// belongs to neither of them.
+	//
+	// The offset must also fall into the AEAD nonce of every cipher suite. The
+	// smallest AEAD nonce is the minAEADNonceLen (12) bytes AES-GCM nonce,
+	// which covers the nonce bytes [12, 24), so flipping byte 16 changes the
+	// AEAD nonce of the payload but not the AEAD nonce of the metadata. This
+	// keeps the metadata and the payload of a message separated for AES-GCM as
+	// well.
 	payloadNonceOffset = 16
 	// payloadNonceMask is XORed with the byte at payloadNonceOffset. Any non
 	// zero value works, it only needs to guarantee that the derived nonce is
@@ -218,8 +261,10 @@ const (
 	payloadNonceMask = 0x01
 )
 
-// payloadNonce derives the nonce used to encrypt or decrypt the payload of a
-// message from the nonce used to encrypt or decrypt its metadata.
+// payloadNonce derives the wire format nonce used to encrypt or decrypt the
+// payload of a message from the wire format nonce used to encrypt or decrypt
+// its metadata. The AEAD nonce is then derived from it by aeadNonce(), so the
+// metadata and the payload of the same message never share an AEAD nonce.
 func payloadNonce(nonce []byte) []byte {
 	derived := make([]byte, len(nonce))
 	copy(derived, nonce)
@@ -239,7 +284,7 @@ func (c *aeadBlockCipher) EncryptPayloadWithNonce(dst, nonce, plaintext []byte) 
 	if cap(dst)-len(dst) < len(plaintext)+c.aead.Overhead() {
 		return errDestinationTooSmall
 	}
-	c.aead.Seal(dst, payloadNonce(nonce), plaintext, nil)
+	c.aead.Seal(dst, c.aeadNonce(payloadNonce(nonce)), plaintext, nil)
 	return nil
 }
 
@@ -252,7 +297,7 @@ func (c *aeadBlockCipher) DecryptPayloadWithNonce(ciphertext, nonce []byte) ([]b
 	if len(nonce) != c.NonceSize() {
 		return nil, fmt.Errorf("want nonce size %d, got %d", c.NonceSize(), len(nonce))
 	}
-	plaintext, err := c.aead.Open(nil, payloadNonce(nonce), ciphertext, nil)
+	plaintext, err := c.aead.Open(nil, c.aeadNonce(payloadNonce(nonce)), ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cipher.AEAD.Open() failed: %w", err)
 	}
@@ -260,24 +305,17 @@ func (c *aeadBlockCipher) DecryptPayloadWithNonce(ciphertext, nonce []byte) ([]b
 }
 
 func (c *aeadBlockCipher) DecryptStatelessTo(ciphertext, dst []byte) ([]byte, error) {
-	if len(ciphertext) < c.aead.NonceSize() {
+	if len(ciphertext) < DefaultNonceSize {
 		return nil, errCiphertextTooShort
 	}
-	nonceSize := c.aead.NonceSize()
-	return c.aead.Open(dst, ciphertext[:nonceSize], ciphertext[nonceSize:], nil)
+	return c.aead.Open(dst, c.aeadNonce(ciphertext[:DefaultNonceSize]), ciphertext[DefaultNonceSize:], nil)
 }
 
 func (c *aeadBlockCipher) Clone() BlockCipher {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var newCipher *aeadBlockCipher
-	var err error
-	if c.aeadType == XChaCha20Poly1305 {
-		newCipher, err = newXChaCha20Poly1305BlockCipher(c.key[:])
-	} else {
-		panic("invalid AEAD type")
-	}
+	newCipher, err := newBlockCipher(c.suite, c.key[:c.suite.KeyLen()])
 	if err != nil {
 		panic(err)
 	}
@@ -375,12 +413,14 @@ func (c *aeadBlockCipher) newNonceTo(nonce []byte) error {
 	case appctlpb.NonceType_NONCE_TYPE_FIXED:
 		hexStrings := c.noncePattern.GetCustomHexStrings()
 		if len(hexStrings) > 0 {
-			idx := mrand.Intn(len(hexStrings))
+			idx := mrand.IntN(len(hexStrings))
 			prefix, err := hex.DecodeString(hexStrings[idx])
 			if err == nil {
 				copyLen := len(prefix)
-				if copyLen > c.NonceSize() {
-					copyLen = c.NonceSize()
+				// The pattern must never rewrite the bytes of the wire nonce
+				// that AES-GCM uses as its AEAD nonce, see maxNoncePatternLen.
+				if copyLen > maxNoncePatternLen {
+					copyLen = maxNoncePatternLen
 				}
 				copy(nonce[:copyLen], prefix[:copyLen])
 			} else {
@@ -394,12 +434,14 @@ func (c *aeadBlockCipher) newNonceTo(nonce []byte) error {
 	return nil
 }
 
-// nonceRewriteLen returns a random length in [minLen, maxLen] clamped to the nonce size.
+// nonceRewriteLen returns a random length in [minLen, maxLen] clamped to
+// maxNoncePatternLen. The clamp keeps the nonce pattern away from the bytes
+// that AES-GCM uses as its AEAD nonce, see maxNoncePatternLen.
 func (c *aeadBlockCipher) nonceRewriteLen() int {
 	minLen := int(c.noncePattern.GetMinLen())
 	maxLen := int(c.noncePattern.GetMaxLen())
-	if maxLen > c.NonceSize() {
-		maxLen = c.NonceSize()
+	if maxLen > maxNoncePatternLen {
+		maxLen = maxNoncePatternLen
 	}
 	if minLen > maxLen {
 		minLen = maxLen
@@ -407,7 +449,7 @@ func (c *aeadBlockCipher) nonceRewriteLen() int {
 	if minLen == maxLen {
 		return minLen
 	}
-	rangeSize := mrand.Intn(maxLen - minLen + 1)
+	rangeSize := mrand.IntN(maxLen - minLen + 1)
 	return minLen + rangeSize
 }
 
@@ -426,9 +468,9 @@ func (c *aeadBlockCipher) increaseNonce() {
 
 func (c *aeadBlockCipher) cloneStatelessFast() *aeadBlockCipher {
 	return &aeadBlockCipher{
-		aead:     c.aead,
-		aeadType: c.aeadType,
-		key:      c.key,
+		aead:  c.aead,
+		suite: c.suite,
+		key:   c.key,
 	}
 }
 
@@ -448,20 +490,6 @@ func (c *aeadBlockCipher) addUserHintToNonce(nonce []byte) []byte {
 	output := sha256.Sum256(input[:n])
 	copy(nonce[len(nonce)-NonceSuffixLenForUserHint:], output[:NonceSuffixLenForUserHint])
 	return nonce
-}
-
-// selectDecrypt returns the appropriate cipher block that can decrypt the data,
-// as well as the decrypted result.
-func selectDecrypt(data []byte, blocks []*aeadBlockCipher) (*aeadBlockCipher, []byte, error) {
-	for _, block := range blocks {
-		decrypted, err := block.Decrypt(data)
-		if err != nil {
-			continue
-		}
-		return block, decrypted, nil
-	}
-
-	return nil, nil, fmt.Errorf("unable to decrypt from supplied %d cipher blocks", len(blocks))
 }
 
 func selectDecryptStateless(ciphertext, dst []byte, blocks []*aeadBlockCipher) (*aeadBlockCipher, []byte, error) {

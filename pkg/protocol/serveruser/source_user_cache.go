@@ -20,6 +20,8 @@ import (
 	"net"
 	"net/netip"
 	"time"
+
+	"github.com/enfein/mieru/v3/pkg/cipher"
 )
 
 const (
@@ -33,9 +35,15 @@ var (
 
 type sourceUserCacheTickFunc func() uint32
 
+// sourceUserCacheCandidate is a cached guess of the user that owns a source
+// address, the age of that guess, and the cipher suite that authenticated the
+// user the last time. The suite is not authentication information: it is only
+// used to try that suite first for the same user, and a cached entry only ever
+// reorders trials that are authenticated by their AEAD tag anyway.
 type sourceUserCacheCandidate struct {
-	id  uint32
-	age uint32
+	id    uint32
+	age   uint32
+	suite cipher.Suite
 }
 
 func sourceUserCacheCurrentTick() uint32 {
@@ -98,6 +106,27 @@ func sourceUserCacheUnpackUser(packed uint64) (uint32, uint32) {
 	return uint32(packed >> 32), uint32(packed)
 }
 
+// sourceUserCachePackSuite and sourceUserCacheUnpackSuite convert a cipher
+// suite to and from the cached representation. An invalid suite is stored as
+// 0xff and is ignored by the caller.
+func sourceUserCachePackSuite(suite cipher.Suite) uint32 {
+	if !suite.IsValid() {
+		return 0xff
+	}
+	return uint32(suite)
+}
+
+func sourceUserCacheUnpackSuite(packed uint32) cipher.Suite {
+	if packed > 0xff {
+		return 0xff
+	}
+	suite := cipher.Suite(packed)
+	if !suite.IsValid() {
+		return 0xff
+	}
+	return suite
+}
+
 func sourceUserCacheExpired(now, then uint32) bool {
 	return sourceUserCacheAge(now, then) >= sourceUserCacheLifeSeconds
 }
@@ -116,10 +145,12 @@ func (c *sourceUserCache) currentTick() uint32 {
 	return c.tick()
 }
 
-// lookup returns cached user IDs for the lookup key in most recently used order.
+// lookup returns cached user IDs for the lookup key in most recently used
+// order, together with the cipher suite that authenticated each user the last
+// time.
 // Expiry is logical: expired entries remain physically present until reused.
-func (c *sourceUserCache) lookup(key [16]byte) ([sourceUserCacheUsers]uint32, int) {
-	var result [sourceUserCacheUsers]uint32
+func (c *sourceUserCache) lookup(key [16]byte) ([sourceUserCacheUsers]sourceUserCacheCandidate, int) {
+	var result [sourceUserCacheUsers]sourceUserCacheCandidate
 	if c == nil {
 		return result, 0
 	}
@@ -148,6 +179,7 @@ func (c *sourceUserCache) lookup(key [16]byte) ([sourceUserCacheUsers]uint32, in
 				continue
 			}
 			age := sourceUserCacheAge(now, seen)
+			suite := sourceUserCacheUnpackSuite(entry.suites[i].Load())
 
 			// Deduplicate: a user may occupy multiple slots;
 			// keep the freshest (smallest age) seen so far.
@@ -161,10 +193,11 @@ func (c *sourceUserCache) lookup(key [16]byte) ([sourceUserCacheUsers]uint32, in
 			if duplicate >= 0 {
 				if age < candidates[duplicate].age {
 					candidates[duplicate].age = age
+					candidates[duplicate].suite = suite
 				}
 				continue
 			}
-			candidates[count] = sourceUserCacheCandidate{id: userID, age: age}
+			candidates[count] = sourceUserCacheCandidate{id: userID, age: age, suite: suite}
 			count++
 		}
 
@@ -180,7 +213,7 @@ func (c *sourceUserCache) lookup(key [16]byte) ([sourceUserCacheUsers]uint32, in
 			candidates[j] = candidate
 		}
 		for i := 0; i < count; i++ {
-			result[i] = candidates[i].id
+			result[i] = candidates[i]
 		}
 		if count > 0 {
 			return result, count
@@ -193,7 +226,7 @@ func (c *sourceUserCache) lookup(key [16]byte) ([sourceUserCacheUsers]uint32, in
 
 // recordAuthenticated records a source to user association after the caller
 // has authenticated the user. A zero user ID is reserved and is ignored.
-func (c *sourceUserCache) recordAuthenticated(key [16]byte, userID uint32) {
+func (c *sourceUserCache) recordAuthenticated(key [16]byte, userID uint32, suite cipher.Suite) {
 	if c == nil || userID == 0 {
 		return
 	}
@@ -201,13 +234,13 @@ func (c *sourceUserCache) recordAuthenticated(key [16]byte, userID uint32) {
 	if table == nil {
 		return
 	}
-	c.recordAuthenticatedInTable(table, key, userID)
+	c.recordAuthenticatedInTable(table, key, userID, suite)
 }
 
 // recordAuthenticatedInTable continues a record operation after its one table
 // load. Retirement may detach the table concurrently; an operation that already
 // loaded it may still complete and update the detached table.
-func (c *sourceUserCache) recordAuthenticatedInTable(table *sourceUserCacheTable, key [16]byte, userID uint32) {
+func (c *sourceUserCache) recordAuthenticatedInTable(table *sourceUserCacheTable, key [16]byte, userID uint32, suite cipher.Suite) {
 	if c == nil || table == nil || userID == 0 {
 		return
 	}
@@ -235,7 +268,7 @@ func (c *sourceUserCache) recordAuthenticatedInTable(table *sourceUserCacheTable
 	if match >= 0 {
 		// Writers for this bucket are serialized by bucketLock. Publish the
 		// current tick directly so numeric wraparound can't suppress a refresh.
-		c.recordUser(ways[match], userID, now)
+		c.recordUser(ways[match], userID, suite, now)
 		ways[match].lastActive.Store(now)
 		return
 	}
@@ -243,12 +276,13 @@ func (c *sourceUserCache) recordAuthenticatedInTable(table *sourceUserCacheTable
 	way := selectSourceUserCacheWay(ways, now)
 	replacement := &sourceUserCacheEntry{key: key}
 	replacement.lastActive.Store(now)
+	replacement.suites[0].Store(sourceUserCachePackSuite(suite))
 	replacement.users[0].Store(sourceUserCachePackUser(userID, now))
 	bucket.ways[way].Store(replacement)
 }
 
 // recordUser refreshes userID or inserts it into a deterministic user slot.
-func (c *sourceUserCache) recordUser(entry *sourceUserCacheEntry, userID, now uint32) {
+func (c *sourceUserCache) recordUser(entry *sourceUserCacheEntry, userID uint32, suite cipher.Suite, now uint32) {
 	for {
 		var slots [sourceUserCacheUsers]uint64
 		same := -1
@@ -287,9 +321,13 @@ func (c *sourceUserCache) recordUser(entry *sourceUserCacheEntry, userID, now ui
 		}
 		old := slots[slot]
 		oldID, oldTick := sourceUserCacheUnpackUser(old)
-		if oldID == userID && oldTick == now {
+		if oldID == userID && oldTick == now && sourceUserCacheUnpackSuite(entry.suites[slot].Load()) == suite {
 			return
 		}
+		// Publish the cipher suite before the user ID, so a reader that
+		// observes the user ID never pairs it with the suite of a previous
+		// occupant of the slot.
+		entry.suites[slot].Store(sourceUserCachePackSuite(suite))
 		if entry.users[slot].CompareAndSwap(old, sourceUserCachePackUser(userID, now)) {
 			return
 		}

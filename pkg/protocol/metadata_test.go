@@ -240,3 +240,97 @@ func FuzzDataAckStructUnmarshal(f *testing.F) {
 		_ = (&dataAckStruct{}).Unmarshal(b)
 	})
 }
+
+// TestMarshalTo verifies that the allocation free marshalTo() produces the same
+// frame as Marshal(), also when it is given a buffer that holds the remains of
+// another message.
+func TestMarshalTo(t *testing.T) {
+	ss := &sessionStruct{
+		baseStruct: baseStruct{protocol: uint8(openSessionRequest)},
+		sessionID:  mrand.Uint32(),
+		seq:        mrand.Uint32(),
+		statusCode: uint8(mrand.Uint32()),
+		payloadLen: uint16(mrand.Intn(MaxSessionOpenPayload + 1)),
+		suffixLen:  uint8(mrand.Uint32()),
+	}
+	das := &dataAckStruct{
+		baseStruct: baseStruct{protocol: uint8(ackClientToServer)},
+		sessionID:  mrand.Uint32(),
+		seq:        mrand.Uint32(),
+		unAckSeq:   mrand.Uint32(),
+		windowSize: uint16(mrand.Uint32()),
+		fragment:   uint8(mrand.Uint32()),
+		prefixLen:  uint8(mrand.Uint32()),
+		payloadLen: uint16(mrand.Intn(maxPDU + 1)),
+		suffixLen:  uint8(mrand.Uint32()),
+	}
+	lowEntropy := &dataAckStruct{
+		baseStruct:             baseStruct{protocol: uint8(dataServerToClientLowEntropy)},
+		lowEntropyMode:         uint8(appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_OFF),
+		sessionID:              mrand.Uint32(),
+		seq:                    mrand.Uint32(),
+		unAckSeq:               mrand.Uint32(),
+		windowSize:             uint16(mrand.Uint32()),
+		fragment:               uint8(mrand.Uint32()),
+		prefixLen:              uint8(mrand.Uint32()),
+		payloadLen:             uint16(mrand.Intn(maxPDU + 1)),
+		suffixLen:              uint8(mrand.Uint32()),
+		lowEntropyMask:         mrand.Uint32(),
+		extractedPayloadLen:    uint16(mrand.Uint32()),
+		lowEntropyMaskRotation: uint8(mrand.Uint32()),
+	}
+
+	tests := []struct {
+		name      string
+		marshal   []byte
+		marshalTo func([]byte)
+		// reserved are the bytes that the wire format of the protocol leaves
+		// undefined. They must be zero, whatever the caller's buffer holds.
+		reserved []int
+	}{
+		{
+			name:      "sessionStruct",
+			marshal:   ss.Marshal(),
+			marshalTo: func(b []byte) { ss.marshalTo(b) },
+			reserved:  []int{1, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31},
+		},
+		{
+			name:      "dataAckStruct",
+			marshal:   das.Marshal(),
+			marshalTo: func(b []byte) { das.marshalTo(b) },
+			reserved:  []int{1, 25, 26, 27, 28, 29, 30, 31},
+		},
+		{
+			// Low entropy data defines every byte of the metadata.
+			name:      "low entropy dataAckStruct",
+			marshal:   lowEntropy.Marshal(),
+			marshalTo: func(b []byte) { lowEntropy.marshalTo(b) },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if len(test.marshal) != MetadataLength {
+				t.Fatalf("Marshal() returned %d bytes, want %d", len(test.marshal), MetadataLength)
+			}
+			buf := make([]byte, MetadataLength)
+			for i := range buf {
+				buf[i] = 0xFF
+			}
+			test.marshalTo(buf)
+			for i := range buf {
+				if i >= 2 && i < 6 {
+					// The timestamp is read from the clock by both calls.
+					continue
+				}
+				if buf[i] != test.marshal[i] {
+					t.Errorf("marshalTo() byte %d = %#x, Marshal() byte = %#x", i, buf[i], test.marshal[i])
+				}
+			}
+			for _, i := range test.reserved {
+				if buf[i] != 0 {
+					t.Errorf("marshalTo() byte %d = %#x, want the reserved byte to be 0", i, buf[i])
+				}
+			}
+		})
+	}
+}

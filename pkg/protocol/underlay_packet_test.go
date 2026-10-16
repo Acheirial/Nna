@@ -16,6 +16,7 @@
 package protocol
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"testing"
@@ -39,7 +40,7 @@ func TestPacketServerDropsInvalidControl(t *testing.T) {
 
 	userName := "user"
 	password := cipher.HashPassword([]byte(t.Name()), []byte(userName))
-	block, err := cipher.BlockCipherFromPassword(password, true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, password, true)
 	if err != nil {
 		serverConn.Close()
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
@@ -83,7 +84,7 @@ func TestPacketServerDropsInvalidControl(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	valid := testSessionSegment(openSessionRequest, 2, common.PacketTransport)
+	valid := testOpenSessionSegment(t, 2, common.PacketTransport)
 	if err := sender.writeOneSegment(valid, serverConn.LocalAddr()); err != nil {
 		t.Fatalf("writeOneSegment(valid control) failed: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestPacketClientClosesUnknownSession(t *testing.T) {
 	}
 	defer serverConn.Close()
 
-	block, err := cipher.BlockCipherFromPassword([]byte(t.Name()), true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, []byte(t.Name()), true)
 	if err != nil {
 		clientConn.Close()
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
@@ -230,7 +231,7 @@ func TestPacketServerDropsSegmentOfAnotherUser(t *testing.T) {
 
 	// User A opens a session.
 	const sessionID = 11
-	if err := senderA.writeOneSegment(testSessionSegment(openSessionRequest, sessionID, common.PacketTransport), serverConn.LocalAddr()); err != nil {
+	if err := senderA.writeOneSegment(testOpenSessionSegment(t, sessionID, common.PacketTransport), serverConn.LocalAddr()); err != nil {
 		t.Fatalf("writeOneSegment(open session request) failed: %v", err)
 	}
 	acceptDone := make(chan net.Conn, 1)
@@ -266,7 +267,7 @@ func TestPacketServerDropsSegmentOfAnotherUser(t *testing.T) {
 
 	// A segment sealed by user B is not deliverable to the session of user A,
 	// while a segment sealed by user A is.
-	foreignBlock, err := cipher.BlockCipherFromPassword(credentialB, true)
+	foreignBlock, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credentialB, true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() for user B failed: %v", err)
 	}
@@ -276,7 +277,7 @@ func TestPacketServerDropsSegmentOfAnotherUser(t *testing.T) {
 	if server.mayDeliverToSession(session, foreign) {
 		t.Fatal("mayDeliverToSession() accepted a segment sealed by user B for the session of user A")
 	}
-	ownBlock, err := cipher.BlockCipherFromPassword(credentialA, true)
+	ownBlock, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credentialA, true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() for user A failed: %v", err)
 	}
@@ -411,7 +412,7 @@ func TestPacketServerCleanSessions(t *testing.T) {
 	// A session receives its open session request on creation, so its last
 	// receive time is the creation time.
 	for _, sessionID := range []uint32{21, 22, 23} {
-		if err := sender.writeOneSegment(testSessionSegment(openSessionRequest, sessionID, common.PacketTransport), serverConn.LocalAddr()); err != nil {
+		if err := sender.writeOneSegment(testOpenSessionSegment(t, sessionID, common.PacketTransport), serverConn.LocalAddr()); err != nil {
 			t.Fatalf("writeOneSegment(open session request %d) failed: %v", sessionID, err)
 		}
 	}
@@ -474,5 +475,71 @@ func TestPacketServerCleanSessions(t *testing.T) {
 	}
 	if got := time.Now().UnixMicro() - recent.lastRXTime.Load(); got > idleSessionTimeout.Microseconds() {
 		t.Errorf("session 21 received data %v ago, want less than %v", time.Duration(got)*time.Microsecond, idleSessionTimeout)
+	}
+}
+
+// TestPacketUnderlayReusesDatagramBuffers verifies that the reusable datagram
+// buffers of the underlay carry the full content of every datagram. A datagram
+// that reuses a buffer must not leak the bytes of the previous one, whatever
+// the size of both datagrams is.
+func TestPacketUnderlayReusesDatagramBuffers(t *testing.T) {
+	credential := cipher.HashPassword([]byte(t.Name()), []byte("user"))
+	receiverConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.ListenPacket() receiver failed: %v", err)
+	}
+	defer receiverConn.Close()
+	sender := newServerUserPacketSender(t, receiverConn.LocalAddr(), credential, "user")
+	defer sender.conn.Close()
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, true)
+	if err != nil {
+		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
+	}
+	receiver := &PacketUnderlay{
+		baseUnderlay: *newBaseUnderlay(true, 1400, nil),
+		conn:         receiverConn,
+		serverAddr:   sender.conn.LocalAddr(),
+		block:        block,
+	}
+
+	// The sizes must go up and down, so that a buffer that was grown for a
+	// large datagram is reused by a small one and the other way round.
+	for i, size := range []int{500, 1, 400} {
+		payload := make([]byte, size)
+		for j := range payload {
+			payload[j] = byte(i*31 + j)
+		}
+		seg := &segment{
+			metadata: &dataAckStruct{
+				baseStruct: baseStruct{protocol: uint8(dataServerToClient)},
+				sessionID:  7,
+				seq:        uint32(i),
+				windowSize: segmentTreeCapacity,
+				payloadLen: uint16(len(payload)),
+			},
+			payload: payload,
+		}
+		if err := sender.writeOneSegment(seg, receiverConn.LocalAddr()); err != nil {
+			t.Fatalf("message %d: writeOneSegment() failed: %v", i, err)
+		}
+		received, addr, err := receiver.readOneSegment()
+		if err != nil {
+			t.Fatalf("message %d: readOneSegment() failed: %v", i, err)
+		}
+		if addr.String() != sender.conn.LocalAddr().String() {
+			t.Errorf("message %d: sender address = %v, want %v", i, addr, sender.conn.LocalAddr())
+		}
+		if received.Protocol() != dataServerToClient {
+			t.Errorf("message %d: received protocol = %v, want %v", i, received.Protocol(), dataServerToClient)
+		}
+		if !bytes.Equal(received.payload, payload) {
+			t.Errorf("message %d: received %d payload bytes %v, want %v", i, len(received.payload), received.payload, payload)
+		}
+		if got := received.metadata.(*dataAckStruct).payloadLen; got != uint16(len(payload)) {
+			t.Errorf("message %d: received payload length = %d, want %d", i, got, len(payload))
+		}
+	}
+	if sender.OutBytes() != receiver.InBytes() {
+		t.Errorf("packet wire byte counts = sent %d, received %d", sender.OutBytes(), receiver.InBytes())
 	}
 }

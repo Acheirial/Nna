@@ -87,6 +87,13 @@ func ClientProfileToMultiURLs(profile *pb.ClientProfile) (urls []string, err err
 		if profile.HandshakeMode != nil {
 			q.Add("handshake-mode", profile.GetHandshakeMode().String())
 		}
+		if suites := profile.GetCipherSuites(); len(suites) > 0 {
+			names := make([]string, 0, len(suites))
+			for _, suite := range suites {
+				names = append(names, suite.String())
+			}
+			q.Add("cipher-suites", strings.Join(names, ","))
+		}
 		if tp := profile.GetTrafficPattern(); tp != nil {
 			b, err := proto.Marshal(tp)
 			if err != nil {
@@ -194,6 +201,15 @@ func URLToClientProfile(s string) (*pb.ClientProfile, error) {
 	if q.Get("handshake-mode") != "" {
 		mode := pb.HandshakeMode(pb.HandshakeMode_value[q.Get("handshake-mode")])
 		p.HandshakeMode = &mode
+	}
+	if q.Get("cipher-suites") != "" {
+		for _, name := range strings.Split(q.Get("cipher-suites"), ",") {
+			value, found := pb.CipherSuite_value[name]
+			if !found {
+				return nil, fmt.Errorf("URL has unknown cipher suite %q", name)
+			}
+			p.CipherSuites = append(p.CipherSuites, pb.CipherSuite(value))
+		}
 	}
 	if q.Get("traffic-pattern") != "" {
 		b, err := base64.StdEncoding.DecodeString(q.Get("traffic-pattern"))

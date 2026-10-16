@@ -49,6 +49,7 @@ import (
 //   - if set, MTU is valid
 //   - if set, traffic pattern is valid
 //   - if set, dialer is valid
+//   - if set, cipher suites are valid
 func ValidateClientConfigSingleProfile(profile *pb.ClientProfile) error {
 	name := profile.GetProfileName()
 	if name == "" {
@@ -86,6 +87,9 @@ func ValidateClientConfigSingleProfile(profile *pb.ClientProfile) error {
 		return fmt.Errorf("invalid traffic pattern: %w", err)
 	}
 	if err := validateClientProfileDialer(profile); err != nil {
+		return err
+	}
+	if _, err := ValidateCipherSuiteList("client profile cipherSuites", profile.GetCipherSuites()); err != nil {
 		return err
 	}
 	return nil
@@ -152,6 +156,14 @@ func NewClientMuxFromProfile(activeProfile *pb.ClientProfile, dialer apicommon.D
 		return nil, err
 	}
 	mux = mux.SetClientMultiplexFactor(multiplexFactor)
+
+	// Set cipher suites the client is willing to use.
+	// An empty list lets the mux pick its default suite.
+	cipherSuites, err := ValidateCipherSuiteList("client profile cipherSuites", activeProfile.GetCipherSuites())
+	if err != nil {
+		return nil, err
+	}
+	mux.SetCipherSuites(cipherSuites)
 
 	// Set server endpoints.
 	endpoints, err := clientEndpointsFromProfile(activeProfile)

@@ -254,7 +254,13 @@ type ClientProfile struct {
 	// Fine tune traffic behaviors.
 	TrafficPattern *TrafficPattern `protobuf:"bytes,7,opt,name=trafficPattern,proto3,oneof" json:"trafficPattern,omitempty"`
 	// Optional proxy dialer used by the client to connect to mita.
-	Dialer        *ClientDialer `protobuf:"bytes,8,opt,name=dialer,proto3,oneof" json:"dialer,omitempty"`
+	Dialer *ClientDialer `protobuf:"bytes,8,opt,name=dialer,proto3,oneof" json:"dialer,omitempty"`
+	// Ordered list of cipher suites the client is willing to use.
+	// The first entry is the most preferred suite. The suite used by a
+	// session is negotiated with the server, see ServerConfig.cipherSuites.
+	// An empty list means only CIPHER_SUITE_XCHACHA20_POLY1305 is used.
+	// CIPHER_SUITE_UNSPECIFIED is rejected, duplicated entries are ignored.
+	CipherSuites  []CipherSuite `protobuf:"varint,9,rep,packed,name=cipherSuites,proto3,enum=mieru.appctl.CipherSuite" json:"cipherSuites,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -341,6 +347,13 @@ func (x *ClientProfile) GetTrafficPattern() *TrafficPattern {
 func (x *ClientProfile) GetDialer() *ClientDialer {
 	if x != nil {
 		return x.Dialer
+	}
+	return nil
+}
+
+func (x *ClientProfile) GetCipherSuites() []CipherSuite {
+	if x != nil {
+		return x.CipherSuites
 	}
 	return nil
 }
@@ -555,7 +568,7 @@ const file_appctl_proto_clientcfg_proto_rawDesc = "" +
 	"\v_socks5PortB\x0f\n" +
 	"\r_loggingLevelB\x12\n" +
 	"\x10_socks5ListenLANJ\x04\b\x03\x10\x04J\x04\b\x05\x10\x06J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"\"\xab\x04\n" +
+	"\"\xea\x04\n" +
 	"\rClientProfile\x12%\n" +
 	"\vprofileName\x18\x01 \x01(\tH\x00R\vprofileName\x88\x01\x01\x12+\n" +
 	"\x04user\x18\x02 \x01(\v2\x12.mieru.appctl.UserH\x01R\x04user\x88\x01\x01\x126\n" +
@@ -564,7 +577,8 @@ const file_appctl_proto_clientcfg_proto_rawDesc = "" +
 	"\fmultiplexing\x18\x05 \x01(\v2 .mieru.appctl.MultiplexingConfigH\x03R\fmultiplexing\x88\x01\x01\x12F\n" +
 	"\rhandshakeMode\x18\x06 \x01(\x0e2\x1b.mieru.appctl.HandshakeModeH\x04R\rhandshakeMode\x88\x01\x01\x12I\n" +
 	"\x0etrafficPattern\x18\a \x01(\v2\x1c.mieru.appctl.TrafficPatternH\x05R\x0etrafficPattern\x88\x01\x01\x127\n" +
-	"\x06dialer\x18\b \x01(\v2\x1a.mieru.appctl.ClientDialerH\x06R\x06dialer\x88\x01\x01B\x0e\n" +
+	"\x06dialer\x18\b \x01(\v2\x1a.mieru.appctl.ClientDialerH\x06R\x06dialer\x88\x01\x01\x12=\n" +
+	"\fcipherSuites\x18\t \x03(\x0e2\x19.mieru.appctl.CipherSuiteR\fcipherSuitesB\x0e\n" +
 	"\f_profileNameB\a\n" +
 	"\x05_userB\x06\n" +
 	"\x04_mtuB\x0f\n" +
@@ -632,8 +646,9 @@ var file_appctl_proto_clientcfg_proto_goTypes = []any{
 	(*Auth)(nil),               // 8: mieru.appctl.Auth
 	(*User)(nil),               // 9: mieru.appctl.User
 	(*TrafficPattern)(nil),     // 10: mieru.appctl.TrafficPattern
-	(ProxyProtocol)(0),         // 11: mieru.appctl.ProxyProtocol
-	(*PortBinding)(nil),        // 12: mieru.appctl.PortBinding
+	(CipherSuite)(0),           // 11: mieru.appctl.CipherSuite
+	(ProxyProtocol)(0),         // 12: mieru.appctl.ProxyProtocol
+	(*PortBinding)(nil),        // 13: mieru.appctl.PortBinding
 }
 var file_appctl_proto_clientcfg_proto_depIdxs = []int32{
 	3,  // 0: mieru.appctl.ClientConfig.profiles:type_name -> mieru.appctl.ClientProfile
@@ -645,15 +660,16 @@ var file_appctl_proto_clientcfg_proto_depIdxs = []int32{
 	1,  // 6: mieru.appctl.ClientProfile.handshakeMode:type_name -> mieru.appctl.HandshakeMode
 	10, // 7: mieru.appctl.ClientProfile.trafficPattern:type_name -> mieru.appctl.TrafficPattern
 	4,  // 8: mieru.appctl.ClientProfile.dialer:type_name -> mieru.appctl.ClientDialer
-	11, // 9: mieru.appctl.ClientDialer.protocol:type_name -> mieru.appctl.ProxyProtocol
-	8,  // 10: mieru.appctl.ClientDialer.socks5Authentication:type_name -> mieru.appctl.Auth
-	12, // 11: mieru.appctl.ServerEndpoint.portBindings:type_name -> mieru.appctl.PortBinding
-	0,  // 12: mieru.appctl.MultiplexingConfig.level:type_name -> mieru.appctl.MultiplexingLevel
-	13, // [13:13] is the sub-list for method output_type
-	13, // [13:13] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	11, // 9: mieru.appctl.ClientProfile.cipherSuites:type_name -> mieru.appctl.CipherSuite
+	12, // 10: mieru.appctl.ClientDialer.protocol:type_name -> mieru.appctl.ProxyProtocol
+	8,  // 11: mieru.appctl.ClientDialer.socks5Authentication:type_name -> mieru.appctl.Auth
+	13, // 12: mieru.appctl.ServerEndpoint.portBindings:type_name -> mieru.appctl.PortBinding
+	0,  // 13: mieru.appctl.MultiplexingConfig.level:type_name -> mieru.appctl.MultiplexingLevel
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_appctl_proto_clientcfg_proto_init() }

@@ -24,10 +24,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"unsafe"
+
+	"github.com/enfein/mieru/v3/pkg/cipher"
 )
 
 var (
-	sourceUserCacheBenchCandidates [sourceUserCacheUsers]uint32
+	sourceUserCacheBenchCandidates [sourceUserCacheUsers]sourceUserCacheCandidate
 	sourceUserCacheBenchCount      int
 )
 
@@ -100,9 +102,9 @@ func TestSourceUserCacheExactKeyValidationUnderBucketCollision(t *testing.T) {
 	clock.set(100)
 	cache := newSourceUserCacheWithTick(clock.now)
 	keys := sourceUserCacheCollidingKeys(2)
-	cache.recordAuthenticated(keys[0], 7)
+	cache.recordAuthenticated(keys[0], 7, cipher.SuiteXChaCha20Poly1305)
 
-	if candidates, count := cache.lookup(keys[0]); count != 1 || candidates[0] != 7 {
+	if candidates, count := cache.lookup(keys[0]); count != 1 || candidates[0].id != 7 {
 		t.Fatalf("recorded key lookup = (%v, %d), want ([7], 1)", candidates, count)
 	}
 	if candidates, count := cache.lookup(keys[1]); count != 0 {
@@ -117,15 +119,15 @@ func TestSourceUserCacheMRUDedupExpiryAndUserEviction(t *testing.T) {
 	newUserID := uint32(sourceUserCacheUsers + 1)
 	for userID := uint32(1); userID <= sourceUserCacheUsers; userID++ {
 		clock.set(1000 + userID)
-		cache.recordAuthenticated(key, userID)
+		cache.recordAuthenticated(key, userID, cipher.SuiteXChaCha20Poly1305)
 	}
 
 	clock.set(1020)
-	cache.recordAuthenticated(key, 3)
+	cache.recordAuthenticated(key, 3, cipher.SuiteXChaCha20Poly1305)
 	clock.set(1021)
-	cache.recordAuthenticated(key, newUserID)
+	cache.recordAuthenticated(key, newUserID, cipher.SuiteXChaCha20Poly1305)
 	candidates, count := cache.lookup(key)
-	if count != sourceUserCacheUsers || candidates[0] != newUserID || candidates[1] != 3 {
+	if count != sourceUserCacheUsers || candidates[0].id != newUserID || candidates[1].id != 3 {
 		t.Fatalf("MRU candidates = (%v, %d), want users %d and 3 first", candidates, count, newUserID)
 	}
 	if sourceUserCacheContains(candidates, count, 1) {
@@ -140,7 +142,7 @@ func TestSourceUserCacheMRUDedupExpiryAndUserEviction(t *testing.T) {
 	// once and retain the newer position.
 	entry.users[1].Store(sourceUserCachePackUser(3, 1010))
 	candidates, count = cache.lookup(key)
-	if count != sourceUserCacheUsers-1 || candidates[0] != newUserID || candidates[1] != 3 {
+	if count != sourceUserCacheUsers-1 || candidates[0].id != newUserID || candidates[1].id != 3 {
 		t.Fatalf("deduplicated candidates = (%v, %d), want %d users with %d and 3 first", candidates, count, sourceUserCacheUsers-1, newUserID)
 	}
 
@@ -156,13 +158,13 @@ func TestSourceUserCacheReusesExpiredUserBeforeLiveUser(t *testing.T) {
 	cache := newSourceUserCacheWithTick(clock.now)
 	key := sourceUserCacheTestKey(2)
 	newUserID := uint32(sourceUserCacheUsers + 1)
-	cache.recordAuthenticated(key, 1)
+	cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 	for userID := uint32(2); userID <= sourceUserCacheUsers; userID++ {
 		clock.set(1000 + sourceUserCacheLifeSeconds - sourceUserCacheUsers + userID)
-		cache.recordAuthenticated(key, userID)
+		cache.recordAuthenticated(key, userID, cipher.SuiteXChaCha20Poly1305)
 	}
 	clock.set(1601)
-	cache.recordAuthenticated(key, newUserID)
+	cache.recordAuthenticated(key, newUserID, cipher.SuiteXChaCha20Poly1305)
 	candidates, count := cache.lookup(key)
 	if count != sourceUserCacheUsers || sourceUserCacheContains(candidates, count, 1) {
 		t.Fatalf("expired user was not reused before a live user: (%v, %d)", candidates, count)
@@ -180,13 +182,13 @@ func TestSourceUserCacheFourWayReplacementAndMRUPromotion(t *testing.T) {
 	keys := sourceUserCacheCollidingKeys(sourceUserCacheWays + 1)
 	for i := 0; i < sourceUserCacheWays; i++ {
 		clock.set(uint32(100 + i))
-		cache.recordAuthenticated(keys[i], uint32(i+1))
+		cache.recordAuthenticated(keys[i], uint32(i+1), cipher.SuiteXChaCha20Poly1305)
 	}
 
 	clock.set(104)
-	cache.recordAuthenticated(keys[0], 1)
+	cache.recordAuthenticated(keys[0], 1, cipher.SuiteXChaCha20Poly1305)
 	clock.set(105)
-	cache.recordAuthenticated(keys[4], 5)
+	cache.recordAuthenticated(keys[4], 5, cipher.SuiteXChaCha20Poly1305)
 	if _, count := cache.lookup(keys[1]); count != 0 {
 		t.Fatal("least-recently-used source was not replaced")
 	}
@@ -209,7 +211,7 @@ func TestSourceUserCacheConcurrentlyNewerTickMayMiss(t *testing.T) {
 	clock.set(1001)
 	cache := newSourceUserCacheWithTick(clock.now)
 	key := sourceUserCacheTestKey(6)
-	cache.recordAuthenticated(key, 1)
+	cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 	clock.set(1000)
 	if candidates, count := cache.lookup(key); count != 0 {
 		t.Fatalf("lookup with concurrently newer tick = (%v, %d), want a safe miss", candidates, count)
@@ -221,7 +223,7 @@ func TestSourceUserCacheExpiredEntryDoesNotResurrectAfterHalfRange(t *testing.T)
 	clock.set(100)
 	cache := newSourceUserCacheWithTick(clock.now)
 	key := sourceUserCacheTestKey(7)
-	cache.recordAuthenticated(key, 1)
+	cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 
 	clock.set(uint32(100 + (1 << 31) + 1))
 	if candidates, count := cache.lookup(key); count != 0 {
@@ -239,8 +241,8 @@ func TestSourceUserCacheExpiredEntryDoesNotResurrectAfterHalfRange(t *testing.T)
 		t.Fatalf("expired user resurrected after half the tick range: (%v, %d)", candidates, count)
 	}
 
-	cache.recordAuthenticated(key, 1)
-	if candidates, count := cache.lookup(key); count != 1 || candidates[0] != 1 {
+	cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
+	if candidates, count := cache.lookup(key); count != 1 || candidates[0].id != 1 {
 		t.Fatalf("authenticated refresh after half the tick range = (%v, %d), want ([1], 1)", candidates, count)
 	}
 }
@@ -255,7 +257,7 @@ func TestSourceUserCacheConcurrentFirstInsertionConverges(t *testing.T) {
 			if full {
 				keys := sourceUserCacheCollidingKeys(sourceUserCacheWays + 1)
 				for i := 0; i < sourceUserCacheWays; i++ {
-					cache.recordAuthenticated(keys[i], uint32(i+1))
+					cache.recordAuthenticated(keys[i], uint32(i+1), cipher.SuiteXChaCha20Poly1305)
 					clock.set(clock.now() + 1)
 				}
 				key = keys[sourceUserCacheWays]
@@ -269,7 +271,7 @@ func TestSourceUserCacheConcurrentFirstInsertionConverges(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					cache.recordAuthenticated(key, 1)
+					cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 				}()
 			}
 			close(start)
@@ -311,12 +313,12 @@ func TestSourceUserCacheConcurrentRefreshAndReplacement(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			cache.recordAuthenticated(keys[0], 10)
+			cache.recordAuthenticated(keys[0], 10, cipher.SuiteXChaCha20Poly1305)
 		}()
 		go func() {
 			defer wg.Done()
 			<-start
-			cache.recordAuthenticated(keys[sourceUserCacheWays], 5)
+			cache.recordAuthenticated(keys[sourceUserCacheWays], 5, cipher.SuiteXChaCha20Poly1305)
 		}()
 		close(start)
 		wg.Wait()
@@ -350,7 +352,7 @@ func TestSourceUserCacheConcurrentOperationsAndRetirement(t *testing.T) {
 			i := 0
 			for !stop.Load() {
 				key := keys[(worker+i)%len(keys)]
-				cache.recordAuthenticated(key, uint32(worker+1))
+				cache.recordAuthenticated(key, uint32(worker+1), cipher.SuiteXChaCha20Poly1305)
 				cache.lookup(key)
 				if i == 0 {
 					started <- struct{}{}
@@ -369,7 +371,7 @@ func TestSourceUserCacheConcurrentOperationsAndRetirement(t *testing.T) {
 
 	// The retired cache must stay detached: neither lookups nor records started
 	// after retirement may publish or reach a cache table again.
-	cache.recordAuthenticated(keys[0], 99)
+	cache.recordAuthenticated(keys[0], 99, cipher.SuiteXChaCha20Poly1305)
 	if cache.loadTable() != nil {
 		t.Fatal("record started after retirement reattached a cache table")
 	}
@@ -383,14 +385,14 @@ func TestSourceUserCacheTickWraparound(t *testing.T) {
 	cache := newSourceUserCacheWithTick(clock.now)
 	key := sourceUserCacheTestKey(4)
 	clock.set(math.MaxUint32 - 5)
-	cache.recordAuthenticated(key, 1)
+	cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 	clock.set(math.MaxUint32 - 2)
-	cache.recordAuthenticated(key, 2)
+	cache.recordAuthenticated(key, 2, cipher.SuiteXChaCha20Poly1305)
 	clock.set(2)
-	cache.recordAuthenticated(key, 3)
+	cache.recordAuthenticated(key, 3, cipher.SuiteXChaCha20Poly1305)
 
 	candidates, count := cache.lookup(key)
-	if count != 3 || candidates[0] != 3 || candidates[1] != 2 || candidates[2] != 1 {
+	if count != 3 || candidates[0].id != 3 || candidates[1].id != 2 || candidates[2].id != 1 {
 		t.Fatalf("wraparound MRU lookup = (%v, %d), want [3 2 1]", candidates, count)
 	}
 	clock.set(602)
@@ -407,7 +409,7 @@ func TestSourceUserCacheZeroAllocationWarmPath(t *testing.T) {
 	if _, count := cache.lookup(key); count != 0 {
 		t.Fatal("empty cache lookup unexpectedly hit")
 	}
-	cache.recordAuthenticated(key, 1)
+	cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 	if _, count := cache.lookup(key); count != 1 {
 		t.Fatal("recorded cache lookup missed")
 	}
@@ -419,7 +421,7 @@ func TestSourceUserCacheZeroAllocationWarmPath(t *testing.T) {
 		t.Fatalf("warm lookup allocations = %f, want 0", lookupAllocs)
 	}
 	recordAllocs := testing.AllocsPerRun(1000, func() {
-		cache.recordAuthenticated(key, 1)
+		cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 	})
 	if recordAllocs != 0 {
 		t.Fatalf("warm refresh allocations = %f, want 0", recordAllocs)
@@ -449,7 +451,7 @@ func TestSourceUserCachePhysicalLimitAndUniformOccupancy(t *testing.T) {
 	cache := newSourceUserCacheWithTick(clock.now)
 	const sourceCount = sourceUserCacheBucketCount * sourceUserCacheWays
 	for i := 0; i < sourceCount; i++ {
-		cache.recordAuthenticated(sourceUserCacheTestKey(uint64(i)), 1)
+		cache.recordAuthenticated(sourceUserCacheTestKey(uint64(i)), 1, cipher.SuiteXChaCha20Poly1305)
 	}
 	occupied := 0
 	table := cache.loadTable()
@@ -477,7 +479,7 @@ func BenchmarkSourceUserCache(b *testing.B) {
 			cache := newSourceUserCacheWithTick(clock.now)
 			key := sourceUserCacheTestKey(10)
 			for userID := 1; userID <= users; userID++ {
-				cache.recordAuthenticated(key, uint32(userID))
+				cache.recordAuthenticated(key, uint32(userID), cipher.SuiteXChaCha20Poly1305)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -491,12 +493,12 @@ func BenchmarkSourceUserCache(b *testing.B) {
 		clock.set(100)
 		cache := newSourceUserCacheWithTick(clock.now)
 		key := sourceUserCacheTestKey(11)
-		cache.recordAuthenticated(key, 1)
+		cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 		b.ReportAllocs()
 		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
-				cache.recordAuthenticated(key, 1)
+				cache.recordAuthenticated(key, 1, cipher.SuiteXChaCha20Poly1305)
 			}
 		})
 	})
@@ -535,9 +537,9 @@ func sourceUserCacheEntryForKey(table *sourceUserCacheTable, key [16]byte) *sour
 	return nil
 }
 
-func sourceUserCacheContains(candidates [sourceUserCacheUsers]uint32, count int, userID uint32) bool {
+func sourceUserCacheContains(candidates [sourceUserCacheUsers]sourceUserCacheCandidate, count int, userID uint32) bool {
 	for i := 0; i < count; i++ {
-		if candidates[i] == userID {
+		if candidates[i].id == userID {
 			return true
 		}
 	}

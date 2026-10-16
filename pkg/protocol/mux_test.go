@@ -126,7 +126,7 @@ func runClient(t *testing.T, properties UnderlayProperties, username, password [
 			defer conn.Close()
 			for i := 0; i < 100; i++ {
 				payloadSize := mrand.Intn(maxPDU) + 1
-				payload := testtool.TestHelperGenRot13Input(payloadSize)
+				payload := testRot13Payload(t, testtool.TestHelperGenRot13Input(payloadSize))
 				if _, err := conn.Write(payload); err != nil {
 					t.Errorf("Write() failed: %v", err)
 				}

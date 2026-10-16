@@ -24,6 +24,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
@@ -72,6 +73,10 @@ type Mux struct {
 	username        string
 	password        []byte
 	multiplexFactor int
+	// cipherSuites is the cipher suite preference order of the client. It is
+	// stored as a pointer to a slice so that a reader can snapshot it without
+	// taking the mux lock.
+	cipherSuites atomic.Pointer[[]cipher.Suite]
 
 	// ---- server only fields ----
 	serverUsers serveruser.Registry
@@ -275,6 +280,50 @@ func (m *Mux) SetServerUsers(users map[string]*appctlpb.User) *Mux {
 	}
 	m.serverUsers.SetUsers(users)
 	return m
+}
+
+// SetCipherSuites sets the cipher suite preference order of the client.
+// The first entry of the list protects the handshake request, and the server
+// picks the final suite from the intersection of this list and the suites it
+// allows.
+//
+// Duplicates and unknown suites are dropped, the order is preserved, and an
+// empty list selects SuiteXChaCha20Poly1305. This method panics if the mux is
+// a server mux.
+func (m *Mux) SetCipherSuites(suites []cipher.Suite) {
+	if !m.isClient {
+		panic("Can't set client cipher suites in server mux")
+	}
+	normalized := normalizeClientCipherSuites(suites)
+	m.cipherSuites.Store(&normalized)
+	log.Infof("Mux cipher suite preference is set to %v", normalized)
+}
+
+// SetAllowedCipherSuites sets the cipher suite set that the server allows.
+// Duplicates and unknown suites are dropped, the order is preserved, and an
+// empty list allows all the supported cipher suites. The server picks the
+// final suite from the intersection of this set and the suites the client
+// offers, in the order of this set.
+//
+// This method panics if the mux is a client mux.
+func (m *Mux) SetAllowedCipherSuites(suites []cipher.Suite) {
+	if m.isClient {
+		panic("Can't set allowed cipher suites in client mux")
+	}
+	normalized := normalizeAllowedCipherSuites(suites)
+	// The discovery material of every user and the handshake negotiation of
+	// every server underlay read the allowed suites from the user registry.
+	m.serverUsers.SetAllowedCipherSuites(normalized)
+	log.Infof("Mux allowed cipher suites are set to %v", normalized)
+}
+
+// clientCipherSuites returns a snapshot of the cipher suite preference of the
+// client.
+func (m *Mux) clientCipherSuites() []cipher.Suite {
+	if p := m.cipherSuites.Load(); p != nil && len(*p) > 0 {
+		return *p
+	}
+	return normalizeClientCipherSuites(nil)
 }
 
 // SetServerUserHintIsMandatory atomically sets whether the user hint is
@@ -653,6 +702,9 @@ func setUnderlayRawConn(underlay Underlay) {
 func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 	var underlay Underlay
 	var trafficPattern *appctlpb.TrafficPattern
+	// The first suite of the client preference list protects the handshake
+	// request, so the static cipher of a new underlay is built from it.
+	cipherSuites := m.clientCipherSuites()
 
 	m.mu.Lock()
 	i := mrand.Intn(len(m.endpoints))
@@ -664,7 +716,7 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 
 	switch p.TransportProtocol() {
 	case common.StreamTransport:
-		block, err := cipher.BlockCipherFromPassword(m.password, false)
+		block, err := cipher.BlockCipherFromPassword(cipherSuites[0], m.password, false)
 		if err != nil {
 			return nil, fmt.Errorf("cipher.BlockCipherFromPassword() failed: %v", err)
 		}
@@ -674,12 +726,14 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 		if trafficPattern != nil {
 			block.SetNoncePattern(trafficPattern.GetNonce())
 		}
-		underlay, err = NewStreamUnderlay(ctx, m.dialer, m.resolver, m.clientDNSConfig, p.RemoteAddr().Network(), p.RemoteAddr().String(), p.MTU(), block, trafficPattern)
+		streamUnderlay, err := NewStreamUnderlay(ctx, m.dialer, m.resolver, m.clientDNSConfig, p.RemoteAddr().Network(), p.RemoteAddr().String(), p.MTU(), block, trafficPattern)
 		if err != nil {
 			return nil, fmt.Errorf("NewTCPUnderlay() failed: %v", err)
 		}
+		streamUnderlay.cipherSuites = cipherSuites
+		underlay = streamUnderlay
 	case common.PacketTransport:
-		block, err := cipher.BlockCipherFromPassword(m.password, true)
+		block, err := cipher.BlockCipherFromPassword(cipherSuites[0], m.password, true)
 		if err != nil {
 			return nil, fmt.Errorf("cipher.BlockCipherFromPassword() failed: %v", err)
 		}
@@ -689,10 +743,12 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 		if trafficPattern != nil {
 			block.SetNoncePattern(trafficPattern.GetNonce())
 		}
-		underlay, err = NewPacketUnderlay(ctx, m.packetDialer, m.resolver, p.RemoteAddr().Network(), p.RemoteAddr().String(), p.MTU(), block, trafficPattern)
+		packetUnderlay, err := NewPacketUnderlay(ctx, m.packetDialer, m.resolver, p.RemoteAddr().Network(), p.RemoteAddr().String(), p.MTU(), block, trafficPattern)
 		if err != nil {
 			return nil, fmt.Errorf("NewUDPUnderlay() failed: %v", err)
 		}
+		packetUnderlay.cipherSuites = cipherSuites
+		underlay = packetUnderlay
 	default:
 		return nil, fmt.Errorf("unsupport transport protocol %v", p.TransportProtocol())
 	}
@@ -730,6 +786,12 @@ func (m *Mux) startServerUnderlayEventLoop(ctx context.Context, underlay Underla
 // maybePickExistingUnderlay returns either an existing underlay that
 // can be used by a session, or nil. In the later case a new underlay
 // should be created.
+//
+// A stream underlay is never reused: its cipher chain is replaced by the
+// session keys when the handshake of its session completes, so a second
+// session can't run the handshake on the same connection. A packet underlay
+// multiplexes sessions, because every datagram carries the session key of its
+// session.
 // This method MUST be called only when holding the mu lock.
 func (m *Mux) maybePickExistingUnderlay() Underlay {
 	active := make([]Underlay, 0)
@@ -737,6 +799,9 @@ func (m *Mux) maybePickExistingUnderlay() Underlay {
 		select {
 		case <-underlay.Done():
 		default:
+			if underlay.TransportProtocol() == common.StreamTransport {
+				continue
+			}
 			if !underlay.Scheduler().IsDisabled() {
 				active = append(active, underlay)
 			}

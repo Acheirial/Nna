@@ -88,7 +88,7 @@ func (EgressAction) EnumDescriptor() ([]byte, []int) {
 	return file_appctl_proto_servercfg_proto_rawDescGZIP(), []int{0}
 }
 
-// Proxy server configuration. The next field number is 10.
+// Proxy server configuration. The next field number is 11.
 type ServerConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The IP address the server listens on.
@@ -112,8 +112,14 @@ type ServerConfig struct {
 	Dns *DNS `protobuf:"bytes,7,opt,name=dns,proto3,oneof" json:"dns,omitempty"`
 	// Fine tune traffic behaviors.
 	TrafficPattern *TrafficPattern `protobuf:"bytes,8,opt,name=trafficPattern,proto3,oneof" json:"trafficPattern,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The set of cipher suites the server accepts.
+	// The order expresses the server's preference: when more than one entry
+	// is also supported by the client, the first entry of this list wins.
+	// An empty list means every supported cipher suite is accepted.
+	// CIPHER_SUITE_UNSPECIFIED is rejected, duplicated entries are ignored.
+	CipherSuites  []CipherSuite `protobuf:"varint,10,rep,packed,name=cipherSuites,proto3,enum=mieru.appctl.CipherSuite" json:"cipherSuites,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ServerConfig) Reset() {
@@ -205,6 +211,13 @@ func (x *ServerConfig) GetDns() *DNS {
 func (x *ServerConfig) GetTrafficPattern() *TrafficPattern {
 	if x != nil {
 		return x.TrafficPattern
+	}
+	return nil
+}
+
+func (x *ServerConfig) GetCipherSuites() []CipherSuite {
+	if x != nil {
+		return x.CipherSuites
 	}
 	return nil
 }
@@ -525,7 +538,7 @@ var File_appctl_proto_servercfg_proto protoreflect.FileDescriptor
 
 const file_appctl_proto_servercfg_proto_rawDesc = "" +
 	"\n" +
-	"\x1cappctl/proto/servercfg.proto\x12\fmieru.appctl\x1a\x17appctl/proto/base.proto\"\xe9\x04\n" +
+	"\x1cappctl/proto/servercfg.proto\x12\fmieru.appctl\x1a\x17appctl/proto/base.proto\"\xa8\x05\n" +
 	"\fServerConfig\x12-\n" +
 	"\x0flistenIPAddress\x18\t \x01(\tH\x00R\x0flistenIPAddress\x88\x01\x01\x12=\n" +
 	"\fportBindings\x18\x01 \x03(\v2\x19.mieru.appctl.PortBindingR\fportBindings\x12(\n" +
@@ -535,7 +548,9 @@ const file_appctl_proto_servercfg_proto_rawDesc = "" +
 	"\x03mtu\x18\x05 \x01(\x05H\x03R\x03mtu\x88\x01\x01\x121\n" +
 	"\x06egress\x18\x06 \x01(\v2\x14.mieru.appctl.EgressH\x04R\x06egress\x88\x01\x01\x12(\n" +
 	"\x03dns\x18\a \x01(\v2\x11.mieru.appctl.DNSH\x05R\x03dns\x88\x01\x01\x12I\n" +
-	"\x0etrafficPattern\x18\b \x01(\v2\x1c.mieru.appctl.TrafficPatternH\x06R\x0etrafficPattern\x88\x01\x01B\x12\n" +
+	"\x0etrafficPattern\x18\b \x01(\v2\x1c.mieru.appctl.TrafficPatternH\x06R\x0etrafficPattern\x88\x01\x01\x12=\n" +
+	"\fcipherSuites\x18\n" +
+	" \x03(\x0e2\x19.mieru.appctl.CipherSuiteR\fcipherSuitesB\x12\n" +
 	"\x10_listenIPAddressB\x13\n" +
 	"\x11_advancedSettingsB\x0f\n" +
 	"\r_loggingLevelB\x06\n" +
@@ -612,9 +627,10 @@ var file_appctl_proto_servercfg_proto_goTypes = []any{
 	(*User)(nil),                   // 9: mieru.appctl.User
 	(LoggingLevel)(0),              // 10: mieru.appctl.LoggingLevel
 	(*TrafficPattern)(nil),         // 11: mieru.appctl.TrafficPattern
-	(ProxyProtocol)(0),             // 12: mieru.appctl.ProxyProtocol
-	(*Auth)(nil),                   // 13: mieru.appctl.Auth
-	(DualStack)(0),                 // 14: mieru.appctl.DualStack
+	(CipherSuite)(0),               // 12: mieru.appctl.CipherSuite
+	(ProxyProtocol)(0),             // 13: mieru.appctl.ProxyProtocol
+	(*Auth)(nil),                   // 14: mieru.appctl.Auth
+	(DualStack)(0),                 // 15: mieru.appctl.DualStack
 }
 var file_appctl_proto_servercfg_proto_depIdxs = []int32{
 	8,  // 0: mieru.appctl.ServerConfig.portBindings:type_name -> mieru.appctl.PortBinding
@@ -624,18 +640,19 @@ var file_appctl_proto_servercfg_proto_depIdxs = []int32{
 	3,  // 4: mieru.appctl.ServerConfig.egress:type_name -> mieru.appctl.Egress
 	6,  // 5: mieru.appctl.ServerConfig.dns:type_name -> mieru.appctl.DNS
 	11, // 6: mieru.appctl.ServerConfig.trafficPattern:type_name -> mieru.appctl.TrafficPattern
-	4,  // 7: mieru.appctl.Egress.proxies:type_name -> mieru.appctl.EgressProxy
-	5,  // 8: mieru.appctl.Egress.rules:type_name -> mieru.appctl.EgressRule
-	12, // 9: mieru.appctl.EgressProxy.protocol:type_name -> mieru.appctl.ProxyProtocol
-	13, // 10: mieru.appctl.EgressProxy.socks5Authentication:type_name -> mieru.appctl.Auth
-	0,  // 11: mieru.appctl.EgressRule.action:type_name -> mieru.appctl.EgressAction
-	14, // 12: mieru.appctl.DNS.dualStack:type_name -> mieru.appctl.DualStack
-	7,  // 13: mieru.appctl.DNS.hosts:type_name -> mieru.appctl.DNS.HostsEntry
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	12, // 7: mieru.appctl.ServerConfig.cipherSuites:type_name -> mieru.appctl.CipherSuite
+	4,  // 8: mieru.appctl.Egress.proxies:type_name -> mieru.appctl.EgressProxy
+	5,  // 9: mieru.appctl.Egress.rules:type_name -> mieru.appctl.EgressRule
+	13, // 10: mieru.appctl.EgressProxy.protocol:type_name -> mieru.appctl.ProxyProtocol
+	14, // 11: mieru.appctl.EgressProxy.socks5Authentication:type_name -> mieru.appctl.Auth
+	0,  // 12: mieru.appctl.EgressRule.action:type_name -> mieru.appctl.EgressAction
+	15, // 13: mieru.appctl.DNS.dualStack:type_name -> mieru.appctl.DualStack
+	7,  // 14: mieru.appctl.DNS.hosts:type_name -> mieru.appctl.DNS.HostsEntry
+	15, // [15:15] is the sub-list for method output_type
+	15, // [15:15] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_appctl_proto_servercfg_proto_init() }

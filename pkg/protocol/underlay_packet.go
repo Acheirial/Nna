@@ -50,9 +50,35 @@ type PacketUnderlay struct {
 
 	sessionCleanTicker *time.Ticker
 
+	// rxBuf is the datagram buffer of the event loop. Only the goroutine that
+	// runs RunEventLoop touches it, it keeps len == cap, and it grows to the
+	// largest datagram seen so far, so every read reuses it, including the
+	// reads that time out.
+	//
+	// The buffer holds wire bytes only: the metadata and the payload of a
+	// datagram are decrypted into fresh allocations, so reusing the buffer
+	// never extends the lifetime of a decrypted datagram.
+	rxBuf []byte
+
+	// Send buffers of the data plane. sendMutex protects both of them, and the
+	// connection write is synchronous and copies the bytes, so neither buffer
+	// is referenced after writeOneSegment returns.
+	//
+	// txBuf has len == cap and holds the encrypted wire bytes of one outbound
+	// datagram. The datagram is sliced out of it with a full slice expression,
+	// so its capacity is exactly its length and Encrypt() keeps rejecting a
+	// destination that is too short.
+	//
+	// txScratch is empty and holds the plaintext metadata and payload that the
+	// padding strategy inspects.
+	txBuf     []byte
+	txScratch []byte
+
 	// ---- client fields ----
 	serverAddr net.Addr
 	block      cipher.BlockCipher
+	// cipherSuites is the cipher suite preference order of the client.
+	cipherSuites []cipher.Suite
 
 	// ---- server fields ----
 	serverUsers *serveruser.Registry
@@ -173,6 +199,9 @@ func (u *PacketUnderlay) AddSession(s *Session, remoteAddr net.Addr) error {
 	}
 	s.conn = u // override base underlay
 	s.transportProtocol = u.TransportProtocol()
+	if u.isClient {
+		s.setClientCipherSuites(u.cipherSuites)
+	}
 	s.forwardStateTo(sessionAttached)
 	close(s.ready)
 	log.Debugf("Adding session %d to %v", s.id, u)
@@ -358,6 +387,47 @@ func (u *PacketUnderlay) onOpenSessionRequest(seg *segment, remoteAddr net.Addr)
 	if err := u.AddSession(session, remoteAddr); err != nil {
 		return err
 	}
+
+	// Complete the handshake before the session becomes visible to the
+	// application. The response is protected by the cipher that decrypted the
+	// request, at the same time slot.
+	response, _, _, handshakeErr := session.acceptHandshake(seg, seg.block, u.allowedCipherSuites(), true)
+	if handshakeErr != nil {
+		// The rejected session is closed before its diagnostic response is
+		// written, so that no observer can find a rejected session that is
+		// registered and still open, whatever the order in which this routine
+		// is scheduled against its observers. A datagram is independent of the
+		// session send queue and of the cipher chain of the connection, so
+		// closing first doesn't change the framing of the response; the
+		// response is written outside the send queue of the session because
+		// closing the session clears the queue. The request is never delivered
+		// as session data, so an unauthenticated handshake can't reach the
+		// application.
+		log.Errorf("%v rejected session %d: %v", u, sessionID, handshakeErr)
+		session.closeWithError(handshakeErr)
+		if response != nil {
+			respSeg := session.newSessionResponseSegment(response.Marshal(), seg.block)
+			if err := u.writeOneSegment(respSeg, remoteAddr); err != nil {
+				log.Debugf("%v failed to send the handshake response of session %d: %v", u, sessionID, err)
+			}
+		}
+		return nil
+	}
+	// A successful response travels through the send queue of the session, so
+	// that a lost datagram is retransmitted.
+	if response != nil {
+		respSeg := session.newSessionResponseSegment(response.Marshal(), seg.block)
+		session.oLock.Lock()
+		inserted := session.sendQueue.Insert(respSeg)
+		session.oLock.Unlock()
+		if !inserted {
+			err := fmt.Errorf("failed to queue the handshake response of session %d", sessionID)
+			session.closeWithError(err)
+			return err
+		}
+	}
+	session.forwardStateTo(sessionEstablished)
+
 	if !u.deliverSegmentToSession(session, seg) {
 		return fmt.Errorf("failed to deliver open session request for session %d", sessionID)
 	}
@@ -368,6 +438,14 @@ func (u *PacketUnderlay) onOpenSessionRequest(seg *segment, remoteAddr net.Addr)
 	}
 	u.commitServerUserAuthentication(seg)
 	return nil
+}
+
+// allowedCipherSuites returns the cipher suite set that the server allows.
+func (u *PacketUnderlay) allowedCipherSuites() []cipher.Suite {
+	if u.serverUsers == nil {
+		return cipher.AllSuites()
+	}
+	return u.serverUsers.AllowedCipherSuites()
 }
 
 // commitServerUserAuthentication is the single UDP cache-recording point. The
@@ -427,7 +505,10 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 
 		// Peer may select a different MTU.
 		// Use the largest possible value here to avoid error.
-		b := make([]byte, 1500)
+		if cap(u.rxBuf) < 1500 {
+			u.rxBuf = make([]byte, 1500)
+		}
+		b := u.rxBuf[:1500]
 		common.SetReadTimeout(u.conn, readOneSegmentTimeout)
 		n, addr, err := u.conn.ReadFrom(b)
 		if err != nil {
@@ -471,12 +552,19 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 		var matchedPolicy serveruser.Policy
 		var authentication serveruser.Authentication
 		if u.isClient {
+			// A handshake response is protected by the static key, and the
+			// data of an established session is protected by its session key.
 			decryptedMeta, err = u.block.Decrypt(encryptedMeta)
 			if err != nil {
-				if log.IsLevelEnabled(log.TraceLevel) {
-					log.Tracef("%v Decrypt() failed with packet from %v", u, addr)
+				var decrypted bool
+				decryptedMeta, blockCipher, matchedPolicy, decrypted = u.tryDecryptExistingSession(encryptedMeta, addr)
+				if !decrypted {
+					blockCipher = nil
+					if log.IsLevelEnabled(log.TraceLevel) {
+						log.Tracef("%v Decrypt() failed with packet from %v", u, addr)
+					}
+					continue
 				}
-				continue
 			}
 		} else {
 			var decrypted bool
@@ -546,6 +634,15 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 						continue
 					}
 					seg.serverUserAuthentication = authentication
+				}
+			}
+			// A client has to install the session keys before any data packet
+			// of the new session is processed, so the handshake completes here
+			// and not in the input loop of the session.
+			if u.isClient && seg.metadata.Protocol() == openSessionResponse {
+				if err := u.completeClientHandshake(seg, u.block); err != nil {
+					log.Errorf("%v dropped open session response from %v: %v", u, addr, err)
+					continue
 				}
 			}
 			return seg, addr, nil
@@ -684,7 +781,7 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		if u.block == nil {
 			panic(fmt.Sprintf("%v cipher block is not ready", u))
 		} else {
-			blockCipher = u.block
+			blockCipher = u.clientSendBlockCipher(seg)
 		}
 	} else {
 		if seg.block != nil {
@@ -699,11 +796,16 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 				return fmt.Errorf("session %d not found", sessionID)
 			}
 			s := session.(*Session)
-			if s.block.Load() == nil {
+			// A session that completed a handshake sends with its server to
+			// client session key, and every earlier message uses the cipher
+			// that decrypted it.
+			if block := s.sendBlock.Load(); block != nil {
+				blockCipher = *block
+			} else if block := s.block.Load(); block != nil {
+				blockCipher = *block
+			} else {
 				// stderror.ErrNotReady is needed to trigger stderror.ShouldRetry.
 				return fmt.Errorf("%v cipher block is not ready, please try again later: %w", s, stderror.ErrNotReady)
-			} else {
-				blockCipher = *s.block.Load()
 			}
 		}
 	}
@@ -717,8 +819,16 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		// The padding strategy depends on the bit distribution of the
 		// plaintext data to protect. The metadata is marshaled again below
 		// with the final suffix length.
-		existingData := make([]byte, 0, MetadataLength+len(seg.payload))
-		existingData = append(existingData, seg.metadata.Marshal()...)
+		//
+		// metaBuf is a stack array and txScratch is the reusable buffer of this
+		// underlay: both hold plaintext that is consumed inside this function,
+		// while sendMutex is held.
+		var metaBuf [MetadataLength]byte
+		ss.marshalTo(metaBuf[:])
+		if cap(u.txScratch) < MetadataLength+len(seg.payload) {
+			u.txScratch = make([]byte, 0, MetadataLength+len(seg.payload))
+		}
+		existingData := append(u.txScratch[:0], metaBuf[:]...)
 		existingData = append(existingData, seg.payload...)
 		padding := newPadding(
 			buildRecommendedPaddingOpts(maxPaddingSize, existingData, blockCipher.BlockContext().UserName),
@@ -728,13 +838,21 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 			log.Tracef("%v is sending %v", u, seg)
 		}
 
-		plaintextMetadata := seg.metadata.Marshal()
+		ss.marshalTo(metaBuf[:])
+		plaintextMetadata := metaBuf[:]
 		encryptedMetadataLen := len(plaintextMetadata) + blockCipher.NonceSize() + blockCipher.Overhead()
 		encryptedPayloadLen := 0
 		if len(seg.payload) > 0 {
 			encryptedPayloadLen = len(seg.payload) + blockCipher.Overhead()
 		}
-		dataToSend := make([]byte, encryptedMetadataLen+encryptedPayloadLen+len(padding))
+		wireLen := encryptedMetadataLen + encryptedPayloadLen + len(padding)
+		if cap(u.txBuf) < wireLen {
+			u.txBuf = make([]byte, wireLen)
+		}
+		// The slice is capped at the exact message length, so Encrypt() still
+		// rejects a wireLen that is too short instead of writing into the
+		// larger buffer of an earlier message.
+		dataToSend := u.txBuf[:wireLen:wireLen]
 		if err := blockCipher.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}
@@ -780,7 +898,9 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 			log.Tracef("%v is sending %v", u, seg)
 		}
 
-		plaintextMetadata := seg.metadata.Marshal()
+		var metaBuf [MetadataLength]byte
+		das.marshalTo(metaBuf[:])
+		plaintextMetadata := metaBuf[:]
 		encryptedMetadataLen := len(plaintextMetadata) + blockCipher.NonceSize() + blockCipher.Overhead()
 		wirePayloadLen := 0
 		if len(seg.payload) > 0 {
@@ -789,7 +909,14 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 				wirePayloadLen = int(das.payloadLen) + blockCipher.Overhead()
 			}
 		}
-		dataToSend := make([]byte, encryptedMetadataLen+len(padding1)+wirePayloadLen+len(padding2))
+		wireLen := encryptedMetadataLen + len(padding1) + wirePayloadLen + len(padding2)
+		if cap(u.txBuf) < wireLen {
+			u.txBuf = make([]byte, wireLen)
+		}
+		// The slice is capped at the exact message length, so Encrypt() still
+		// rejects a wireLen that is too short instead of writing into the
+		// larger buffer of an earlier message.
+		dataToSend := u.txBuf[:wireLen:wireLen]
 		if err := blockCipher.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}
@@ -824,6 +951,57 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		return stderror.ErrInvalidArgument
 	}
 	return nil
+}
+
+// completeClientHandshake completes the handshake of a client session with the
+// open session response carried by seg. handshakeCipher is the cipher that
+// decrypted seg. A packet underlay serves many sessions, so a failing
+// handshake closes the session of the response only.
+func (u *PacketUnderlay) completeClientHandshake(seg *segment, handshakeCipher cipher.BlockCipher) error {
+	ss, ok := toSessionStruct(seg.metadata)
+	if !ok {
+		return fmt.Errorf("handshake response metadata is not a session struct")
+	}
+	value, found := u.sessionMap.Load(ss.sessionID)
+	if !found {
+		return fmt.Errorf("session %d of the handshake response is not found", ss.sessionID)
+	}
+	s := value.(*Session)
+	if !s.handshakeStarted.Load() || s.handshakeDone.Load() {
+		// A spurious or retransmitted response. Its payload is never
+		// application data.
+		seg.payload = nil
+		ss.payloadLen = 0
+		return nil
+	}
+	if handshakeCipher == nil {
+		return fmt.Errorf("handshake response cipher is not available")
+	}
+	if _, _, err := s.completeClientHandshake(seg, handshakeCipher, true); err != nil {
+		err = fmt.Errorf("%v handshake failed: %w", s, err)
+		s.closeWithError(err)
+		return err
+	}
+	return nil
+}
+
+// clientSendBlockCipher returns the cipher that protects a message that the
+// client sends. A session that completed a handshake uses its session key, and
+// every other message uses the static cipher of the underlay.
+func (u *PacketUnderlay) clientSendBlockCipher(seg *segment) cipher.BlockCipher {
+	if seg != nil && seg.block != nil {
+		return seg.block
+	}
+	if seg != nil {
+		if sessionID, err := seg.SessionID(); err == nil {
+			if value, found := u.sessionMap.Load(sessionID); found {
+				if block := value.(*Session).sendBlock.Load(); block != nil {
+					return *block
+				}
+			}
+		}
+	}
+	return u.block
 }
 
 // serverTryDecryptMetadataForNewSession attempts to decrypt metadata for an

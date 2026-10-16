@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -41,8 +42,22 @@ type user struct {
 	id         uint32
 	name       string
 	credential [sha256.Size]byte
-	decryptor  *cipher.StatelessDecryptor
-	policy     Policy
+	// suites is the cipher suite order that discovery tries for this user: the
+	// suites the server allows first, followed by the remaining supported
+	// suites. It also gates the single suite decryptor built from a cached
+	// hint, so a hint for a suite outside the allowed set stays usable.
+	suites    []cipher.Suite
+	decryptor *cipher.StatelessDecryptor
+	policy    Policy
+
+	// suiteMu guards the single suite decryptor built on demand. The source
+	// user cache records the cipher suite that authenticated a user, so the
+	// next discovery of the same user can try that suite before the others.
+	// A failed trial falls back to decryptor, so a wrong hint only costs one
+	// extra AEAD attempt.
+	suiteMu        sync.Mutex
+	preferredSuite cipher.Suite
+	preferred      *cipher.StatelessDecryptor
 }
 
 // Policy contains the value-based user settings retained after
@@ -66,6 +81,20 @@ type state struct {
 type Registry struct {
 	users         atomic.Pointer[state]
 	hintMandatory atomic.Bool
+
+	// allowedSuites is the cipher suite set the server accepts for the data
+	// plane of a session. A nil value means all the supported cipher suites.
+	//
+	// The set restricts the negotiation only. User discovery still decrypts
+	// the envelope of an open session request with every supported cipher
+	// suite, because that envelope is protected by the first suite of the
+	// client preference list, which the client picks before it can know the
+	// allowed set.
+	allowedSuites atomic.Pointer[[]cipher.Suite]
+
+	// lastUsers retains the user map of the last SetUsers call, so that
+	// SetAllowedCipherSuites can rebuild the discovery material of the users.
+	lastUsers atomic.Pointer[map[string]*appctlpb.User]
 }
 
 // Source identifies an optional source-user cache lookup.
@@ -98,6 +127,7 @@ type discoveryResult struct {
 	decryptedMetadata []byte
 	userID            uint32
 	userContext       cipher.BlockContext
+	suite             cipher.Suite
 	policy            Policy
 	origin            matchOrigin
 	generation        *state
@@ -110,6 +140,7 @@ type discoveryResult struct {
 type Authentication struct {
 	userID     uint32
 	policy     Policy
+	suite      cipher.Suite
 	generation *state
 	source     Source
 }
@@ -118,6 +149,7 @@ func (r discoveryResult) authentication(source Source) Authentication {
 	return Authentication{
 		userID:     r.userID,
 		policy:     r.policy,
+		suite:      r.suite,
 		generation: r.generation,
 		source:     source,
 	}
@@ -143,7 +175,7 @@ func (a *Authentication) recordAuthenticated() {
 	generation := a.generation
 	a.generation = nil
 	if a.source.valid && generation.cache != nil {
-		generation.cache.recordAuthenticated(a.source.key, a.userID)
+		generation.cache.recordAuthenticated(a.source.key, a.userID, a.suite)
 	}
 }
 
@@ -179,6 +211,10 @@ type sourceUserCacheEntry struct {
 	key        [16]byte
 	lastActive atomic.Uint32
 	users      [sourceUserCacheUsers]atomic.Uint64
+	// suites stores the cipher suite that authenticated the user of the same
+	// slot the last time. It is a non-authenticating hint that changes the
+	// trial order only.
+	suites [sourceUserCacheUsers]atomic.Uint32
 }
 
 func newSourceUserCache() *sourceUserCache {
@@ -200,11 +236,61 @@ func (c *sourceUserCache) retire() {
 
 // SetUsers compiles and atomically publishes a new server user generation.
 func (r *Registry) SetUsers(users map[string]*appctlpb.User) {
-	state := buildState(users)
+	retained := make(map[string]*appctlpb.User, len(users))
+	for name, user := range users {
+		retained[name] = user
+	}
+	r.lastUsers.Store(&retained)
+	state := buildState(users, r.AllowedCipherSuites())
 	old := r.users.Swap(state)
 	if old != nil {
 		old.cache.retire()
 	}
+}
+
+// SetAllowedCipherSuites sets the cipher suite set that the server allows for
+// the data plane of new sessions. Duplicates and unknown suites are dropped,
+// and an empty list allows all the supported cipher suites.
+//
+// The set restricts the negotiated suite only: the discovery material of the
+// users is rebuilt so that the allowed suites are tried first, but it still
+// covers every supported suite, because a client protects its handshake
+// request with a suite of its own preference list.
+//
+// The discovery material of the users is rebuilt, so this method is meant to
+// be called on configuration reload.
+func (r *Registry) SetAllowedCipherSuites(suites []cipher.Suite) {
+	normalized := normalizeAllowedSuites(suites)
+	r.allowedSuites.Store(&normalized)
+	if users := r.lastUsers.Load(); users != nil {
+		r.SetUsers(*users)
+	}
+}
+
+// AllowedCipherSuites returns the cipher suite set that the server allows for
+// the negotiation of a session data plane. User discovery is not restricted by
+// this set.
+func (r *Registry) AllowedCipherSuites() []cipher.Suite {
+	if p := r.allowedSuites.Load(); p != nil && len(*p) != 0 {
+		return *p
+	}
+	return cipher.AllSuites()
+}
+
+// normalizeAllowedSuites returns a copy of suites without unknown or duplicate
+// entries. An empty result is replaced by all the supported cipher suites.
+func normalizeAllowedSuites(suites []cipher.Suite) []cipher.Suite {
+	normalized := make([]cipher.Suite, 0, len(suites))
+	for _, suite := range suites {
+		if !suite.IsValid() || slices.Contains(normalized, suite) {
+			continue
+		}
+		normalized = append(normalized, suite)
+	}
+	if len(normalized) == 0 {
+		return cipher.AllSuites()
+	}
+	return normalized
 }
 
 // SetHintMandatory sets whether discovery requires a matching user hint.
@@ -230,7 +316,39 @@ func (r *Registry) Discover(encryptedMetadata []byte, source Source, requireCurr
 	return result.block, result.decryptedMetadata, result.authentication(source), nil
 }
 
-func buildState(users map[string]*appctlpb.User) *state {
+// discoverySuites returns the cipher suite order that user discovery tries:
+// the suites the server allows first, because a client is most likely to offer
+// one of them, followed by the remaining supported suites.
+//
+// Discovery must not be limited to the allowed suites: the envelope of a
+// handshake request is protected by the first suite of the client preference
+// list, which the client picks before it can know what the server allows.
+func discoverySuites(allowedSuites []cipher.Suite) []cipher.Suite {
+	suites := make([]cipher.Suite, 0, len(cipher.AllSuites()))
+	for _, suite := range allowedSuites {
+		if suite.IsValid() && !slices.Contains(suites, suite) {
+			suites = append(suites, suite)
+		}
+	}
+	for _, suite := range cipher.AllSuites() {
+		if !slices.Contains(suites, suite) {
+			suites = append(suites, suite)
+		}
+	}
+	return suites
+}
+
+// buildState compiles the immutable user generation of the registry.
+//
+// allowedSuites is the cipher suite set the server allows for the data plane.
+// It decides the trial order of discovery and nothing else: the negotiated
+// suite is restricted to it in the session handshake, while discovery has to
+// accept an envelope of any supported suite.
+func buildState(users map[string]*appctlpb.User, allowedSuites []cipher.Suite) *state {
+	if len(allowedSuites) == 0 {
+		allowedSuites = cipher.AllSuites()
+	}
+	suites := discoverySuites(allowedSuites)
 	type inputUser struct {
 		mapKey string
 		user   *appctlpb.User
@@ -284,7 +402,7 @@ func buildState(users map[string]*appctlpb.User) *state {
 			log.Warnf("Skipping server user %q: %v", input.name, err)
 			continue
 		}
-		decryptor, err := cipher.NewStatelessDecryptor(credential[:])
+		decryptor, err := cipher.NewStatelessDecryptor(suites, credential[:])
 		if err != nil {
 			log.Warnf("Skipping server user %q: failed to prepare credential", input.name)
 			continue
@@ -293,6 +411,7 @@ func buildState(users map[string]*appctlpb.User) *state {
 			id:         uint32(len(compiled) + 1),
 			name:       input.name,
 			credential: credential,
+			suites:     suites,
 			decryptor:  decryptor,
 			policy:     buildPolicy(input.user),
 		})
@@ -396,7 +515,7 @@ func discoverUser(
 func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory bool) discoveryResult {
 	nonce := encryptedMeta[:cipher.DefaultNonceSize]
 	var trialPlaintext [metadataLength]byte
-	var cachedIDs [sourceUserCacheUsers]uint32
+	var cachedIDs [sourceUserCacheUsers]sourceUserCacheCandidate
 	cachedCount := 0
 	if source.valid && state.cache != nil {
 		cachedIDs, cachedCount = state.cache.lookup(source.key)
@@ -409,13 +528,13 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 	// A successful cached hint match is the normal warm path and returns
 	// without scanning the complete registry.
 	for i := 0; i < cachedCount; i++ {
-		user := userByID(state, cachedIDs[i])
+		user := userByID(state, cachedIDs[i].id)
 		if user == nil || userIDWasAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id) || !cipher.CheckUserFromHint([]byte(user.name), nonce) {
 			continue
 		}
 		attemptedCachedCount = markUserIDAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id)
 		attempts++
-		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchCachedHint); result.block != nil {
+		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchCachedHint, cachedIDs[i].suite); result.block != nil {
 			result.attempts = attempts
 			return result
 		}
@@ -430,7 +549,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 			continue
 		}
 		attempts++
-		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchRegistryHint); result.block != nil {
+		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchRegistryHint, noSuiteHint); result.block != nil {
 			result.attempts = attempts
 			return result
 		}
@@ -441,7 +560,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 	}
 
 	for i := 0; i < cachedCount; i++ {
-		user := userByID(state, cachedIDs[i])
+		user := userByID(state, cachedIDs[i].id)
 		if user == nil || userIDWasAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id) {
 			continue
 		}
@@ -451,7 +570,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 		}
 		attemptedCachedCount = markUserIDAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id)
 		attempts++
-		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchCachedFallback); result.block != nil {
+		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchCachedFallback, cachedIDs[i].suite); result.block != nil {
 			result.attempts = attempts
 			return result
 		}
@@ -468,7 +587,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 			continue
 		}
 		attempts++
-		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchRegistryFallback); result.block != nil {
+		if result := tryUser(user, encryptedMeta, trialPlaintext[:0], matchRegistryFallback, noSuiteHint); result.block != nil {
 			result.attempts = attempts
 			return result
 		}
@@ -504,7 +623,23 @@ func userByID(state *state, userID uint32) *user {
 	return user
 }
 
-func tryUser(user *user, encryptedMeta, dst []byte, origin matchOrigin) discoveryResult {
+func tryUser(user *user, encryptedMeta, dst []byte, origin matchOrigin, suiteHint cipher.Suite) discoveryResult {
+	// A cached suite hint only reorders the trials of this user: the result
+	// is still accepted by its AEAD tag, so a wrong hint just costs one extra
+	// attempt.
+	if suiteHint.IsValid() {
+		if block, plaintext, ok := user.trySuite(suiteHint, encryptedMeta, dst); ok {
+			return discoveryResult{
+				block:             block,
+				decryptedMetadata: plaintext,
+				userID:            user.id,
+				userContext:       cipher.BlockContext{UserName: user.name},
+				suite:             suiteHint,
+				policy:            user.policy,
+				origin:            origin,
+			}
+		}
+	}
 	block, plaintext, err := user.decryptor.TryDecrypt(encryptedMeta, dst)
 	if err != nil {
 		return discoveryResult{}
@@ -514,7 +649,46 @@ func tryUser(user *user, encryptedMeta, dst []byte, origin matchOrigin) discover
 		decryptedMetadata: plaintext,
 		userID:            user.id,
 		userContext:       cipher.BlockContext{UserName: user.name},
+		suite:             block.Suite(),
 		policy:            user.policy,
 		origin:            origin,
 	}
+}
+
+// noSuiteHint marks a trial that has no cached cipher suite to try first.
+const noSuiteHint cipher.Suite = 0xff
+
+// trySuite tries to decrypt encryptedMeta with a single cipher suite of the
+// given user. The decryptor of the suite is built on demand and reused, so a
+// repeated cache hint doesn't rebuild it.
+func (u *user) trySuite(suite cipher.Suite, encryptedMeta, dst []byte) (cipher.BlockCipher, []byte, bool) {
+	if !suite.IsValid() || !slices.Contains(u.suites, suite) {
+		return nil, nil, false
+	}
+	decryptor, err := u.suiteDecryptor(suite)
+	if err != nil {
+		return nil, nil, false
+	}
+	block, plaintext, err := decryptor.TryDecrypt(encryptedMeta, dst)
+	if err != nil {
+		return nil, nil, false
+	}
+	return block, plaintext, true
+}
+
+// suiteDecryptor returns the decryptor of a single cipher suite of this user,
+// building it on demand.
+func (u *user) suiteDecryptor(suite cipher.Suite) (*cipher.StatelessDecryptor, error) {
+	u.suiteMu.Lock()
+	defer u.suiteMu.Unlock()
+	if u.preferred != nil && u.preferredSuite == suite {
+		return u.preferred, nil
+	}
+	decryptor, err := cipher.NewStatelessDecryptor([]cipher.Suite{suite}, u.credential[:])
+	if err != nil {
+		return nil, fmt.Errorf("cipher.NewStatelessDecryptor() failed: %w", err)
+	}
+	u.preferredSuite = suite
+	u.preferred = decryptor
+	return decryptor, nil
 }

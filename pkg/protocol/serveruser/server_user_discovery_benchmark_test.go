@@ -61,7 +61,7 @@ func (f *userDiscoveryBench) state() *state {
 	for _, user := range f.users {
 		users[user.GetName()] = user
 	}
-	return buildState(users)
+	return buildState(users, cipher.AllSuites())
 }
 
 func BenchmarkDiscovery(b *testing.B) {
@@ -75,9 +75,9 @@ func BenchmarkDiscovery(b *testing.B) {
 			b.Run(fmt.Sprintf("Candidates_%d", candidateCount), func(b *testing.B) {
 				source := Source{key: sourceUserCacheTestKey(uint64(400 + candidateCount)), valid: true}
 				for userID := uint32(1); userID < uint32(candidateCount); userID++ {
-					warmState.cache.recordAuthenticated(source.key, userID)
+					warmState.cache.recordAuthenticated(source.key, userID, cipher.SuiteXChaCha20Poly1305)
 				}
-				warmState.cache.recordAuthenticated(source.key, warmTargetID)
+				warmState.cache.recordAuthenticated(source.key, warmTargetID, cipher.SuiteXChaCha20Poly1305)
 				if result := tryState(warmState, warmFixture.validHintCiphertext, source, false); result.block == nil {
 					b.Fatal("failed to warm server user discovery")
 				}
@@ -130,7 +130,7 @@ func BenchmarkDiscovery(b *testing.B) {
 	b.Run("WarmParallel", func(b *testing.B) {
 		b.Run("Candidates_1", func(b *testing.B) {
 			source := Source{key: sourceUserCacheTestKey(500), valid: true}
-			warmState.cache.recordAuthenticated(source.key, warmTargetID)
+			warmState.cache.recordAuthenticated(source.key, warmTargetID, cipher.SuiteXChaCha20Poly1305)
 			if result := tryState(warmState, warmFixture.validHintCiphertext, source, false); result.block == nil {
 				b.Fatal("failed to warm server user discovery")
 			}

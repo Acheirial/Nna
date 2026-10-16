@@ -238,9 +238,40 @@ func TestFirstPacketWritePiggyback(t *testing.T) {
 		t.Fatalf("Write() = (%d, %v), want (%d, nil)", n, err, len(payload))
 	}
 	ss := segments[0].metadata.(*sessionStruct)
-	if ss.Protocol() != openSessionRequest || ss.payloadLen != uint16(len(payload)) || !bytes.Equal(segments[0].payload, payload) {
-		t.Fatalf("openSessionRequest segment = %v, want piggyback payload", segments[0])
+	// The payload of the first packet is the handshake request of the session
+	// followed by the application data of the first Write, so the server can
+	// deliver the application data as soon as the handshake completes.
+	handshakeLen := firstPacketHandshakeLen(t, segments[0])
+	wantLen := handshakeLen + len(payload)
+	if ss.Protocol() != openSessionRequest || len(segments[0].payload) != wantLen || int(ss.payloadLen) != wantLen {
+		t.Fatalf("openSessionRequest segment = %v, want a %d bytes handshake request followed by the %d bytes application payload", segments[0], handshakeLen, len(payload))
 	}
+	if piggyback := segments[0].payload[handshakeLen:]; !bytes.Equal(piggyback, payload) {
+		t.Fatalf("piggybacked payload = %q, want %q", piggyback, payload)
+	}
+}
+
+// firstPacketHandshakeLen returns the length of the handshake request that
+// prefixes the payload of an open session request. It fails the test when the
+// payload doesn't hold a well formed handshake request, so that a test which
+// asserts "no piggyback" can't silently accept "no handshake" either.
+func firstPacketHandshakeLen(t *testing.T, seg *segment) int {
+	t.Helper()
+	ss, ok := seg.metadata.(*sessionStruct)
+	if !ok {
+		t.Fatalf("segment metadata = %T, want *sessionStruct", seg.metadata)
+	}
+	if ss.Protocol() != openSessionRequest {
+		t.Fatalf("segment protocol = %v, want %v", ss.Protocol(), openSessionRequest)
+	}
+	_, consumed, err := parseHandshakeRequest(seg.payload)
+	if err != nil {
+		t.Fatalf("the payload of the open session request doesn't start with a handshake request: %v", err)
+	}
+	if consumed > len(seg.payload) {
+		t.Fatalf("handshake request is %d bytes, but the payload is only %d bytes", consumed, len(seg.payload))
+	}
+	return consumed
 }
 
 func TestLowEntropyFirstPacketNoPiggyback(t *testing.T) {
@@ -255,8 +286,13 @@ func TestLowEntropyFirstPacketNoPiggyback(t *testing.T) {
 		t.Fatalf("Write() = (%d, %v), want (%d, nil)", n, err, len(payload))
 	}
 	ss := segments[0].metadata.(*sessionStruct)
-	if ss.Protocol() != openSessionRequest || ss.payloadLen != 0 || len(segments[0].payload) != 0 {
-		t.Fatalf("openSessionRequest segment = %v, want empty payload", segments[0])
+	// Low entropy metadata doesn't fit in a session control message, so the
+	// first packet carries the handshake request and no application data. The
+	// handshake request must still be there, and that is what distinguishes
+	// "no piggyback" from "no handshake".
+	handshakeLen := firstPacketHandshakeLen(t, segments[0])
+	if ss.Protocol() != openSessionRequest || len(segments[0].payload) != handshakeLen || int(ss.payloadLen) != handshakeLen {
+		t.Fatalf("openSessionRequest segment = %v, want exactly the %d bytes handshake request with no application data", segments[0], handshakeLen)
 	}
 	if das := segments[1].metadata.(*dataAckStruct); das.Protocol() != dataClientToServerLowEntropy || !bytes.Equal(segments[1].payload, payload) {
 		t.Fatalf("data segment = %v, want low entropy metadata and original payload", segments[1])
@@ -437,7 +473,7 @@ func testDataSegment(sessionID, seq uint32, payload []byte, transport common.Tra
 // writes to receiverConn, plus the block cipher to decrypt its output.
 func newTestPacketSession(t *testing.T) (*Session, net.PacketConn, cipher.BlockCipher) {
 	t.Helper()
-	block, err := cipher.BlockCipherFromPassword([]byte(t.Name()), true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, []byte(t.Name()), true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -571,7 +607,7 @@ func TestRequestAckCoalesces(t *testing.T) {
 		t.Fatalf("ackDeadline = %d, want about now + %v", deadline, packetAckDelay)
 	}
 	select {
-	case <-s.packetOutputWakeup:
+	case <-s.outputWakeup:
 	default:
 		t.Fatal("requestAck() didn't wake up the output loop")
 	}
@@ -584,7 +620,7 @@ func TestRequestAckCoalesces(t *testing.T) {
 		t.Fatalf("ackDeadline changed from %d to %d by a pending request", deadline, got)
 	}
 	select {
-	case <-s.packetOutputWakeup:
+	case <-s.outputWakeup:
 		t.Fatal("pending requestAck() woke up the output loop again")
 	default:
 	}
@@ -688,7 +724,7 @@ func TestPacketOutputLoopEventDriven(t *testing.T) {
 
 	// Heartbeat is sent when the interval expires.
 	s.lastTXTime.Store(time.Now().Add(-2 * sessionHeartbeatInterval).UnixMicro())
-	s.wakePacketOutput()
+	s.wakeOutput()
 	heartbeat := decryptDataAckForTest(t, decryptBlock, readPacketForTest(t, receiverConn))
 	if heartbeat.Protocol() != ackClientToServer {
 		t.Fatalf("heartbeat protocol = %v, want %v", heartbeat.Protocol(), ackClientToServer)
@@ -906,7 +942,7 @@ func TestStalledStreamSessionDoesNotBlockOtherSessions(t *testing.T) {
 	// The underlay writes to a pipe that is drained in the background, like a
 	// peer that keeps reading.
 	local, remote := net.Pipe()
-	block, err := cipher.BlockCipherFromPassword([]byte(t.Name()), false)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, []byte(t.Name()), false)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -942,10 +978,14 @@ func TestStalledStreamSessionDoesNotBlockOtherSessions(t *testing.T) {
 		}
 	}
 
-	// Fill the receive buffer of the stalled session. Its input loop consumes
-	// one segment before it blocks, so the rest fills both receive channels.
+	// Fill the receive buffer of the stalled session. The input loop holds one
+	// segment while it waits for room in the full receive queue, the delivery
+	// loop holds one while it waits for room in the input channel, and the rest
+	// fills the receive channel and the input channel. The receive buffer is
+	// therefore full after 2 + 2*segmentChanCapacity segments, and the next
+	// segment must wait for room instead of being queued.
 	seg := testServerToClientDataSegment(stalled.id, segmentTreeCapacity, []byte("stalled"), common.StreamTransport)
-	for i := 0; i < 1+2*segmentChanCapacity; i++ {
+	for i := 0; i < 2+2*segmentChanCapacity; i++ {
 		if !deliverSegmentWithin(t, &underlay.baseUnderlay, stalled, seg, 5*time.Second) {
 			t.Fatalf("segment %d of the stalled session was dropped, want it to be queued", i)
 		}

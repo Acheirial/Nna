@@ -141,7 +141,7 @@ func TestStreamLowEntropySendReceive(t *testing.T) {
 			seg := &segment{metadata: das, payload: append([]byte(nil), payload...)}
 
 			password := cipher.HashPassword([]byte(fmt.Sprintf("%s-password", t.Name())), []byte("user"))
-			block, err := cipher.BlockCipherFromPassword(password, false)
+			block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, password, false)
 			if err != nil {
 				t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 			}
@@ -290,7 +290,7 @@ func TestPacketLowEntropySendReceive(t *testing.T) {
 				seg := &segment{metadata: das, payload: append([]byte(nil), payload...), transport: common.PacketTransport}
 
 				password := []byte(t.Name())
-				block, err := cipher.BlockCipherFromPassword(password, true)
+				block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, password, true)
 				if err != nil {
 					t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 				}
@@ -488,7 +488,7 @@ func TestPacketLowEntropyWaitsForSessionEstablishment(t *testing.T) {
 		MaxMiddlePaddingLen: &zero,
 		MaxEndPaddingLen:    &zero,
 	}
-	block, err := cipher.BlockCipherFromPassword([]byte(t.Name()), true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, []byte(t.Name()), true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -650,7 +650,7 @@ func TestPacketLowEntropyRetransmissionReencoding(t *testing.T) {
 		MaxMiddlePaddingLen: &zero,
 		MaxEndPaddingLen:    &zero,
 	}}
-	block, err := cipher.BlockCipherFromPassword([]byte(t.Name()), true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, []byte(t.Name()), true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -766,7 +766,7 @@ func buildStreamLowEntropyWire(t *testing.T, payload []byte, prefixLen, suffixLe
 func buildStreamLowEntropyWireWithMetadataMutation(t *testing.T, payload []byte, prefixLen, suffixLen int, mutateMetadata func(*dataAckStruct)) ([]byte, cipher.BlockCipher, *dataAckStruct, int, int) {
 	t.Helper()
 	password := []byte(fmt.Sprintf("%s-stream", t.Name()))
-	sendBlock, err := cipher.BlockCipherFromPassword(password, false)
+	sendBlock, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, password, false)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -808,7 +808,7 @@ func buildPacketLowEntropyWire(t *testing.T, payload []byte, prefixLen, suffixLe
 func buildPacketLowEntropyWireWithMetadataMutation(t *testing.T, payload []byte, prefixLen, suffixLen int, mutateMetadata func(*dataAckStruct)) ([]byte, cipher.BlockCipher, *dataAckStruct, int, int) {
 	t.Helper()
 	password := []byte(fmt.Sprintf("%s-packet", t.Name()))
-	block, err := cipher.BlockCipherFromPassword(password, true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, password, true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}

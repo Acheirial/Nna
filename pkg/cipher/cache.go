@@ -18,7 +18,7 @@ package cipher
 import (
 	"errors"
 	"fmt"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"sync"
 	"time"
 )
@@ -39,23 +39,32 @@ type cachedCiphers struct {
 	epoch      int64
 }
 
+// cipherCacheKey identifies a cached cipher list. The key contains the cipher
+// suite as well as the password, so that the same password used with different
+// cipher suites generates independent cipher lists.
+type cipherCacheKey struct {
+	password string
+	suite    Suite
+}
+
 var (
 	// blockCipherCacheMu guards blockCipherCache and blockCipherCacheQueue.
 	blockCipherCacheMu sync.RWMutex
-	// blockCipherCache maps password to the cached stateless block ciphers.
-	blockCipherCache = make(map[string]*cachedCiphers)
-	// blockCipherCacheQueue records the insertion order of the passwords in
+	// blockCipherCache maps a password and a cipher suite to the cached
+	// stateless block ciphers of that suite.
+	blockCipherCache = make(map[cipherCacheKey]*cachedCiphers)
+	// blockCipherCacheQueue records the insertion order of the keys in
 	// blockCipherCache, oldest first.
-	blockCipherCacheQueue []string
+	blockCipherCacheQueue []cipherCacheKey
 )
 
 var errUnableToDecrypt = errors.New("unable to decrypt from supplied cipher blocks")
 
-// getBlockCipherList returns three AEAD block ciphers. Stateless results are
-// immutable cache templates and must never be consumed directly.
-// Stateful results are mutable clones.
-func getBlockCipherList(password string, stateless bool) ([]*aeadBlockCipher, error) {
-	entry, err := getCachedCiphers(password, time.Now())
+// getBlockCipherList returns three AEAD block ciphers of the given cipher
+// suite. Stateless results are immutable cache templates and must never be
+// consumed directly. Stateful results are mutable clones.
+func getBlockCipherList(password string, suite Suite, stateless bool) ([]*aeadBlockCipher, error) {
+	entry, err := getCachedCiphers(password, suite, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -71,19 +80,20 @@ func getBlockCipherList(password string, stateless bool) ([]*aeadBlockCipher, er
 	return blocks, nil
 }
 
-func getCachedCiphers(password string, now time.Time) (*cachedCiphers, error) {
+func getCachedCiphers(password string, suite Suite, now time.Time) (*cachedCiphers, error) {
 	// Try to find []BlockCipher from cache.
+	key := cipherCacheKey{password: password, suite: suite}
 	epoch := cipherKeyEpoch(now)
-	if entry, ok := loadCachedCiphers(password); ok {
+	if entry, ok := loadCachedCiphers(key); ok {
 		// Check if the cached entry is expired.
-		jitter := time.Duration(mrand.Intn(cacheValidMaxJitterMs)) * time.Millisecond
+		jitter := time.Duration(mrand.IntN(cacheValidMaxJitterMs)) * time.Millisecond
 		if entry.epoch == epoch && !entry.createTime.Add(cacheValidInterval-jitter).Before(now) {
 			return entry, nil
 		}
 	}
 
 	// If not found, generate the stateless []BlockCipher.
-	blockCiphers, err := newBlockCipherList([]byte(password), now)
+	blockCiphers, err := newBlockCipherList([]byte(password), suite, now)
 	if err != nil {
 		return nil, fmt.Errorf("newBlockCipherList() failed: %v", err)
 	}
@@ -94,35 +104,35 @@ func getCachedCiphers(password string, now time.Time) (*cachedCiphers, error) {
 		createTime: now,
 		epoch:      epoch,
 	}
-	storeCachedCiphers(password, entry)
+	storeCachedCiphers(key, entry)
 	return entry, nil
 }
 
-// loadCachedCiphers returns the cached entry of password if it exists.
-func loadCachedCiphers(password string) (*cachedCiphers, bool) {
+// loadCachedCiphers returns the cached entry of the key if it exists.
+func loadCachedCiphers(key cipherCacheKey) (*cachedCiphers, bool) {
 	blockCipherCacheMu.RLock()
 	defer blockCipherCacheMu.RUnlock()
-	entry, ok := blockCipherCache[password]
+	entry, ok := blockCipherCache[key]
 	return entry, ok
 }
 
 // storeCachedCiphers inserts entry into blockCipherCache, then evicts the
 // oldest entries until the cache size is within maxCacheSize.
-func storeCachedCiphers(password string, entry *cachedCiphers) {
+func storeCachedCiphers(key cipherCacheKey, entry *cachedCiphers) {
 	blockCipherCacheMu.Lock()
 	defer blockCipherCacheMu.Unlock()
-	if _, ok := blockCipherCache[password]; !ok {
-		blockCipherCacheQueue = append(blockCipherCacheQueue, password)
+	if _, ok := blockCipherCache[key]; !ok {
+		blockCipherCacheQueue = append(blockCipherCacheQueue, key)
 	}
-	blockCipherCache[password] = entry
+	blockCipherCache[key] = entry
 	for len(blockCipherCache) > maxCacheSize {
 		idx := oldestCachedIndexLocked(entry.epoch, true)
 		if idx < 0 {
 			// Every remaining entry belongs to the current key epoch. Evict
 			// the oldest one anyway to keep the cache bounded. This doesn't
 			// lose correctness: the salts only depend on the password and the
-			// key epoch, so the same (password, epoch) generates the same
-			// cipher blocks again when it is requested later.
+			// key epoch, so the same (password, suite, epoch) generates the
+			// same cipher blocks again when it is requested later.
 			idx = oldestCachedIndexLocked(entry.epoch, false)
 		}
 		if idx < 0 {
@@ -139,8 +149,8 @@ func storeCachedCiphers(password string, entry *cachedCiphers) {
 // entry satisfies the condition.
 // Caller must hold blockCipherCacheMu.
 func oldestCachedIndexLocked(epoch int64, otherEpochOnly bool) int {
-	for i, password := range blockCipherCacheQueue {
-		entry, ok := blockCipherCache[password]
+	for i, key := range blockCipherCacheQueue {
+		entry, ok := blockCipherCache[key]
 		if !ok {
 			continue
 		}
@@ -151,10 +161,13 @@ func oldestCachedIndexLocked(epoch int64, otherEpochOnly bool) int {
 	return -1
 }
 
-func newBlockCipherList(password []byte, now time.Time) ([]*aeadBlockCipher, error) {
+// newBlockCipherList generates the three time slot block ciphers of a cipher
+// suite from the password. The key material is always DefaultKeyLen (32) bytes
+// long, and the cipher suite key is its prefix of suite.KeyLen() bytes.
+func newBlockCipherList(password []byte, suite Suite, now time.Time) ([]*aeadBlockCipher, error) {
 	salts := saltFromTime(now)
 	blockCiphers := make([]*aeadBlockCipher, 0, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		keygen := pbkdf2Gen{
 			Salt: salts[i],
 			Iter: KeyIter,
@@ -163,9 +176,9 @@ func newBlockCipherList(password []byte, now time.Time) ([]*aeadBlockCipher, err
 		if err != nil {
 			return nil, fmt.Errorf("NewKey() failed: %w", err)
 		}
-		blockCipher, err := newXChaCha20Poly1305BlockCipher(cipherKey)
+		blockCipher, err := newBlockCipher(suite, cipherKey)
 		if err != nil {
-			return nil, fmt.Errorf("newXChaCha20Poly1305BlockCipher() failed: %w", err)
+			return nil, fmt.Errorf("newBlockCipher() failed: %w", err)
 		}
 		blockCiphers = append(blockCiphers, blockCipher)
 	}

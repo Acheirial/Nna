@@ -77,6 +77,13 @@ message ClientProfile {
 
     // Optional proxy dialer used by the client to connect to mita.
     optional ClientDialer dialer = 8;
+
+    // Ordered list of cipher suites the client is willing to use.
+    // The first entry is the most preferred suite. The suite used by a
+    // session is negotiated with the server, see ServerConfig.cipherSuites.
+    // An empty list means only CIPHER_SUITE_XCHACHA20_POLY1305 is used.
+    // CIPHER_SUITE_UNSPECIFIED is rejected, duplicated entries are ignored.
+    repeated CipherSuite cipherSuites = 9;
 }
 
 message ClientDialer {

@@ -64,7 +64,7 @@ var discoveryTransports = []discoveryTransport{
 
 func testPublisher(users map[string]*appctlpb.User, hintMandatory bool) (*atomic.Pointer[state], *atomic.Bool) {
 	publisher := &atomic.Pointer[state]{}
-	publisher.Store(buildState(users))
+	publisher.Store(buildState(users, cipher.AllSuites()))
 	mandatory := &atomic.Bool{}
 	mandatory.Store(hintMandatory)
 	return publisher, mandatory
@@ -172,7 +172,7 @@ func TestDiscoveryWarmCachedHintMatch(t *testing.T) {
 	publisher, mandatory := testPublisher(users, false)
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(301), valid: true}
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, target))
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, target), cipher.SuiteXChaCha20Poly1305)
 	encrypted := encryptDiscoveryMetadata(t, credential, target, users, true, newDummyMetadata())
 
 	result, err := discoverUser(publisher, mandatory, encrypted, source, false, nil)
@@ -189,7 +189,7 @@ func TestDiscoveryOptionalCachedFallback(t *testing.T) {
 	publisher, mandatory := testPublisher(users, false)
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(302), valid: true}
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, target))
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, target), cipher.SuiteXChaCha20Poly1305)
 	encrypted := encryptDiscoveryMetadata(t, credential, "", users, false, newDummyMetadata())
 
 	result, err := discoverUser(publisher, mandatory, encrypted, source, false, nil)
@@ -209,7 +209,7 @@ func TestDiscoveryRegistryHintPrecedesCachedSharedCredential(t *testing.T) {
 	publisher, mandatory := testPublisher(users, false)
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(303), valid: true}
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, cached))
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, cached), cipher.SuiteXChaCha20Poly1305)
 	encrypted := encryptDiscoveryMetadata(t, credential, hinted, users, true, newDummyMetadata())
 
 	result, err := discoverUser(publisher, mandatory, encrypted, source, false, nil)
@@ -226,7 +226,7 @@ func TestDiscoveryMandatoryHintRejectsCachedFallback(t *testing.T) {
 	publisher, _ := testPublisher(users, true)
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(304), valid: true}
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, target))
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, target), cipher.SuiteXChaCha20Poly1305)
 	encrypted := encryptDiscoveryMetadata(t, credential, "unregistered-hint", users, false, newDummyMetadata())
 
 	result := tryState(state, encrypted, source, true)
@@ -264,8 +264,8 @@ func TestDiscoveryMultipleCachedUsers(t *testing.T) {
 	publisher, mandatory := testPublisher(users, false)
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(306), valid: true}
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, first))
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, target))
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, first), cipher.SuiteXChaCha20Poly1305)
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, target), cipher.SuiteXChaCha20Poly1305)
 	encrypted := encryptDiscoveryMetadata(t, targetCredential, "", users, false, newDummyMetadata())
 
 	result, err := discoverUser(publisher, mandatory, encrypted, source, false, nil)
@@ -282,8 +282,8 @@ func TestDiscoverySkipsInvalidCachedID(t *testing.T) {
 	publisher, mandatory := testPublisher(users, false)
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(307), valid: true}
-	state.cache.recordAuthenticated(source.key, uint32(len(state.users)+100))
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, target))
+	state.cache.recordAuthenticated(source.key, uint32(len(state.users)+100), cipher.SuiteXChaCha20Poly1305)
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, target), cipher.SuiteXChaCha20Poly1305)
 	encrypted := encryptDiscoveryMetadata(t, credential, "", users, false, newDummyMetadata())
 
 	result, err := discoverUser(publisher, mandatory, encrypted, source, false, nil)
@@ -304,7 +304,7 @@ func TestDiscoveryDoesNotRetryCachedHintFailure(t *testing.T) {
 	publisher, mandatory := testPublisher(users, false)
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(308), valid: true}
-	state.cache.recordAuthenticated(source.key, testUserID(t, state, cachedWrong))
+	state.cache.recordAuthenticated(source.key, testUserID(t, state, cachedWrong), cipher.SuiteXChaCha20Poly1305)
 	encrypted := encryptDiscoveryMetadata(t, targetCredential, cachedWrong, users, true, newDummyMetadata())
 
 	result, err := discoverUser(publisher, mandatory, encrypted, source, false, nil)
@@ -416,7 +416,7 @@ func newDummyMetadata() []byte {
 func encryptDiscoveryMetadata(tb testing.TB, credential []byte, hintUser string, users map[string]*appctlpb.User, wantHint bool, plaintext []byte) []byte {
 	tb.Helper()
 	for attempt := 0; attempt < 10; attempt++ {
-		block, err := cipher.BlockCipherFromPassword(credential, true)
+		block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, true)
 		if err != nil {
 			tb.Fatalf("BlockCipherFromPassword() failed: %v", err)
 		}

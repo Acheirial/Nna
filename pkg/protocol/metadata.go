@@ -141,6 +141,20 @@ func (ss *sessionStruct) Protocol() protocolType {
 
 func (ss *sessionStruct) Marshal() []byte {
 	b := make([]byte, MetadataLength)
+	ss.marshalTo(b)
+	return b
+}
+
+// marshalTo serializes the metadata into b without allocating.
+//
+// b must be at least MetadataLength bytes long. The MetadataLength bytes of b
+// that this call doesn't write are zeroed, so the frame is identical to the one
+// Marshal returns and a caller can reuse one buffer for every metadata of a
+// message. The data plane calls this method from a stack array, twice per
+// session message.
+func (ss *sessionStruct) marshalTo(b []byte) {
+	b = b[:MetadataLength]
+	clear(b)
 	b[0] = ss.baseStruct.protocol
 	ss.baseStruct.timestamp = uint32(time.Now().Unix() / 60)
 	binary.BigEndian.PutUint32(b[2:], ss.baseStruct.timestamp)
@@ -149,7 +163,6 @@ func (ss *sessionStruct) Marshal() []byte {
 	b[14] = ss.statusCode
 	binary.BigEndian.PutUint16(b[15:], ss.payloadLen)
 	b[17] = ss.suffixLen
-	return b
 }
 
 func (ss *sessionStruct) Unmarshal(b []byte) error {
@@ -219,6 +232,16 @@ func (das *dataAckStruct) Protocol() protocolType {
 
 func (das *dataAckStruct) Marshal() []byte {
 	b := make([]byte, MetadataLength)
+	das.marshalTo(b)
+	return b
+}
+
+// marshalTo serializes the metadata into b without allocating. See
+// (*sessionStruct).marshalTo for the contract of b and for the zeroing of the
+// bytes that are reserved by the wire format.
+func (das *dataAckStruct) marshalTo(b []byte) {
+	b = b[:MetadataLength]
+	clear(b)
 	b[0] = das.baseStruct.protocol
 	if isLowEntropyProtocol(das.Protocol()) {
 		b[1] = das.lowEntropyMode
@@ -238,7 +261,6 @@ func (das *dataAckStruct) Marshal() []byte {
 		binary.BigEndian.PutUint16(b[29:], das.extractedPayloadLen)
 		b[31] = das.lowEntropyMaskRotation
 	}
-	return b
 }
 
 func (das *dataAckStruct) Unmarshal(b []byte) error {

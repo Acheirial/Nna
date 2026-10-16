@@ -58,7 +58,7 @@ func newDummyMetadata() []byte {
 func encryptDiscoveryMetadata(tb testing.TB, credential []byte, hintUser string, users map[string]*appctlpb.User, wantHint bool, plaintext []byte) []byte {
 	tb.Helper()
 	for attempt := 0; attempt < 10; attempt++ {
-		block, err := cipher.BlockCipherFromPassword(credential, true)
+		block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, true)
 		if err != nil {
 			tb.Fatalf("BlockCipherFromPassword() failed: %v", err)
 		}

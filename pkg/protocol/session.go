@@ -17,11 +17,14 @@ package protocol
 
 import (
 	"context"
+	"crypto/ecdh"
+	crand "crypto/rand"
 	"fmt"
 	"io"
 	"math"
 	mrand "math/rand"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -116,6 +119,11 @@ func (ss sessionState) String() string {
 type Session struct {
 	conn  Underlay                           // underlay connection
 	block atomic.Pointer[cipher.BlockCipher] // cipher to decrypt data
+	// sendBlock is the cipher that protects the data that this session sends
+	// after a handshake installed the session keys. It is nil when no
+	// handshake has completed yet, and the transport of the session falls back
+	// to its static cipher in that case.
+	sendBlock atomic.Pointer[cipher.BlockCipher]
 
 	id                uint32                   // session ID number
 	isClient          bool                     // if this session is owned by client
@@ -148,7 +156,7 @@ type Session struct {
 	inputChan       chan *segment
 	droppedSegments atomic.Int64 // number of segments dropped by the underlay
 
-	packetOutputWakeup chan struct{} // channel to wake up the packet output loop
+	outputWakeup chan struct{} // channel to wake up the output loop
 
 	nextSend               atomic.Uint32 // next sequence number to send a segment
 	nextRecv               atomic.Uint32 // next sequence number to receive
@@ -172,6 +180,22 @@ type Session struct {
 
 	// ---- client fields ----
 	openSessionRequestSent atomic.Bool // whether open session request has been sent
+
+	// ---- client handshake fields ----
+	// handshakeStarted is true once the open session request that carries the
+	// handshake request of this session has been queued.
+	handshakeStarted atomic.Bool
+	// handshakeDone is true once the handshake response has been verified and
+	// the data plane ciphers have been installed. A client session must not
+	// send data or acknowledge messages before that, because the server can't
+	// decrypt them with a session key it doesn't know yet.
+	handshakeDone atomic.Bool
+	// handshakeMu guards the pending handshake state below.
+	handshakeMu         sync.Mutex
+	handshakeSuites     []cipher.Suite // cipher suite preference of this session, in order
+	handshakePriv       *ecdh.PrivateKey
+	handshakeClientSalt [handshakeSaltLen]byte
+	handshakeTimer      *time.Timer
 
 	// ---- server fields ----
 	userName                  atomic.Pointer[string]            // user that owns this session
@@ -223,7 +247,7 @@ func newSessionWithServerUserPolicy(
 		recvQueue:                 newSegmentTree(segmentTreeCapacity),
 		recvChan:                  make(chan *segment, segmentChanCapacity),
 		inputChan:                 make(chan *segment, segmentChanCapacity),
-		packetOutputWakeup:        make(chan struct{}, 1),
+		outputWakeup:              make(chan struct{}, 1),
 		rttStat:                   rttStat,
 		cubicSendAlgorithm:        congestion.NewCubicSendAlgorithm(minWindowSize, maxWindowSize),
 	}
@@ -350,8 +374,15 @@ func (s *Session) Write(b []byte) (n int, err error) {
 
 	// Before the first write, client needs to send open session request.
 	// Open session request is sent only once. Underlay may retry if the packet is lost.
+	// The handshake request is the payload prefix of the open session request,
+	// and the application data piggybacks after it when it fits.
 	if s.isClient && s.isState(sessionAttached) && !s.openSessionRequestSent.Swap(true) {
 		s.oLock.Lock()
+		handshake, err := s.buildHandshakeRequest()
+		if err != nil {
+			s.oLock.Unlock()
+			return 0, fmt.Errorf("buildHandshakeRequest() failed: %w", err)
+		}
 		seg := &segment{
 			metadata: &sessionStruct{
 				baseStruct: baseStruct{
@@ -366,13 +397,16 @@ func (s *Session) Write(b []byte) (n int, err error) {
 		// Low entropy metadata doesn't fit in a session-control message.
 		// Do not piggyback when low entropy is enabled.
 		_, _, sendLowEntropy := s.lowEntropySendConfig()
-		if !sendLowEntropy && len(b) <= MaxSessionOpenPayload {
-			seg.metadata.(*sessionStruct).payloadLen = uint16(len(b))
-			seg.payload = make([]byte, len(b))
-			copy(seg.payload, b)
+		payload := handshake
+		appDataLen := 0
+		if !sendLowEntropy && len(handshake)+len(b) <= MaxSessionOpenPayload {
+			appDataLen = len(b)
+			payload = append(payload, b...)
 		}
+		seg.metadata.(*sessionStruct).payloadLen = uint16(len(payload))
+		seg.payload = payload
 		if log.IsLevelEnabled(log.TraceLevel) {
-			log.Tracef("%v writing %d bytes with open session request", s, len(seg.payload))
+			log.Tracef("%v writing handshake request with %d bytes of application data", s, appDataLen)
 		}
 		if !s.sendQueue.Insert(seg) {
 			s.oLock.Unlock()
@@ -380,8 +414,11 @@ func (s *Session) Write(b []byte) (n int, err error) {
 		} else {
 			s.oLock.Unlock()
 		}
-		if len(seg.payload) > 0 {
-			return len(seg.payload), nil
+		// The session is unusable when the handshake doesn't complete in time.
+		s.handshakeStarted.Store(true)
+		s.startHandshakeTimer()
+		if appDataLen > 0 {
+			return appDataLen, nil
 		}
 	}
 
@@ -524,6 +561,320 @@ func (s *Session) shouldDeferNextPacketData() bool {
 		return false // Check the first segment in send queue.
 	})
 	return deferData
+}
+
+// setClientCipherSuites sets the cipher suite preference order of this client
+// session. The underlay that owns the session sets it before the session is
+// handed to the application.
+func (s *Session) setClientCipherSuites(suites []cipher.Suite) {
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	if len(suites) == 0 {
+		s.handshakeSuites = nil
+		return
+	}
+	s.handshakeSuites = normalizeClientCipherSuites(suites)
+}
+
+// clientHandshakePending reports whether this client session must not send
+// data before the handshake response is verified.
+func (s *Session) clientHandshakePending() bool {
+	return s.isClient && s.handshakeStarted.Load() && !s.handshakeDone.Load()
+}
+
+// shouldDeferUntilHandshake reports whether the given queued segment must wait
+// for the handshake response of a client session. Data and acknowledge
+// segments must wait, because the peer may have switched to a session key that
+// the client doesn't know yet.
+func (s *Session) shouldDeferUntilHandshake(seg *segment) bool {
+	if seg == nil || !s.clientHandshakePending() {
+		return false
+	}
+	protocol := seg.Protocol()
+	return isDataProtocol(protocol) || isAckProtocol(protocol)
+}
+
+// shouldDeferNextStreamData reports whether the first segment in the send queue
+// of a stream session must wait for the handshake response.
+func (s *Session) shouldDeferNextStreamData() bool {
+	if !s.clientHandshakePending() {
+		return false
+	}
+	deferData := false
+	s.sendQueue.Ascend(func(iter *segment) bool {
+		deferData = s.shouldDeferUntilHandshake(iter)
+		return false // Check the first segment in the send queue.
+	})
+	return deferData
+}
+
+// buildHandshakeRequest creates the handshake request of this session with a
+// fresh ephemeral key pair. The private key and the client salt are retained
+// until the handshake response is verified, so that both peers can derive the
+// same session keys.
+func (s *Session) buildHandshakeRequest() ([]byte, error) {
+	s.handshakeMu.Lock()
+	suites := s.handshakeSuites
+	s.handshakeMu.Unlock()
+
+	request, privateKey, err := newHandshakeRequest(suites)
+	if err != nil {
+		return nil, err
+	}
+
+	s.handshakeMu.Lock()
+	s.handshakePriv = privateKey
+	s.handshakeClientSalt = request.clientSalt
+	s.handshakeSuites = request.suites
+	s.handshakeMu.Unlock()
+	return request.Marshal(), nil
+}
+
+// startHandshakeTimer closes this client session when the handshake response
+// doesn't arrive in time.
+func (s *Session) startHandshakeTimer() {
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	if s.handshakeTimer != nil || s.handshakeDone.Load() {
+		return
+	}
+	s.handshakeTimer = time.AfterFunc(handshakeTimeout, func() {
+		if s.handshakeDone.Load() {
+			return
+		}
+		err := fmt.Errorf("%v handshake timed out after %v", s, handshakeTimeout)
+		log.Errorf("%v", err)
+		s.closeWithError(err)
+	})
+}
+
+// stopHandshakeTimer stops the handshake timer of this session.
+func (s *Session) stopHandshakeTimer() {
+	s.handshakeMu.Lock()
+	timer := s.handshakeTimer
+	s.handshakeTimer = nil
+	s.handshakeMu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+// installSessionCiphers installs the data plane ciphers of a completed
+// handshake on this session. A client receives with the server to client key
+// and sends with the client to server key, and a server does the opposite.
+func (s *Session) installSessionCiphers(c2s, s2c cipher.BlockCipher, isClient bool) {
+	if isClient {
+		s.block.Store(&s2c)
+		s.sendBlock.Store(&c2s)
+	} else {
+		s.block.Store(&c2s)
+		s.sendBlock.Store(&s2c)
+	}
+}
+
+// newSessionResponseSegment builds the segment that carries the handshake
+// response of this session. block is the cipher that protects the response.
+func (s *Session) newSessionResponseSegment(payload []byte, block cipher.BlockCipher) *segment {
+	s.oLock.Lock()
+	defer s.oLock.Unlock()
+	seq := s.nextSend.Load()
+	s.nextSend.Add(1)
+	return &segment{
+		metadata: &sessionStruct{
+			baseStruct: baseStruct{
+				protocol: uint8(openSessionResponse),
+			},
+			sessionID:  s.id,
+			seq:        seq,
+			payloadLen: uint16(len(payload)),
+		},
+		payload:   payload,
+		transport: s.transportProtocol,
+		block:     block,
+	}
+}
+
+// acceptHandshake processes the handshake request that prefixes the payload of
+// an open session request and builds the response. requestCipher must be the
+// cipher that decrypted seg, and allowedSuites is the cipher suite set that
+// the server allows.
+//
+// On success the handshake request prefix is removed from seg, the session
+// data plane ciphers are installed on the session, and the response carries
+// the negotiated version, the server ephemeral public key and the server salt.
+// On failure the returned response carries the failure status, no session key
+// is installed, and the caller must send the response and then close the
+// session. A failure never panics.
+func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher, allowedSuites []cipher.Suite, stateless bool) (*handshakeResponse, cipher.BlockCipher, cipher.BlockCipher, error) {
+	if s.isClient {
+		return nil, nil, nil, fmt.Errorf("%v is not a server session", s)
+	}
+	if requestCipher == nil {
+		return nil, nil, nil, fmt.Errorf("%v handshake request cipher is not available", s)
+	}
+	if len(seg.payload) < handshakeRequestHeaderLen || seg.payload[0] < minSupportedProtocolVersion {
+		// A peer that speaks version 1, or that sends a payload that can't
+		// even hold a handshake request, is rejected. Version 1 clients are
+		// not compatible with this version of the protocol.
+		log.Debugf("%v rejected open session request from %v: the payload doesn't start with a protocol version of at least %d", s, s.remoteAddr, minSupportedProtocolVersion)
+		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("the open session request doesn't carry a protocol version of at least %d", minSupportedProtocolVersion)
+	}
+
+	request, consumed, err := parseHandshakeRequest(seg.payload)
+	if err != nil {
+		// A peer that doesn't speak version 2 or that sends a corrupted
+		// request is rejected with a diagnostic response.
+		log.Debugf("%v rejected open session request from %v: %v", s, s.remoteAddr, err)
+		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("parseHandshakeRequest() failed: %w", err)
+	}
+	version, ok := negotiateVersion(request.versionMin, request.versionMax)
+	if !ok {
+		log.Debugf("%v rejected open session request: client protocol version range %d-%d doesn't intersect the server range %d-%d", s, request.versionMin, request.versionMax, minSupportedProtocolVersion, maxSupportedProtocolVersion)
+		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("no common protocol version with the client")
+	}
+	suite, ok := negotiateSuite(request.suites, allowedSuites)
+	if !ok {
+		log.Debugf("%v rejected open session request: client cipher suites %v don't intersect the server cipher suites %v", s, request.suites, allowedSuites)
+		return handshakeFailureResponse(handshakeStatusNoSuite), nil, nil, fmt.Errorf("no common cipher suite with the client")
+	}
+
+	privateKey, publicKey, err := cipher.GenerateEphemeralKey()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("cipher.GenerateEphemeralKey() failed: %w", err)
+	}
+	response := &handshakeResponse{
+		status:  handshakeStatusOK,
+		version: version,
+		suite:   suite,
+	}
+	copy(response.ephPub[:], publicKey)
+	if _, err := crand.Read(response.serverSalt[:]); err != nil {
+		return nil, nil, nil, fmt.Errorf("generate server salt failed: %w", err)
+	}
+	c2s, s2c, err := deriveSessionKeys(requestCipher, suite, privateKey, request.ephPub[:], request.clientSalt[:], response.serverSalt[:], version, stateless)
+	if err != nil {
+		if _, suiteErr := sessionSuite(suite, requestCipher.Suite()); suiteErr != nil {
+			// The negotiated suite needs more key material than the cipher
+			// that protected the handshake envelope can provide, so the peers
+			// can't agree on a data plane.
+			log.Debugf("%v rejected open session request: %v", s, suiteErr)
+			return handshakeFailureResponse(handshakeStatusNoSuite), nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
+		}
+		return nil, nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
+	}
+	// The private key is only used to derive the session keys. crypto/ecdh
+	// doesn't offer a way to erase it, so dropping the reference is best
+	// effort.
+	privateKey = nil
+
+	// The handshake request prefix is not application data, but the
+	// application data that the client piggybacked after it is.
+	appData := make([]byte, len(seg.payload)-consumed)
+	copy(appData, seg.payload[consumed:])
+	seg.payload = appData
+	seg.metadata.(*sessionStruct).payloadLen = uint16(len(appData))
+
+	s.installSessionCiphers(c2s, s2c, false)
+	s.handshakeDone.Store(true)
+	return response, c2s, s2c, nil
+}
+
+// deriveClientHandshake verifies the handshake response carried by the payload
+// of seg and derives the session data plane ciphers. responseCipher must be the
+// cipher that decrypted seg. stateless is true for the packet transport, whose
+// session ciphers protect one packet at a time.
+//
+// The derived ciphers are not published: a transport that owns a cipher chain
+// must switch the chain of its connection to them and then call
+// commitClientHandshake publishing the handshake, so that a segment which waited
+// for the handshake response can't be protected by the static key of the
+// handshake envelope.
+//
+// On success the payload of seg is consumed and the returned response carries
+// the negotiated version and cipher suite. On failure the caller must close the
+// session. A failure never panics.
+func (s *Session) deriveClientHandshake(seg *segment, responseCipher cipher.BlockCipher, stateless bool) (c2s, s2c cipher.BlockCipher, _ *handshakeResponse, err error) {
+	if !s.isClient {
+		return nil, nil, nil, fmt.Errorf("%v is not a client session", s)
+	}
+	if responseCipher == nil {
+		return nil, nil, nil, fmt.Errorf("%v handshake response cipher is not available", s)
+	}
+
+	response, err := parseHandshakeResponse(seg.payload)
+	if err != nil {
+		s.stopHandshakeTimer()
+		return nil, nil, nil, fmt.Errorf("parseHandshakeResponse() failed: %w", err)
+	}
+	// The payload of a handshake response is never application data.
+	seg.payload = nil
+	seg.metadata.(*sessionStruct).payloadLen = 0
+
+	s.handshakeMu.Lock()
+	suites := s.handshakeSuites
+	privateKey := s.handshakePriv
+	clientSalt := s.handshakeClientSalt
+	s.handshakeMu.Unlock()
+	if privateKey == nil {
+		return nil, nil, nil, fmt.Errorf("%v has no pending handshake", s)
+	}
+
+	if response.status == handshakeStatusNoVersion {
+		s.stopHandshakeTimer()
+		return nil, nil, nil, fmt.Errorf("client protocol version %d-%d and server protocol version %d-%d don't intersect", minSupportedProtocolVersion, maxSupportedProtocolVersion, minSupportedProtocolVersion, maxSupportedProtocolVersion)
+	}
+	if response.status != handshakeStatusOK {
+		s.stopHandshakeTimer()
+		return nil, nil, nil, fmt.Errorf("no common cipher suite with the server, the client offered %v", suites)
+	}
+	if !slices.Contains(suites, response.suite) {
+		s.stopHandshakeTimer()
+		return nil, nil, nil, fmt.Errorf("server selected cipher suite %v which the client didn't offer", response.suite)
+	}
+
+	c2s, s2c, err = deriveSessionKeys(responseCipher, response.suite, privateKey, response.ephPub[:], clientSalt[:], response.serverSalt[:], response.version, stateless)
+	if err != nil {
+		s.stopHandshakeTimer()
+		return nil, nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
+	}
+
+	return c2s, s2c, response, nil
+}
+
+// commitClientHandshake publishes the data plane ciphers of a client session
+// that deriveClientHandshake derived: the ciphers are installed on the session
+// and the handshake is marked as done.
+//
+// A transport that owns a cipher chain must switch the chain of its connection
+// to c2s and s2c before it calls this method, so that a segment which waited for
+// the handshake response is never protected by the static key of the handshake
+// envelope.
+func (s *Session) commitClientHandshake(c2s, s2c cipher.BlockCipher, version uint8, suite cipher.Suite) {
+	s.installSessionCiphers(c2s, s2c, true)
+	s.handshakeDone.Store(true)
+	s.stopHandshakeTimer()
+	s.handshakeMu.Lock()
+	s.handshakePriv = nil
+	s.handshakeClientSalt = [handshakeSaltLen]byte{}
+	s.handshakeMu.Unlock()
+	log.Debugf("%v handshake completed with protocol version %d and cipher suite %v", s, version, suite)
+}
+
+// completeClientHandshake verifies the handshake response carried by the payload
+// of seg, derives the session data plane ciphers and publishes them. It serves a
+// transport that routes every message with the cipher of its session, so the
+// session ciphers take effect without any per-connection state to switch.
+//
+// On success the session keys are installed on the session and the payload of
+// seg is consumed. On failure the caller must close the session. A failure never
+// panics.
+func (s *Session) completeClientHandshake(seg *segment, responseCipher cipher.BlockCipher, stateless bool) (cipher.BlockCipher, cipher.BlockCipher, error) {
+	c2s, s2c, response, err := s.deriveClientHandshake(seg, responseCipher, stateless)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.commitClientHandshake(c2s, s2c, response.version, response.suite)
+	return c2s, s2c, nil
 }
 
 // lowEntropySendConfig snapshots the effective send decision for this
@@ -734,6 +1085,10 @@ func (s *Session) runOutputLoop(ctx context.Context) error {
 				return nil
 			case <-s.sendQueue.chanNotEmptyEvent:
 				s.runOutputOnceStream()
+			case <-s.outputWakeup:
+				// A deferred segment became eligible, for example when the
+				// handshake response of this session is verified.
+				s.runOutputOnceStream()
 			}
 		}
 	case common.PacketTransport:
@@ -750,7 +1105,7 @@ func (s *Session) runOutputLoop(ctx context.Context) error {
 				return nil
 			case <-timer.C:
 			case <-s.sendQueue.chanNotEmptyEvent:
-			case <-s.packetOutputWakeup:
+			case <-s.outputWakeup:
 			}
 			s.runOutputOncePacket()
 			resetTimer(timer, s.nextPacketOutputDelay())
@@ -774,6 +1129,14 @@ func (s *Session) runOutputOnceStream() {
 
 	s.oLock.Lock()
 	for {
+		if s.shouldDeferNextStreamData() {
+			// The queued segments stay in the send queue and are sent when
+			// the handshake response is verified and the output loop is woken
+			// up. Peeking instead of re-inserting keeps the loop from
+			// spinning on its own wake up event.
+			s.oLock.Unlock()
+			break
+		}
 		seg, ok := s.sendQueue.DeleteMin()
 		if !ok {
 			s.oLock.Unlock()
@@ -1002,10 +1365,10 @@ func (s *Session) nextPacketOutputDelay() time.Duration {
 	return delay
 }
 
-// wakePacketOutput wakes up the packet output loop without blocking.
-func (s *Session) wakePacketOutput() {
+// wakeOutput wakes up the packet output loop without blocking.
+func (s *Session) wakeOutput() {
 	select {
-	case s.packetOutputWakeup <- struct{}{}:
+	case s.outputWakeup <- struct{}{}:
 	default:
 	}
 }
@@ -1019,7 +1382,7 @@ func (s *Session) requestPacketAck() {
 	}
 	s.ackDeadline.Store(time.Now().UnixMicro() + packetAckDelay.Microseconds())
 	s.ackOnDataRecv.Store(true)
-	s.wakePacketOutput()
+	s.wakeOutput()
 }
 
 // resetTimer stops, drains and re-arms the timer. The caller must be the
@@ -1050,8 +1413,11 @@ func (s *Session) input(seg *segment) error {
 
 	if seg.block != nil {
 		// Validate cipher block user name is consistent.
-		if s.block.Load() != nil {
-			prevUserName := (*s.block.Load()).BlockContext().UserName
+		// A session keeps the first cipher block it received. In particular,
+		// the data plane cipher that a handshake installed must not be
+		// replaced by the static key that protected the handshake envelope.
+		if current := s.block.Load(); current != nil {
+			prevUserName := (*current).BlockContext().UserName
 			nextUserName := seg.block.BlockContext().UserName
 			if prevUserName == "" {
 				panic(fmt.Sprintf("%v cipher block user name is not set", s))
@@ -1062,9 +1428,9 @@ func (s *Session) input(seg *segment) error {
 			if prevUserName != nextUserName {
 				panic(fmt.Sprintf("%v cipher block user name %q is different from %v cipher block user name %q", s, prevUserName, seg, nextUserName))
 			}
+		} else {
+			s.block.Store(&seg.block)
 		}
-
-		s.block.Store(&seg.block)
 		if !s.isClient {
 			policy := seg.serverUserPolicy
 			if policy.Name() == "" && s.pendingServerUserPolicies != nil {
@@ -1101,7 +1467,7 @@ func (s *Session) input(seg *segment) error {
 		}
 		if s.isClientPacketSessionOpenResponse(seg) {
 			s.forwardStateTo(sessionEstablished)
-			s.wakePacketOutput()
+			s.wakeOutput()
 		}
 		return nil
 	} else if isAckProtocol(protocol) {
@@ -1140,7 +1506,7 @@ func (s *Session) inputData(seg *segment) error {
 			s.remoteWindowSize.Store(uint32(das.windowSize))
 		}
 		if s.sendQueue.Len() > 0 {
-			s.wakePacketOutput()
+			s.wakeOutput()
 		}
 
 		// Deliver the segment to recvBuf.
@@ -1169,34 +1535,6 @@ func (s *Session) inputData(seg *segment) error {
 		s.requestPacketAck()
 	default:
 		return fmt.Errorf("unsupported transport protocol %v", s.transportProtocol)
-	}
-
-	if !s.isClient && seg.metadata.Protocol() == openSessionRequest {
-		if s.isState(sessionAttached) {
-			// Server needs to send open session response.
-			s.oLock.Lock()
-			seg4 := &segment{
-				metadata: &sessionStruct{
-					baseStruct: baseStruct{
-						protocol: uint8(openSessionResponse),
-					},
-					sessionID: s.id,
-					seq:       s.nextSend.Load(),
-				},
-				transport: s.transportProtocol,
-			}
-			s.nextSend.Add(1)
-			if log.IsLevelEnabled(log.TraceLevel) {
-				log.Tracef("%v writing open session response", s)
-			}
-			if !s.sendQueue.Insert(seg4) {
-				s.oLock.Unlock()
-				return fmt.Errorf("inputData() failed: insert %v to send queue failed", seg4)
-			} else {
-				s.oLock.Unlock()
-				s.forwardStateTo(sessionEstablished)
-			}
-		}
 	}
 	return nil
 }
@@ -1235,7 +1573,7 @@ func (s *Session) inputAck(seg *segment) error {
 			return true
 		})
 		if s.sendQueue.Len() > 0 {
-			s.wakePacketOutput()
+			s.wakeOutput()
 		}
 		return nil
 	default:
@@ -1317,9 +1655,14 @@ func (s *Session) closeWithError(err error) error {
 	} else {
 		log.Debugf("Closing %v with error %v", s, err)
 	}
-	if s.isState(sessionAttached) || s.isState(sessionEstablished) {
+	if (s.isState(sessionAttached) || s.isState(sessionEstablished)) && !s.clientHandshakePending() {
 		// Send closeSessionRequest, but don't wait for closeSessionResponse,
 		// because the underlay connection may be already broken.
+		//
+		// A client whose handshake is still pending doesn't send a close
+		// session request, because the server may have already switched to
+		// session keys that this client can't use yet. The peer cleans the
+		// session up when the transport is closed or the session is idle.
 		s.oLock.Lock()
 		closeRequestSeq := s.nextSend.Load()
 		seg := &segment{

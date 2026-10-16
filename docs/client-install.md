@@ -65,7 +65,11 @@ mieru replace config <FILE>
             "multiplexing": {
                 "level": "MULTIPLEXING_HIGH"
             },
-            "handshakeMode": "HANDSHAKE_STANDARD"
+            "handshakeMode": "HANDSHAKE_STANDARD",
+            "cipherSuites": [
+                "CIPHER_SUITE_XCHACHA20_POLY1305",
+                "CIPHER_SUITE_AES_256_GCM"
+            ]
         }
     ],
     "activeProfile": "default",
@@ -85,8 +89,9 @@ mieru replace config <FILE>
 6. 【可选】请为 `profiles` -> `mtu` 属性中指定一个从 1280 到 1500 之间的值。默认值为 1400。这个值必须与代理服务器相同；只有两端取值一致，才能避免因分片导致的性能下降。
 7. 【可选】如果想要调整多路复用的频率，是更多地创建新连接，还是更多地重用旧连接，可以为 `profiles` -> `multiplexing` -> `level` 属性设定一个值。这里可以使用的值包括 `MULTIPLEXING_OFF`, `MULTIPLEXING_LOW`, `MULTIPLEXING_MIDDLE`, `MULTIPLEXING_HIGH`。其中 `MULTIPLEXING_OFF` 会关闭多路复用功能。默认值为 `MULTIPLEXING_LOW`。
 8. 【可选】如果想开启 0-RTT 握手，请将 `profiles` -> `handshakeMode` 属性的值设置为 `HANDSHAKE_NO_WAIT`，否则请设置为 `HANDSHAKE_STANDARD`。默认值为 `HANDSHAKE_STANDARD`。
-9. 请为 `socks5Port` 属性指定一个从 1025 到 65535 之间的数值。
-10. 【可选】如果客户端需要为局域网中的其他设备提供代理服务，请将 `socks5ListenLAN` 属性设置为 `true`。
+9. 【可选】`profiles` -> `cipherSuites` 属性是客户端愿意使用的密码套件列表，**第一个元素最优先**。可以使用的值包括 `CIPHER_SUITE_XCHACHA20_POLY1305`，`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`。**未设置或者设置为空列表时，客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`**，与旧版本配置的行为一致。会话最终使用的套件由客户端与服务端在握手时协商决定，规则和适用场景见[密码套件](./protocol.md#密码套件)。
+10. 请为 `socks5Port` 属性指定一个从 1025 到 65535 之间的数值。
+11. 【可选】如果客户端需要为局域网中的其他设备提供代理服务，请将 `socks5ListenLAN` 属性设置为 `true`。
 
 用户与端口设置的取值需通过校验，否则 `mieru apply config` 会报错：
 
@@ -95,6 +100,7 @@ mieru replace config <FILE>
 - 同一份配置中不允许存在同名的 profile。
 - 每条 `portBindings` 不能同时设置 `port` 和 `portRange`。
 - `multiplexing` -> `level` 只接受 `MULTIPLEXING_OFF`、`MULTIPLEXING_LOW`、`MULTIPLEXING_MIDDLE`、`MULTIPLEXING_HIGH` 等合法的枚举值，非法取值会报错。
+- `profiles` -> `cipherSuites` 只接受 `CIPHER_SUITE_XCHACHA20_POLY1305`、`CIPHER_SUITE_AES_256_GCM`、`CIPHER_SUITE_AES_128_GCM` 等合法的枚举值，不能包含 `CIPHER_SUITE_UNSPECIFIED`，非法取值或拼写错误会报错；列表中的重复项会被忽略，只保留第一次出现的那个，因此相对偏好顺序保持不变。
 
 > **注意**：本版本已移除 HTTP / HTTPS 代理功能、客户端自动更新检查功能与本地控制接口，配置中不再支持 `httpProxyPort`、`httpProxyListenLAN`、`noCheckUpdate`、`rpcPort` 和客户端 `advancedSettings` 字段。如果你从旧版本升级，请先从配置文件中删除这些字段，否则 `mieru apply config`、`mieru import config` 或 `mieru run` 会报未知字段（unknown field）错误。
 
@@ -251,6 +257,38 @@ proxies:
 
 如果想要关闭 socks5 用户名和密码验证，请先用 `mieru replace config <FILE>` 写入一份不再包含 `socks5Authentication` 属性的完整配置，然后重启客户端。
 
+### 密码套件
+
+如果客户端要使用默认套件之外的密码套件，可以在 profile 中设置 `cipherSuites`。它是一个**有序的偏好列表，第一个元素最优先**：
+
+```js
+{
+    "profiles": [
+        {
+            "profileName": "default",
+            "user": {
+                ...
+            },
+            "servers": [
+                ...
+            ],
+            "cipherSuites": [
+                "CIPHER_SUITE_XCHACHA20_POLY1305",
+                "CIPHER_SUITE_AES_256_GCM"
+            ]
+        }
+    ]
+}
+```
+
+请连同该 profile 的其它必要字段一起填写：应用配置补丁时，补丁中出现的 profile 会整体替换同名的已有 profile，因此只写 `profileName` 和 `cipherSuites` 会丢失原来的 `user`、`servers` 等设置。也可以直接修改[上文](#修改客户端的设置)的完整配置示例，再使用 `mieru replace config <FILE>` 写入。
+
+可以使用的值包括 `CIPHER_SUITE_XCHACHA20_POLY1305`，`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`。未设置 `cipherSuites` 或者设置为空列表时，客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`，因此不含有该字段的旧版本配置文件可以继续使用，行为保持不变。
+
+会话实际使用的套件由两端在握手时协商：取「客户端列表」与「服务端允许集合」的交集，按**服务端偏好顺序**取第一个，因此最终套件可能不是客户端列表的第一项。交集为空时握手失败，服务端返回 `status` = 2，两端的 `cipherSuites` 必须至少有一个共同的套件。
+
+一般建议保留默认的 `CIPHER_SUITE_XCHACHA20_POLY1305`：它的性能不依赖 CPU 的硬件特性。`CIPHER_SUITE_AES_256_GCM` 与 `CIPHER_SUITE_AES_128_GCM` 只有在 CPU 支持 AES 硬件指令时才有优势，详见[密码套件](./protocol.md#密码套件)；运维和排查注意事项见[密码套件协商](./operation.md#密码套件协商)。
+
 ## 分享客户端的设置
 
 用户可以使用 `mieru export config` 或者 `mieru export config simple` 指令生成 URL 链接，来分享客户端的配置。这些 URL 链接可以使用 `mieru import config <URL>` 指令导入至其他客户端。
@@ -287,11 +325,14 @@ mierus://user1:password1@1.2.3.4?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&multi
 - `mtu`
 - `multiplexing`
 - `handshake-mode`
+- `cipher-suites`
 - `traffic-pattern`
 - `port`
 - `protocol`
 
-其中 `profile` 必须出现一次，`mtu`，`multiplexing`，`handshake-mode` 以及 `traffic-pattern` 最多出现一次，`port` 和 `protocol` 可以出现多次，且他们出现的次数必须相同，以便将同一位置上的 `port` 和 `protocol` 联系起来。另外 `port` 也可以用来指定一段连续的端口。`traffic-pattern` 的值使用 base64 编码的 protobuf 格式，与[流量模式](./traffic-pattern.md)文档中描述的字段一一对应。
+其中 `profile` 必须出现一次，`mtu`，`multiplexing`，`handshake-mode`，`cipher-suites` 以及 `traffic-pattern` 最多出现一次，`port` 和 `protocol` 可以出现多次，且他们出现的次数必须相同，以便将同一位置上的 `port` 和 `protocol` 联系起来。另外 `port` 也可以用来指定一段连续的端口。`traffic-pattern` 的值使用 base64 编码的 protobuf 格式，与[流量模式](./traffic-pattern.md)文档中描述的字段一一对应。
+
+`cipher-suites` 的值是用逗号分隔的套件枚举名列表，顺序即客户端的偏好顺序，例如 `cipher-suites=CIPHER_SUITE_XCHACHA20_POLY1305,CIPHER_SUITE_AES_256_GCM`。如果 profile 设置了 `cipherSuites`，`mieru export config simple` 生成的链接中就会包含该参数；链接中省略该参数等同于未设置 `cipherSuites`，即客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`。如果列表中含有无法识别的套件名，或者其中含有 `CIPHER_SUITE_UNSPECIFIED`，`mieru import config <URL>` 会报错。
 
 上面的简单分享链接等同于如下的客户端配置片段：
 

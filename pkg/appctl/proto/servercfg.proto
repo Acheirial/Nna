@@ -21,7 +21,7 @@ import "appctl/proto/base.proto";
 
 option go_package = "github.com/enfein/mieru/v3/pkg/appctl/appctlpb";
 
-// Proxy server configuration. The next field number is 10.
+// Proxy server configuration. The next field number is 11.
 message ServerConfig {
     // The IP address the server listens on.
     // If not set, the server listens on all interfaces.
@@ -52,6 +52,13 @@ message ServerConfig {
 
     // Fine tune traffic behaviors.
     optional TrafficPattern trafficPattern = 8;
+
+    // The set of cipher suites the server accepts.
+    // The order expresses the server's preference: when more than one entry
+    // is also supported by the client, the first entry of this list wins.
+    // An empty list means every supported cipher suite is accepted.
+    // CIPHER_SUITE_UNSPECIFIED is rejected, duplicated entries are ignored.
+    repeated CipherSuite cipherSuites = 10;
 }
 
 message ServerAdvancedSettings {

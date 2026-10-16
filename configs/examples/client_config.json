@@ -26,7 +26,11 @@
             "multiplexing": {
                 "level": "MULTIPLEXING_HIGH"
             },
-            "handshakeMode": "HANDSHAKE_NO_WAIT"
+            "handshakeMode": "HANDSHAKE_NO_WAIT",
+            "cipherSuites": [
+                "CIPHER_SUITE_XCHACHA20_POLY1305",
+                "CIPHER_SUITE_AES_256_GCM"
+            ]
         }
     ],
     "activeProfile": "default",

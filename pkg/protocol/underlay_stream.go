@@ -46,10 +46,52 @@ type StreamUnderlay struct {
 	send cipher.BlockCipher
 	recv cipher.BlockCipher
 
+	// recvNoncePending is true when the next inbound message starts with the
+	// wire format nonce. The first message of a cipher chain carries the nonce,
+	// so it is set when the receive cipher is replaced by a session key in the
+	// middle of a connection.
+	recvNoncePending bool
+
+	// sendNoncePending mirrors recvNoncePending on the sender side: it is true when
+	// the next outbound message starts with the wire format nonce. It is set
+	// together with recvNoncePending when the send cipher is replaced by a session
+	// key in the middle of a connection, because the first message of the new
+	// cipher chain carries the nonce and its framing is therefore NonceSize bytes
+	// longer than the framing of the following messages.
+	sendNoncePending bool
+
 	sessionCleanTicker *time.Ticker
+
+	// Receive buffers of the event loop. Only the goroutine that runs
+	// RunEventLoop touches them. Each field keeps len == cap, so a buffer is
+	// reused by reslicing it to the size of the current message, and it grows
+	// to the largest message seen so far.
+	//
+	// The buffers hold wire bytes only: the metadata and the payload of a
+	// message are decrypted into fresh allocations, so reusing a buffer never
+	// extends the lifetime of a decrypted message.
+	rxMetaBuf    []byte // encrypted metadata, and the wire nonce on the first read
+	rxPayloadBuf []byte // encrypted payload
+	rxPadBuf     []byte // prefix or suffix padding, which is discarded
+
+	// Send buffers of the data plane. sendMutex protects both of them, and the
+	// connection write is synchronous and copies the bytes, so neither buffer
+	// is referenced after writeOneSegment returns.
+	//
+	// txBuf has len == cap and holds the encrypted wire bytes of one outbound
+	// message. The message is sliced out of it with a full slice expression, so
+	// its capacity is exactly its length and Encrypt() keeps rejecting a
+	// destination that is too short.
+	//
+	// txScratch is empty and holds the plaintext metadata and payload that the
+	// padding strategy inspects.
+	txBuf     []byte
+	txScratch []byte
 
 	// ---- client fields ----
 	block cipher.BlockCipher
+	// cipherSuites is the cipher suite preference order of the client.
+	cipherSuites []cipher.Suite
 
 	// ---- server fields ----
 	serverUsers      *serveruser.Registry
@@ -172,6 +214,11 @@ func (t *StreamUnderlay) AddSession(s *Session, remoteAddr net.Addr) error {
 	}
 	s.conn = t // override base underlay
 	s.transportProtocol = t.TransportProtocol()
+	if t.isClient {
+		// The cipher suite preference of the client protects the handshake
+		// request of this session.
+		s.setClientCipherSuites(t.cipherSuites)
+	}
 	s.forwardStateTo(sessionAttached)
 	close(s.ready)
 	log.Debugf("Adding session %d to %v", s.id, t)
@@ -322,6 +369,43 @@ func (t *StreamUnderlay) onOpenSessionRequest(seg *segment) error {
 	if err := t.AddSession(session, nil); err != nil {
 		return err
 	}
+
+	// Complete the handshake before the session becomes visible to the
+	// application. The response is protected by the cipher that decrypted the
+	// request, at the same time slot, and the connection switches to the
+	// session keys after the response has been written.
+	response, c2s, s2c, handshakeErr := session.acceptHandshake(seg, seg.block, t.allowedCipherSuites(), false)
+	if response != nil {
+		respSeg := session.newSessionResponseSegment(response.Marshal(), seg.block)
+		if err := t.writeOneSegment(respSeg); err != nil {
+			session.closeWithError(err)
+			return fmt.Errorf("writeOneSegment() for the handshake response failed: %w", err)
+		}
+	}
+	if handshakeErr != nil {
+		// The peer is told why the handshake failed by the response, and the
+		// session is closed here. The request is never delivered as session
+		// data, so an unauthenticated handshake can't reach the application.
+		//
+		// The response is written before the session is closed, unlike in the
+		// packet transport: the response has to be the first message of the
+		// static cipher chain of this connection, because a client reads its
+		// first message together with the nonce that starts that chain.
+		log.Errorf("%v rejected session %d: %v", t, sessionID, handshakeErr)
+		session.closeWithError(handshakeErr)
+		return nil
+	}
+	// Switch the cipher chain of this connection. The fields are published under
+	// sendMutex because the output loops of the sessions read them while they
+	// write, and because maybeInitSendBlockCipher reads the receive field.
+	t.sendMutex.Lock()
+	t.send = s2c
+	t.sendNoncePending = true
+	t.recv = c2s
+	t.recvNoncePending = true
+	t.sendMutex.Unlock()
+	session.forwardStateTo(sessionEstablished)
+
 	if !t.deliverSegmentToSession(session, seg) {
 		return fmt.Errorf("failed to deliver open session request for session %d", sessionID)
 	}
@@ -330,6 +414,59 @@ func (t *StreamUnderlay) onOpenSessionRequest(seg *segment) error {
 	case <-t.done:
 		return io.ErrClosedPipe
 	}
+	return nil
+}
+
+// allowedCipherSuites returns the cipher suite set that the server allows.
+func (t *StreamUnderlay) allowedCipherSuites() []cipher.Suite {
+	if t.serverUsers == nil {
+		return cipher.AllSuites()
+	}
+	return t.serverUsers.AllowedCipherSuites()
+}
+
+// completeClientHandshake completes the handshake of a client session with the
+// response carried by seg, and switches the cipher chain of this connection to
+// the session keys.
+func (t *StreamUnderlay) completeClientHandshake(seg *segment) error {
+	ss, ok := toSessionStruct(seg.metadata)
+	if !ok {
+		return fmt.Errorf("handshake response metadata is not a session struct")
+	}
+	value, found := t.sessionMap.Load(ss.sessionID)
+	if !found {
+		// The dispatch of the response reports an unknown session.
+		return nil
+	}
+	s := value.(*Session)
+	if !s.handshakeStarted.Load() || s.handshakeDone.Load() {
+		// A spurious or retransmitted response. Its payload is never
+		// application data.
+		seg.payload = nil
+		ss.payloadLen = 0
+		return nil
+	}
+	// The response cipher is the static cipher of this connection, which is
+	// still installed while the response is verified and derived.
+	c2s, s2c, response, err := s.deriveClientHandshake(seg, t.recv, false)
+	if err != nil {
+		return err
+	}
+	// Switch the cipher chain of this connection before the handshake is
+	// published: publishing it releases the data segments that waited for the
+	// handshake response, and those must be protected by the session key rather
+	// than by the static key of the handshake envelope. The fields are published
+	// under sendMutex because the output loops of the sessions read them while
+	// they write, and because maybeInitSendBlockCipher reads the receive field.
+	t.sendMutex.Lock()
+	t.send = c2s
+	t.sendNoncePending = true
+	t.recv = s2c
+	t.recvNoncePending = true
+	t.sendMutex.Unlock()
+	s.commitClientHandshake(c2s, s2c, response.version, response.suite)
+	// Data segments that waited for the handshake response can be sent now.
+	s.wakeOutput()
 	return nil
 }
 
@@ -381,17 +518,24 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 	var firstRead bool
 	var err error
 
+	// Every read of this connection refreshes the read deadline, and the event
+	// loop is the only reader, so the deadline doesn't need to be cleared when
+	// this function returns: the next call sets it again before it blocks.
+	// Keeping one SetReadDeadline() per read instead of two keeps the timeout
+	// semantics of the read loop unchanged.
 	common.SetReadTimeout(t.conn, readOneSegmentTimeout)
-	defer common.SetReadTimeout(t.conn, 0)
 
 	// Read encrypted metadata.
 	readLen := MetadataLength + cipher.DefaultOverhead
-	if t.recv == nil {
-		// In the first Read, also include nonce.
+	if t.recv == nil || t.recvNoncePending {
+		// The first message of a cipher chain carries the nonce.
 		firstRead = true
 		readLen += cipher.DefaultNonceSize
 	}
-	encryptedMeta := make([]byte, readLen)
+	if cap(t.rxMetaBuf) < readLen {
+		t.rxMetaBuf = make([]byte, readLen)
+	}
+	encryptedMeta := t.rxMetaBuf[:readLen]
 	if n, err := io.ReadFull(t.conn, encryptedMeta); err != nil {
 		if stderror.IsTimeout(err) && n == 0 && !errors.Is(err, net.ErrClosed) {
 			// Retry read deadlines, but don't retry when underlay is closed.
@@ -440,6 +584,9 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 		err = fmt.Errorf("decrypted metadata size %d is unexpected", len(decryptedMeta))
 		return nil, stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
 	}
+	if t.recv != nil {
+		t.recvNoncePending = false
+	}
 
 	// Read payload and construct segment.
 	p := decryptedMeta[0]
@@ -469,6 +616,14 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 		seg.serverUserPolicy = authentication.Policy()
 		seg.serverUserAuthentication = authentication
 	}
+	// A client must switch the cipher chain of the connection to the session
+	// keys before the next message is read, because the first message of the
+	// new chain carries its nonce and therefore has a different framing.
+	if t.isClient && seg.metadata.Protocol() == openSessionResponse {
+		if err := t.completeClientHandshake(seg); err != nil {
+			return nil, stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
+		}
+	}
 	return seg, nil
 }
 
@@ -477,9 +632,13 @@ func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error)
 	var err error
 
 	if ss.payloadLen > 0 {
-		encryptedPayload := make([]byte, ss.payloadLen+cipher.DefaultOverhead)
+		wirePayloadLen := int(ss.payloadLen) + cipher.DefaultOverhead
+		if cap(t.rxPayloadBuf) < wirePayloadLen {
+			t.rxPayloadBuf = make([]byte, wirePayloadLen)
+		}
+		encryptedPayload := t.rxPayloadBuf[:wirePayloadLen]
 		if _, err := io.ReadFull(t.conn, encryptedPayload); err != nil {
-			err = fmt.Errorf("payload: read %d bytes from StreamUnderlay failed: %w", ss.payloadLen+cipher.DefaultOverhead, err)
+			err = fmt.Errorf("payload: read %d bytes from StreamUnderlay failed: %w", wirePayloadLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
 		}
 		t.inBytes.Add(int64(len(encryptedPayload)))
@@ -490,7 +649,10 @@ func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error)
 		}
 	}
 	if ss.suffixLen > 0 {
-		padding := make([]byte, ss.suffixLen)
+		if cap(t.rxPadBuf) < int(ss.suffixLen) {
+			t.rxPadBuf = make([]byte, ss.suffixLen)
+		}
+		padding := t.rxPadBuf[:ss.suffixLen]
 		if _, err := io.ReadFull(t.conn, padding); err != nil {
 			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", ss.suffixLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
@@ -511,7 +673,10 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 	var err error
 
 	if das.prefixLen > 0 {
-		padding1 := make([]byte, das.prefixLen)
+		if cap(t.rxPadBuf) < int(das.prefixLen) {
+			t.rxPadBuf = make([]byte, das.prefixLen)
+		}
+		padding1 := t.rxPadBuf[:das.prefixLen]
 		if _, err := io.ReadFull(t.conn, padding1); err != nil {
 			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", das.prefixLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
@@ -520,7 +685,10 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 	}
 	if das.payloadLen > 0 {
 		wirePayloadLen := int(das.payloadLen) + cipher.DefaultOverhead
-		encryptedPayload := make([]byte, wirePayloadLen)
+		if cap(t.rxPayloadBuf) < wirePayloadLen {
+			t.rxPayloadBuf = make([]byte, wirePayloadLen)
+		}
+		encryptedPayload := t.rxPayloadBuf[:wirePayloadLen]
 		if _, err := io.ReadFull(t.conn, encryptedPayload); err != nil {
 			err = fmt.Errorf("payload: read %d bytes from StreamUnderlay failed: %w", wirePayloadLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
@@ -540,7 +708,10 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 		}
 	}
 	if das.suffixLen > 0 {
-		padding2 := make([]byte, das.suffixLen)
+		if cap(t.rxPadBuf) < int(das.suffixLen) {
+			t.rxPadBuf = make([]byte, das.suffixLen)
+		}
+		padding2 := t.rxPadBuf[:das.suffixLen]
 		if _, err := io.ReadFull(t.conn, padding2); err != nil {
 			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", das.suffixLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
@@ -564,7 +735,12 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 	t.sendMutex.Lock()
 	defer t.sendMutex.Unlock()
 
-	firstWrite := t.send == nil
+	// firstWrite covers the first message of the connection and the first
+	// message after the send cipher was replaced by a session key, which both
+	// start a new cipher chain and therefore carry the wire format nonce. The
+	// pending flag is consumed here, so a retry never adds the nonce twice.
+	firstWrite := t.send == nil || t.sendNoncePending
+	t.sendNoncePending = false
 	if err := t.maybeInitSendBlockCipher(); err != nil {
 		return fmt.Errorf("maybeInitSendBlockCipher() failed: %w", err)
 	}
@@ -574,8 +750,16 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 		// The padding strategy depends on the bit distribution of the
 		// plaintext data to protect. The metadata is marshaled again below
 		// with the final suffix length.
-		existingData := make([]byte, 0, MetadataLength+len(seg.payload))
-		existingData = append(existingData, seg.metadata.Marshal()...)
+		//
+		// metaBuf is a stack array and txScratch is the reusable buffer of this
+		// underlay: both hold plaintext that is consumed inside this function,
+		// while sendMutex is held.
+		var metaBuf [MetadataLength]byte
+		ss.marshalTo(metaBuf[:])
+		if cap(t.txScratch) < MetadataLength+len(seg.payload) {
+			t.txScratch = make([]byte, 0, MetadataLength+len(seg.payload))
+		}
+		existingData := append(t.txScratch[:0], metaBuf[:]...)
 		existingData = append(existingData, seg.payload...)
 		padding := newPadding(
 			buildRecommendedPaddingOpts(maxPaddingSize, existingData, t.send.BlockContext().UserName),
@@ -585,7 +769,8 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 			log.Tracef("%v is sending %v", t, seg)
 		}
 
-		plaintextMetadata := seg.metadata.Marshal()
+		ss.marshalTo(metaBuf[:])
+		plaintextMetadata := metaBuf[:]
 		encryptedMetadataLen := len(plaintextMetadata) + t.send.Overhead()
 		if firstWrite {
 			encryptedMetadataLen += t.send.NonceSize()
@@ -594,7 +779,14 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 		if len(seg.payload) > 0 {
 			encryptedPayloadLen = len(seg.payload) + t.send.Overhead()
 		}
-		dataToSend := make([]byte, encryptedMetadataLen+encryptedPayloadLen+len(padding))
+		wireLen := encryptedMetadataLen + encryptedPayloadLen + len(padding)
+		if cap(t.txBuf) < wireLen {
+			t.txBuf = make([]byte, wireLen)
+		}
+		// The slice is capped at the exact message length, so Encrypt() still
+		// rejects a wireLen that is too short instead of writing into the
+		// larger buffer of an earlier message.
+		dataToSend := t.txBuf[:wireLen:wireLen]
 		if err := t.send.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}
@@ -637,7 +829,9 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 			log.Tracef("%v is sending %v", t, seg)
 		}
 
-		plaintextMetadata := seg.metadata.Marshal()
+		var metaBuf [MetadataLength]byte
+		das.marshalTo(metaBuf[:])
+		plaintextMetadata := metaBuf[:]
 		encryptedMetadataLen := len(plaintextMetadata) + t.send.Overhead()
 		if firstWrite {
 			encryptedMetadataLen += t.send.NonceSize()
@@ -649,7 +843,14 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 				wirePayloadLen = int(das.payloadLen) + t.send.Overhead()
 			}
 		}
-		dataToSend := make([]byte, encryptedMetadataLen+len(padding1)+wirePayloadLen+len(padding2))
+		wireLen := encryptedMetadataLen + len(padding1) + wirePayloadLen + len(padding2)
+		if cap(t.txBuf) < wireLen {
+			t.txBuf = make([]byte, wireLen)
+		}
+		// The slice is capped at the exact message length, so Encrypt() still
+		// rejects a wireLen that is too short instead of writing into the
+		// larger buffer of an earlier message.
+		dataToSend := t.txBuf[:wireLen:wireLen]
 		if err := t.send.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}

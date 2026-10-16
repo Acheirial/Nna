@@ -507,6 +507,94 @@ func (LowEntropyMaskRotation) EnumDescriptor() ([]byte, []int) {
 	return file_appctl_proto_base_proto_rawDescGZIP(), []int{6}
 }
 
+// Cipher suites supported by the mieru proxy protocol.
+//
+// The numeric value of each entry is the suite identifier used on the wire by
+// the version 2 handshake, so the numbering must never change.
+//
+// A connection always uses exactly one suite, negotiated by the two ends:
+//   - A mieru client lists the suites it is willing to use, in preference
+//     order, in ClientProfile.cipherSuites. An empty list means only
+//     CIPHER_SUITE_XCHACHA20_POLY1305 is used.
+//   - A mita server lists the suites it accepts in ServerConfig.cipherSuites.
+//     An empty list means every supported suite is accepted.
+//
+// The negotiated suite is the first entry of the server list that also appears
+// in the client list. If the two lists have no entry in common, the session
+// can't be established. A suite listed by one end is therefore harmless when
+// the other end doesn't support it; listing a suite is a preference, not a
+// guarantee.
+type CipherSuite int32
+
+const (
+	// Not a usable suite. It must never appear in a configuration, and is
+	// rejected by configuration validation.
+	CipherSuite_CIPHER_SUITE_UNSPECIFIED CipherSuite = 0
+	// XChaCha20-Poly1305, 32 byte key, 24 byte AEAD nonce.
+	//
+	// This is the default and the recommended suite. It is fast in pure
+	// software, it has no timing side channel on CPUs without AES hardware
+	// support, and its AEAD nonce is the 24 byte wire format nonce itself.
+	// It is used when ClientProfile.cipherSuites is empty.
+	CipherSuite_CIPHER_SUITE_XCHACHA20_POLY1305 CipherSuite = 1
+	// AES-256-GCM, 32 byte key, 12 byte AEAD nonce.
+	//
+	// It only outperforms XChaCha20-Poly1305 on CPUs with AES hardware
+	// acceleration (AES-NI on x86, the ARMv8 Crypto Extensions on ARM), where
+	// the hardware implementation is both faster and constant time. On CPUs
+	// without acceleration it is slower than XChaCha20-Poly1305.
+	CipherSuite_CIPHER_SUITE_AES_256_GCM CipherSuite = 2
+	// AES-128-GCM, 16 byte key, 12 byte AEAD nonce.
+	//
+	// Same hardware acceleration note as CIPHER_SUITE_AES_256_GCM. The shorter
+	// key leaves a smaller security margin, so it is listed after
+	// CIPHER_SUITE_AES_256_GCM.
+	CipherSuite_CIPHER_SUITE_AES_128_GCM CipherSuite = 3
+)
+
+// Enum value maps for CipherSuite.
+var (
+	CipherSuite_name = map[int32]string{
+		0: "CIPHER_SUITE_UNSPECIFIED",
+		1: "CIPHER_SUITE_XCHACHA20_POLY1305",
+		2: "CIPHER_SUITE_AES_256_GCM",
+		3: "CIPHER_SUITE_AES_128_GCM",
+	}
+	CipherSuite_value = map[string]int32{
+		"CIPHER_SUITE_UNSPECIFIED":        0,
+		"CIPHER_SUITE_XCHACHA20_POLY1305": 1,
+		"CIPHER_SUITE_AES_256_GCM":        2,
+		"CIPHER_SUITE_AES_128_GCM":        3,
+	}
+)
+
+func (x CipherSuite) Enum() *CipherSuite {
+	p := new(CipherSuite)
+	*p = x
+	return p
+}
+
+func (x CipherSuite) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CipherSuite) Descriptor() protoreflect.EnumDescriptor {
+	return file_appctl_proto_base_proto_enumTypes[7].Descriptor()
+}
+
+func (CipherSuite) Type() protoreflect.EnumType {
+	return &file_appctl_proto_base_proto_enumTypes[7]
+}
+
+func (x CipherSuite) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CipherSuite.Descriptor instead.
+func (CipherSuite) EnumDescriptor() ([]byte, []int) {
+	return file_appctl_proto_base_proto_rawDescGZIP(), []int{7}
+}
+
 type PortBinding struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// A single port number.
@@ -1208,7 +1296,12 @@ const file_appctl_proto_base_proto_rawDesc = "" +
 	"\x1fLOW_ENTROPY_MASK_ROTATE_LEFT_12\x10\xc0\x01\x12$\n" +
 	"\x1fLOW_ENTROPY_MASK_ROTATE_LEFT_13\x10\xd0\x01\x12$\n" +
 	"\x1fLOW_ENTROPY_MASK_ROTATE_LEFT_14\x10\xe0\x01\x12$\n" +
-	"\x1fLOW_ENTROPY_MASK_ROTATE_LEFT_15\x10\xf0\x01B0Z.github.com/enfein/mieru/v3/pkg/appctl/appctlpbb\x06proto3"
+	"\x1fLOW_ENTROPY_MASK_ROTATE_LEFT_15\x10\xf0\x01*\x8c\x01\n" +
+	"\vCipherSuite\x12\x1c\n" +
+	"\x18CIPHER_SUITE_UNSPECIFIED\x10\x00\x12#\n" +
+	"\x1fCIPHER_SUITE_XCHACHA20_POLY1305\x10\x01\x12\x1c\n" +
+	"\x18CIPHER_SUITE_AES_256_GCM\x10\x02\x12\x1c\n" +
+	"\x18CIPHER_SUITE_AES_128_GCM\x10\x03B0Z.github.com/enfein/mieru/v3/pkg/appctl/appctlpbb\x06proto3"
 
 var (
 	file_appctl_proto_base_proto_rawDescOnce sync.Once
@@ -1222,7 +1315,7 @@ func file_appctl_proto_base_proto_rawDescGZIP() []byte {
 	return file_appctl_proto_base_proto_rawDescData
 }
 
-var file_appctl_proto_base_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_appctl_proto_base_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
 var file_appctl_proto_base_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_appctl_proto_base_proto_goTypes = []any{
 	(LoggingLevel)(0),           // 0: mieru.appctl.LoggingLevel
@@ -1232,21 +1325,22 @@ var file_appctl_proto_base_proto_goTypes = []any{
 	(NonceType)(0),              // 4: mieru.appctl.NonceType
 	(LowEntropyMode)(0),         // 5: mieru.appctl.LowEntropyMode
 	(LowEntropyMaskRotation)(0), // 6: mieru.appctl.LowEntropyMaskRotation
-	(*PortBinding)(nil),         // 7: mieru.appctl.PortBinding
-	(*User)(nil),                // 8: mieru.appctl.User
-	(*Auth)(nil),                // 9: mieru.appctl.Auth
-	(*TrafficPattern)(nil),      // 10: mieru.appctl.TrafficPattern
-	(*TCPFragment)(nil),         // 11: mieru.appctl.TCPFragment
-	(*NoncePattern)(nil),        // 12: mieru.appctl.NoncePattern
-	(*PaddingPattern)(nil),      // 13: mieru.appctl.PaddingPattern
-	(*LowEntropyPattern)(nil),   // 14: mieru.appctl.LowEntropyPattern
+	(CipherSuite)(0),            // 7: mieru.appctl.CipherSuite
+	(*PortBinding)(nil),         // 8: mieru.appctl.PortBinding
+	(*User)(nil),                // 9: mieru.appctl.User
+	(*Auth)(nil),                // 10: mieru.appctl.Auth
+	(*TrafficPattern)(nil),      // 11: mieru.appctl.TrafficPattern
+	(*TCPFragment)(nil),         // 12: mieru.appctl.TCPFragment
+	(*NoncePattern)(nil),        // 13: mieru.appctl.NoncePattern
+	(*PaddingPattern)(nil),      // 14: mieru.appctl.PaddingPattern
+	(*LowEntropyPattern)(nil),   // 15: mieru.appctl.LowEntropyPattern
 }
 var file_appctl_proto_base_proto_depIdxs = []int32{
 	2,  // 0: mieru.appctl.PortBinding.protocol:type_name -> mieru.appctl.TransportProtocol
-	11, // 1: mieru.appctl.TrafficPattern.tcpFragment:type_name -> mieru.appctl.TCPFragment
-	12, // 2: mieru.appctl.TrafficPattern.nonce:type_name -> mieru.appctl.NoncePattern
-	13, // 3: mieru.appctl.TrafficPattern.padding:type_name -> mieru.appctl.PaddingPattern
-	14, // 4: mieru.appctl.TrafficPattern.lowEntropy:type_name -> mieru.appctl.LowEntropyPattern
+	12, // 1: mieru.appctl.TrafficPattern.tcpFragment:type_name -> mieru.appctl.TCPFragment
+	13, // 2: mieru.appctl.TrafficPattern.nonce:type_name -> mieru.appctl.NoncePattern
+	14, // 3: mieru.appctl.TrafficPattern.padding:type_name -> mieru.appctl.PaddingPattern
+	15, // 4: mieru.appctl.TrafficPattern.lowEntropy:type_name -> mieru.appctl.LowEntropyPattern
 	4,  // 5: mieru.appctl.NoncePattern.type:type_name -> mieru.appctl.NonceType
 	5,  // 6: mieru.appctl.LowEntropyPattern.mode:type_name -> mieru.appctl.LowEntropyMode
 	6,  // 7: mieru.appctl.LowEntropyPattern.maskRotation:type_name -> mieru.appctl.LowEntropyMaskRotation
@@ -1275,7 +1369,7 @@ func file_appctl_proto_base_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_appctl_proto_base_proto_rawDesc), len(file_appctl_proto_base_proto_rawDesc)),
-			NumEnums:      7,
+			NumEnums:      8,
 			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,

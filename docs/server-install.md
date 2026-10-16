@@ -70,7 +70,12 @@ mita replace config <FILE>
     "mtu": 1400,
     "dns": {
         "dualStack": "PREFER_IPv4"
-    }
+    },
+    "cipherSuites": [
+        "CIPHER_SUITE_XCHACHA20_POLY1305",
+        "CIPHER_SUITE_AES_256_GCM",
+        "CIPHER_SUITE_AES_128_GCM"
+    ]
 }
 ```
 
@@ -80,6 +85,7 @@ mita replace config <FILE>
 4. 在 `users` -> `password` 属性中填写该用户的密码。
 5. 【可选】`mtu` 属性是使用 UDP 代理协议时，传输层最大的载荷大小，取值范围是 1280 到 1500，默认值是 1400。服务器与客户端必须使用相同的值。
 6. 【可选】建议将 `dns` -> `dualStack` 设置为 `PREFER_IPv4`，尤其是在服务器不支持 IPv6 时。其他选项和静态主机映射请参见 [DNS 策略](#dns-策略)。
+7. 【可选】`cipherSuites` 属性是服务端允许使用的密码套件列表，**列表顺序就是服务端的偏好顺序**。可以使用的值包括 `CIPHER_SUITE_XCHACHA20_POLY1305`，`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`。**未设置或者设置为空列表时，服务端接受全部三种套件**，与旧版本配置的行为一致。会话最终使用的套件由客户端与服务端在握手时协商决定，规则和适用场景见[密码套件](#密码套件)。
 
 用户与端口设置的取值需通过校验，否则 `mita apply config` 会报错：
 
@@ -87,6 +93,7 @@ mita replace config <FILE>
 - 每个用户必须设置 `password` 或 `hashedPassword` 之一。`password` 是明文口令，长度必须在 8 到 64 字节之间，不能全部由数字组成，也不能是同一个字符的重复。`hashedPassword` 是口令 SHA-256 摘要的十六进制表示，必须恰好为 64 个十六进制字符（32 字节）。如果同时设置 `password` 和 `hashedPassword`，两者必须一致。
 - 同一份配置中不允许存在同名的用户。
 - 每条 `portBindings` 不能同时设置 `port` 和 `portRange`。
+- `cipherSuites` 只接受 `CIPHER_SUITE_XCHACHA20_POLY1305`、`CIPHER_SUITE_AES_256_GCM`、`CIPHER_SUITE_AES_128_GCM` 等合法的枚举值，不能包含 `CIPHER_SUITE_UNSPECIFIED`，非法取值或拼写错误会报错；列表中的重复项会被忽略，只保留第一次出现的那个，因此相对偏好顺序保持不变。
 
 除此之外，mita 可以监听多个不同的端口。我们建议在服务器和客户端配置中使用多个端口。
 
@@ -305,6 +312,25 @@ mieru 客户端 -> 互联网 -> mita 服务器 -> cloudflare 代理客户端 -> 
     }
 }
 ```
+
+### 密码套件
+
+如果要在服务端限定或者排列密码套件，可以设置顶层的 `cipherSuites` 属性。它是一个**有序的列表，顺序就是服务端的偏好顺序**：
+
+```js
+{
+    "cipherSuites": [
+        "CIPHER_SUITE_AES_256_GCM",
+        "CIPHER_SUITE_XCHACHA20_POLY1305"
+    ]
+}
+```
+
+可以使用的值包括 `CIPHER_SUITE_XCHACHA20_POLY1305`，`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`。未设置 `cipherSuites` 或者设置为空列表时，服务端接受全部三种套件，因此不含有该字段的旧版本配置文件可以继续使用，行为保持不变。
+
+会话实际使用的套件由两端在握手时协商：取「客户端偏好列表」与「服务端允许集合」的交集，在交集中按**服务端偏好顺序**取第一个，因此最终套件可能不是客户端列表的第一项。交集为空时握手失败，服务端返回 `status` = 2、关闭会话并记录日志，两端必须至少有一个共同的套件。
+
+一般建议保留默认行为：不在服务端限制套件，或者把 `CIPHER_SUITE_XCHACHA20_POLY1305` 写在列表的第一项，因为它的性能不依赖 CPU 的硬件特性。只有当服务器与客户端的 CPU 都支持 AES 硬件指令（x86 的 AES-NI、ARM 的 Crypto Extension）时，才建议把 `CIPHER_SUITE_AES_256_GCM` 排在前面；即使两端的 CPU 差异较大，只要双方都支持 AES-NI，也可以统一改用 AES-256-GCM。原理与适用场景见[密码套件](./protocol.md#密码套件)，运维和排查注意事项见[密码套件协商](./operation.md#密码套件协商)。
 
 ## 【可选】安装 NTP 网络时间同步服务
 

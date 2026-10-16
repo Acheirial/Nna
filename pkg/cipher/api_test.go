@@ -91,7 +91,7 @@ func TestUserHintOperationsPanicForLongUserName(t *testing.T) {
 
 func TestConcurrentStatelessTrialsReturnIndependentCiphers(t *testing.T) {
 	password := HashPassword([]byte(t.Name()), []byte("parallel-user"))
-	block, err := BlockCipherFromPassword(password, true)
+	block, err := BlockCipherFromPassword(SuiteXChaCha20Poly1305, password, true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -100,16 +100,19 @@ func TestConcurrentStatelessTrialsReturnIndependentCiphers(t *testing.T) {
 	if err := block.Encrypt(ciphertext[:0], plaintext); err != nil {
 		t.Fatalf("Encrypt() failed: %v", err)
 	}
+	decryptor, err := NewStatelessDecryptor([]Suite{SuiteXChaCha20Poly1305}, password)
+	if err != nil {
+		t.Fatalf("NewStatelessDecryptor() failed: %v", err)
+	}
 
 	const trials = 64
 	var wg sync.WaitGroup
 	errCh := make(chan error, trials)
-	for i := 0; i < trials; i++ {
-		i := i
+	for i := range trials {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			winner, _, err := TryDecrypt(ciphertext, password, true)
+			winner, _, err := decryptor.TryDecrypt(ciphertext, nil)
 			if err != nil {
 				errCh <- err
 				return
@@ -147,7 +150,7 @@ func TestConcurrentStatelessTrialsReturnIndependentCiphers(t *testing.T) {
 		t.Error(err)
 	}
 
-	templates, err := getBlockCipherList(string(password), true)
+	templates, err := getBlockCipherList(string(password), SuiteXChaCha20Poly1305, true)
 	if err != nil {
 		t.Fatalf("getBlockCipherList() failed: %v", err)
 	}
@@ -160,7 +163,7 @@ func TestConcurrentStatelessTrialsReturnIndependentCiphers(t *testing.T) {
 
 func TestConcurrentStatelessDecryptor(t *testing.T) {
 	password := HashPassword([]byte(t.Name()), []byte("parallel-prepared-user"))
-	block, err := BlockCipherFromPassword(password, true)
+	block, err := BlockCipherFromPassword(SuiteXChaCha20Poly1305, password, true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -169,7 +172,7 @@ func TestConcurrentStatelessDecryptor(t *testing.T) {
 	if err := block.Encrypt(ciphertext[:0], plaintext); err != nil {
 		t.Fatalf("Encrypt() failed: %v", err)
 	}
-	decryptor, err := NewStatelessDecryptor(password)
+	decryptor, err := NewStatelessDecryptor(nil, password)
 	if err != nil {
 		t.Fatalf("NewStatelessDecryptor() failed: %v", err)
 	}
@@ -177,8 +180,7 @@ func TestConcurrentStatelessDecryptor(t *testing.T) {
 	const trials = 64
 	var wg sync.WaitGroup
 	errCh := make(chan error, trials)
-	for i := 0; i < trials; i++ {
-		i := i
+	for i := range trials {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -208,47 +210,43 @@ func TestConcurrentStatelessDecryptor(t *testing.T) {
 	if entry == nil {
 		t.Fatal("prepared decryptor did not retain trial material")
 	}
-	for i, template := range entry.cipherList {
-		if got := template.BlockContext().UserName; got != "" {
-			t.Fatalf("cached template %d context = %q after concurrent trials, want empty", i, got)
+	for i, list := range entry.lists {
+		for j, template := range list {
+			if got := template.BlockContext().UserName; got != "" {
+				t.Fatalf("cached template %d/%d context = %q after concurrent trials, want empty", i, j, got)
+			}
 		}
 	}
 }
 
-func BenchmarkTryDecrypt(b *testing.B) {
+// BenchmarkStatelessDecryptor measures the cost of the server side discovery
+// trial decrypt: one password, one cipher suite, three time slots.
+func BenchmarkStatelessDecryptor(b *testing.B) {
 	password := HashPassword([]byte("benchmark-password"), []byte("benchmark-user"))
 	data := make([]byte, 1500)
 	if _, err := crand.Read(data); err != nil {
 		b.Fatalf("failed to generate data: %v", err)
 	}
+	block, err := BlockCipherFromPassword(SuiteXChaCha20Poly1305, password, true)
+	if err != nil {
+		b.Fatalf("BlockCipherFromPassword() failed: %v", err)
+	}
+	ciphertext := make([]byte, block.NonceSize()+len(data)+block.Overhead())
+	if err := block.Encrypt(ciphertext[:0], data); err != nil {
+		b.Fatalf("Encrypt() failed: %v", err)
+	}
+	decryptor, err := NewStatelessDecryptor([]Suite{SuiteXChaCha20Poly1305}, password)
+	if err != nil {
+		b.Fatalf("NewStatelessDecryptor() failed: %v", err)
+	}
 
-	for _, benchmark := range []struct {
-		name      string
-		stateless bool
-	}{
-		{name: "Stateful", stateless: false},
-		{name: "Stateless", stateless: true},
-	} {
-		b.Run(benchmark.name, func(b *testing.B) {
-			block, err := BlockCipherFromPassword(password, benchmark.stateless)
-			if err != nil {
-				b.Fatalf("BlockCipherFromPassword() failed: %v", err)
-			}
-			ciphertext := make([]byte, block.NonceSize()+len(data)+block.Overhead())
-			if err := block.Encrypt(ciphertext[:0], data); err != nil {
-				b.Fatalf("Encrypt() failed: %v", err)
-			}
-
-			b.ReportAllocs()
-			b.SetBytes(int64(len(data)))
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				winner, plaintext, err := TryDecrypt(ciphertext, password, benchmark.stateless)
-				if err != nil || winner == nil || len(plaintext) != len(data) {
-					b.Fatalf("TryDecrypt() = (block nil=%t, plaintext bytes=%d, %v)", winner == nil, len(plaintext), err)
-				}
-			}
-		})
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for b.Loop() {
+		winner, plaintext, err := decryptor.TryDecrypt(ciphertext, nil)
+		if err != nil || winner == nil || len(plaintext) != len(data) {
+			b.Fatalf("TryDecrypt() = (block nil=%t, plaintext bytes=%d, %v)", winner == nil, len(plaintext), err)
+		}
 	}
 }
 
@@ -270,8 +268,7 @@ func BenchmarkCheckUserFromHint(b *testing.B) {
 	nonce = c.addUserHintToNonce(nonce)
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if !CheckUserFromHint(user, nonce) {
 			b.Fatal("user hint did not match")
 		}

@@ -206,7 +206,8 @@ func TestPacketServerSourceUserCacheIntegration(t *testing.T) {
 	if err := first.writeOneSegment(testSessionSegment(openSessionResponse, 30, common.PacketTransport), serverConn.LocalAddr()); err != nil {
 		t.Fatalf("writeOneSegment(wrong direction) failed: %v", err)
 	}
-	if err := first.writeOneSegment(testSessionSegment(openSessionRequest, 31, common.PacketTransport), serverConn.LocalAddr()); err != nil {
+	firstClient, firstRequestPayload := newTestHandshakeClient(t, first.block, true)
+	if err := first.writeOneSegment(testOpenSessionSegmentWithPayload(t, 31, common.PacketTransport, firstRequestPayload), serverConn.LocalAddr()); err != nil {
 		t.Fatalf("writeOneSegment(first open) failed: %v", err)
 	}
 	firstSegment, firstAddr, err := server.readOneSegment()
@@ -216,9 +217,14 @@ func TestPacketServerSourceUserCacheIntegration(t *testing.T) {
 	if err := server.onOpenSessionRequest(firstSegment, firstAddr); err != nil {
 		t.Fatalf("onOpenSessionRequest(first) failed: %v", err)
 	}
+	// The handshake response travels through the send queue of the new
+	// session, so the raw client can derive the session keys of the session.
+	firstClient.complete(t, testReadPacketHandshakeResponse(t, first.conn, first.block))
 
 	// A duplicate ID authenticated from a different source port is dropped by
-	// dispatch and must not refresh the cache or enqueue another session.
+	// dispatch and must not refresh the cache or enqueue another session. The
+	// duplicate is rejected before its payload is interpreted, so it doesn't
+	// carry a handshake request.
 	readyBeforeDuplicate := len(server.readySessions)
 	if err := second.writeOneSegment(testSessionSegment(openSessionRequest, 31, common.PacketTransport), serverConn.LocalAddr()); err != nil {
 		t.Fatalf("writeOneSegment(duplicate open) failed: %v", err)
@@ -235,7 +241,8 @@ func TestPacketServerSourceUserCacheIntegration(t *testing.T) {
 	}
 
 	// A second source port on the same IP uses the learned candidate.
-	if err := second.writeOneSegment(testSessionSegment(openSessionRequest, 32, common.PacketTransport), serverConn.LocalAddr()); err != nil {
+	secondClient, secondRequestPayload := newTestHandshakeClient(t, second.block, true)
+	if err := second.writeOneSegment(testOpenSessionSegmentWithPayload(t, 32, common.PacketTransport, secondRequestPayload), serverConn.LocalAddr()); err != nil {
 		t.Fatalf("writeOneSegment(second open) failed: %v", err)
 	}
 	secondSegment, secondAddr, err := server.readOneSegment()
@@ -245,9 +252,11 @@ func TestPacketServerSourceUserCacheIntegration(t *testing.T) {
 	if err := server.onOpenSessionRequest(secondSegment, secondAddr); err != nil {
 		t.Fatalf("onOpenSessionRequest(second) failed: %v", err)
 	}
+	secondClient.complete(t, testReadPacketHandshakeResponse(t, second.conn, second.block))
 
-	// Once the first session has installed its block, packets from its original
-	// address stay on the existing-session path and do not query the user cache.
+	// Once the first session has installed its session key, messages from its
+	// original address stay on the existing-session path and do not query the
+	// user cache.
 	firstSessionValue, ok := server.sessionMap.Load(uint32(31))
 	if !ok {
 		t.Fatal("first UDP session was not installed")
@@ -255,6 +264,7 @@ func TestPacketServerSourceUserCacheIntegration(t *testing.T) {
 	firstSession := firstSessionValue.(*Session)
 	waitForServerUserSessionBlock(t, firstSession)
 	data := testDataSegment(31, 1, []byte("existing session"), common.PacketTransport)
+	data.block = firstClient.c2s
 	if err := first.writeOneSegment(data, serverConn.LocalAddr()); err != nil {
 		t.Fatalf("writeOneSegment(existing data) failed: %v", err)
 	}
@@ -526,7 +536,7 @@ func buildServerUserStreamWire(t *testing.T, credential []byte, userName string,
 		ss.suffixLen = uint8(len(padding))
 		plaintextMetadata = ss.Marshal()
 	}
-	block, err := cipher.BlockCipherFromPassword(credential, false)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, false)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -561,7 +571,7 @@ func buildServerUserPacketWire(t *testing.T, credential []byte, userName string,
 		ss.suffixLen = uint8(len(padding))
 		plaintextMetadata = ss.Marshal()
 	}
-	block, err := cipher.BlockCipherFromPassword(credential, true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, true)
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
@@ -589,7 +599,7 @@ func newServerUserPacketSender(t *testing.T, serverAddr net.Addr, credential []b
 	if err != nil {
 		t.Fatalf("net.ListenPacket() sender failed: %v", err)
 	}
-	block, err := cipher.BlockCipherFromPassword(credential, true)
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, true)
 	if err != nil {
 		conn.Close()
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
