@@ -462,7 +462,7 @@ func TestSuiteKeyTruncationFromPassword(t *testing.T) {
 	salts := saltFromTime(now)
 	for _, test := range testSuiteProperties {
 		t.Run(test.name, func(t *testing.T) {
-			blocks, err := newBlockCipherList(password, test.suite, now)
+			blocks, err := newBlockCipherList(password, test.suite, now, KeyIterV3)
 			if err != nil {
 				t.Fatalf("newBlockCipherList() failed: %v", err)
 			}
@@ -472,7 +472,7 @@ func TestSuiteKeyTruncationFromPassword(t *testing.T) {
 			for i, block := range blocks {
 				// The key material is always 32 bytes long, the cipher suite
 				// key is its prefix.
-				want := pbkdf2.Key(password, salts[i], KeyIter, DefaultKeyLen, sha256.New)
+				want := pbkdf2.Key(password, salts[i], KeyIterV3, DefaultKeyLen, sha256.New)
 				if got := block.key[:test.keyLen]; !bytes.Equal(got, want[:test.keyLen]) {
 					t.Errorf("slot %d key = %x, want %x", i, got, want[:test.keyLen])
 				}
@@ -635,6 +635,94 @@ func TestNewStatelessDecryptorMultipleSuites(t *testing.T) {
 	defaults.Clear()
 	if _, _, err := defaults.TryDecrypt(ciphertext, nil); err == nil {
 		t.Errorf("TryDecrypt() succeeded after Clear()")
+	}
+}
+
+func TestCompatStatelessDecryptorKeyIterVariants(t *testing.T) {
+	password := HashPassword([]byte(t.Name()), []byte("compat-user"))
+	plaintext := []byte("decrypt with either key derivation variant")
+	const suite = SuiteXChaCha20Poly1305
+	now := time.Now()
+	salts := saltFromTime(now)
+
+	decryptor, err := NewCompatStatelessDecryptor([]Suite{suite}, password)
+	if err != nil {
+		t.Fatalf("NewCompatStatelessDecryptor() failed: %v", err)
+	}
+	defer decryptor.Clear()
+
+	// A server must decrypt both the envelope of a current client and the
+	// envelope of an old client, and it must get back the variant of the
+	// sender, because it protects the handshake response with that cipher.
+	for _, test := range []struct {
+		name string
+		iter int
+	}{
+		{name: "protocol-v3-key-iter", iter: KeyIterV3},
+		{name: "legacy-key-iter", iter: KeyIter},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			blocks, err := newBlockCipherList(password, suite, now, test.iter)
+			if err != nil {
+				t.Fatalf("newBlockCipherList() failed: %v", err)
+			}
+			sender := blocks[1]
+			ciphertext := make([]byte, sender.NonceSize()+len(plaintext)+sender.Overhead())
+			if err := sender.Encrypt(ciphertext[:0], plaintext); err != nil {
+				t.Fatalf("Encrypt() failed: %v", err)
+			}
+
+			winner, got, err := decryptor.TryDecrypt(ciphertext, nil)
+			if err != nil {
+				t.Fatalf("TryDecrypt() failed for the key iteration %d: %v", test.iter, err)
+			}
+			if !bytes.Equal(got, plaintext) {
+				t.Errorf("plaintext after TryDecrypt() = %q, want %q", got, plaintext)
+			}
+			if got := winner.Suite(); got != suite {
+				t.Errorf("TryDecrypt() hit the cipher suite %s, want %s", got, suite)
+			}
+			wantKey := pbkdf2.Key(password, salts[1], test.iter, DefaultKeyLen, sha256.New)
+			if gotKey := winner.(*aeadBlockCipher).key[:]; !bytes.Equal(gotKey, wantKey) {
+				t.Errorf("TryDecrypt() returned the key %x, want the key iteration %d of %x", gotKey, test.iter, wantKey)
+			}
+
+			// The matched cipher must be usable to protect the response.
+			response := []byte("handshake response")
+			nonce := make([]byte, DefaultNonceSize)
+			nonce[0] = byte(test.iter)
+			sealed := make([]byte, len(response)+winner.Overhead())
+			if err := winner.EncryptWithNonce(sealed[:0], nonce, response); err != nil {
+				t.Fatalf("EncryptWithNonce() failed: %v", err)
+			}
+			opened, err := sender.DecryptWithNonce(sealed, nonce)
+			if err != nil {
+				t.Fatalf("the sender could not decrypt the response of the matched variant: %v", err)
+			}
+			if !bytes.Equal(opened, response) {
+				t.Errorf("response plaintext = %q, want %q", opened, response)
+			}
+		})
+	}
+
+	// The protocol v3 decryptor must not accept the legacy variant: only the
+	// compatible decryptor is allowed to widen the accepted envelope.
+	legacyBlocks, err := newBlockCipherList(password, suite, now, KeyIter)
+	if err != nil {
+		t.Fatalf("newBlockCipherList() failed: %v", err)
+	}
+	legacySender := legacyBlocks[1]
+	legacyCiphertext := make([]byte, legacySender.NonceSize()+len(plaintext)+legacySender.Overhead())
+	if err := legacySender.Encrypt(legacyCiphertext[:0], plaintext); err != nil {
+		t.Fatalf("Encrypt() failed: %v", err)
+	}
+	v3Only, err := NewStatelessDecryptor([]Suite{suite}, password)
+	if err != nil {
+		t.Fatalf("NewStatelessDecryptor() failed: %v", err)
+	}
+	defer v3Only.Clear()
+	if block, _, err := v3Only.TryDecrypt(legacyCiphertext, nil); err == nil {
+		t.Errorf("NewStatelessDecryptor() decrypted a KeyIter=%d ciphertext into the cipher suite %s", KeyIter, block.Suite())
 	}
 }
 

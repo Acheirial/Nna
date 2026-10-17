@@ -210,11 +210,11 @@ func TestDeriveSessionKeysBothSidesAgree(t *testing.T) {
 			}
 
 			// Each side derives the session keys once.
-			c2s, s2c, err := DeriveSessionKeys(clientCipher, clientShared, clientSalt, serverSalt, testVersion)
+			c2s, s2c, err := DeriveSessionKeys(clientCipher, test.suite, clientShared, clientSalt, serverSalt, testVersion)
 			if err != nil {
 				t.Fatalf("DeriveSessionKeys() on the client failed: %v", err)
 			}
-			serverC2S, serverS2C, err := DeriveSessionKeys(serverCipher, serverShared, clientSalt, serverSalt, testVersion)
+			serverC2S, serverS2C, err := DeriveSessionKeys(serverCipher, test.suite, serverShared, clientSalt, serverSalt, testVersion)
 			if err != nil {
 				t.Fatalf("DeriveSessionKeys() on the server failed: %v", err)
 			}
@@ -271,7 +271,7 @@ func TestDeriveSessionKeysBothSidesAgree(t *testing.T) {
 			}
 
 			// The protocol version and the static key are mixed into the keys.
-			otherVersionC2S, _, err := DeriveSessionKeys(clientCipher, clientShared, clientSalt, serverSalt, testVersion+1)
+			otherVersionC2S, _, err := DeriveSessionKeys(clientCipher, test.suite, clientShared, clientSalt, serverSalt, testVersion+1)
 			if err != nil {
 				t.Fatalf("DeriveSessionKeys() failed: %v", err)
 			}
@@ -282,14 +282,14 @@ func TestDeriveSessionKeysBothSidesAgree(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewBlockCipherFromKey() failed: %v", err)
 			}
-			otherStaticC2S, _, err := DeriveSessionKeys(otherCipher, clientShared, clientSalt, serverSalt, testVersion)
+			otherStaticC2S, _, err := DeriveSessionKeys(otherCipher, test.suite, clientShared, clientSalt, serverSalt, testVersion)
 			if err != nil {
 				t.Fatalf("DeriveSessionKeys() failed: %v", err)
 			}
 			if bytes.Equal(c2s, otherStaticC2S) {
 				t.Errorf("changing the static key didn't change the c2s key")
 			}
-			otherSaltC2S, _, err := DeriveSessionKeys(clientCipher, clientShared, serverSalt, clientSalt, testVersion)
+			otherSaltC2S, _, err := DeriveSessionKeys(clientCipher, test.suite, clientShared, serverSalt, clientSalt, testVersion)
 			if err != nil {
 				t.Fatalf("DeriveSessionKeys() failed: %v", err)
 			}
@@ -319,12 +319,12 @@ func TestDeriveSessionKeysDeterministicPerSuite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewBlockCipherFromKey() failed: %v", err)
 		}
-		c2s, s2c, err := DeriveSessionKeys(block, shared, clientSalt, serverSalt, testVersion)
+		c2s, s2c, err := DeriveSessionKeys(block, test.suite, shared, clientSalt, serverSalt, testVersion)
 		if err != nil {
 			t.Fatalf("DeriveSessionKeys() failed: %v", err)
 		}
 		// The same inputs must always produce the same keys.
-		c2s2, s2c2, err := DeriveSessionKeys(block, shared, clientSalt, serverSalt, testVersion)
+		c2s2, s2c2, err := DeriveSessionKeys(block, test.suite, shared, clientSalt, serverSalt, testVersion)
 		if err != nil {
 			t.Fatalf("DeriveSessionKeys() failed: %v", err)
 		}
@@ -362,25 +362,104 @@ func TestDeriveSessionKeysErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		c          BlockCipher
+		suite      Suite
 		shared     []byte
 		clientSalt []byte
 		serverSalt []byte
 	}{
-		{name: "nil cipher", c: nil, shared: shared, clientSalt: clientSalt, serverSalt: serverSalt},
-		{name: "nil shared secret", c: block, shared: nil, clientSalt: clientSalt, serverSalt: serverSalt},
-		{name: "short shared secret", c: block, shared: shared[:x25519KeyLen-1], clientSalt: clientSalt, serverSalt: serverSalt},
-		{name: "long shared secret", c: block, shared: append(cloneBytes(shared), 0), clientSalt: clientSalt, serverSalt: serverSalt},
-		{name: "empty client salt", c: block, shared: shared, clientSalt: nil, serverSalt: serverSalt},
-		{name: "short client salt", c: block, shared: shared, clientSalt: clientSalt[:sessionSaltLen-1], serverSalt: serverSalt},
-		{name: "empty server salt", c: block, shared: shared, clientSalt: clientSalt, serverSalt: nil},
-		{name: "long server salt", c: block, shared: shared, clientSalt: clientSalt, serverSalt: append(cloneBytes(serverSalt), 0)},
+		{name: "nil cipher", c: nil, suite: SuiteXChaCha20Poly1305, shared: shared, clientSalt: clientSalt, serverSalt: serverSalt},
+		{name: "invalid suite", c: block, suite: Suite(9), shared: shared, clientSalt: clientSalt, serverSalt: serverSalt},
+		{name: "nil shared secret", c: block, suite: SuiteXChaCha20Poly1305, shared: nil, clientSalt: clientSalt, serverSalt: serverSalt},
+		{name: "short shared secret", c: block, suite: SuiteXChaCha20Poly1305, shared: shared[:x25519KeyLen-1], clientSalt: clientSalt, serverSalt: serverSalt},
+		{name: "long shared secret", c: block, suite: SuiteXChaCha20Poly1305, shared: append(cloneBytes(shared), 0), clientSalt: clientSalt, serverSalt: serverSalt},
+		{name: "empty client salt", c: block, suite: SuiteXChaCha20Poly1305, shared: shared, clientSalt: nil, serverSalt: serverSalt},
+		{name: "short client salt", c: block, suite: SuiteXChaCha20Poly1305, shared: shared, clientSalt: clientSalt[:sessionSaltLen-1], serverSalt: serverSalt},
+		{name: "empty server salt", c: block, suite: SuiteXChaCha20Poly1305, shared: shared, clientSalt: clientSalt, serverSalt: nil},
+		{name: "long server salt", c: block, suite: SuiteXChaCha20Poly1305, shared: shared, clientSalt: clientSalt, serverSalt: append(cloneBytes(serverSalt), 0)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			c2s, s2c, err := DeriveSessionKeys(test.c, test.shared, test.clientSalt, test.serverSalt, testVersion)
+			c2s, s2c, err := DeriveSessionKeys(test.c, test.suite, test.shared, test.clientSalt, test.serverSalt, testVersion)
 			if err == nil {
 				t.Fatalf("DeriveSessionKeys() = (%x, %x, nil), want an error", c2s, s2c)
 			}
 		})
+	}
+}
+
+// TestDeriveSessionKeysUsesTheRequestedSuite proves that the suite argument
+// selects the HKDF info and the key length, independently of the cipher that
+// holds the static key. A version 3 session relies on this: it negotiates a
+// suite from the envelope cipher and derives the session keys of the negotiated
+// suite, which may be longer than the envelope key.
+func TestDeriveSessionKeysUsesTheRequestedSuite(t *testing.T) {
+	clientPriv := x25519PrivateKey(t, rfc7748AlicePrivate)
+	serverPriv := x25519PrivateKey(t, rfc7748BobPrivate)
+	clientPub := clientPriv.PublicKey().Bytes()
+	serverPub := serverPriv.PublicKey().Bytes()
+	shared := mustSharedSecret(t, clientPriv, serverPub)
+	if !bytes.Equal(shared, mustSharedSecret(t, serverPriv, clientPub)) {
+		t.Fatal("shared secrets are different")
+	}
+	clientSalt := []byte(testClientSalt)
+	serverSalt := []byte(testServerSalt)
+
+	// A credential key longer than every suite, so that the envelope cipher
+	// never limits the derivation.
+	staticKey := randomBytes(t, 2*DefaultKeyLen)
+
+	for _, envelope := range testSuiteProperties {
+		for _, negotiated := range testSuiteProperties {
+			t.Run(envelope.name+" envelope with "+negotiated.name, func(t *testing.T) {
+				block, err := NewBlockCipherFromKey(envelope.suite, staticKey, true)
+				if err != nil {
+					t.Fatalf("NewBlockCipherFromKey() failed: %v", err)
+				}
+				c2s, s2c, err := DeriveSessionKeys(block, negotiated.suite, shared, clientSalt, serverSalt, 3)
+				if err != nil {
+					t.Fatalf("DeriveSessionKeys() failed: %v", err)
+				}
+				// The keys are exactly as long as the negotiated suite needs,
+				// even when the envelope cipher is shorter.
+				if len(c2s) != negotiated.keyLen || len(s2c) != negotiated.keyLen {
+					t.Fatalf("key lengths = (%d, %d), want (%d, %d)", len(c2s), len(s2c), negotiated.keyLen, negotiated.keyLen)
+				}
+				if bytes.Equal(c2s, s2c) {
+					t.Fatal("the c2s key equals the s2c key, the directions are not separated")
+				}
+				// The negotiated suite is part of the HKDF info, so when it
+				// differs from the envelope suite the derived keys differ too.
+				if envelope.suite != negotiated.suite {
+					envelopeKeys, _, err := DeriveSessionKeys(block, envelope.suite, shared, clientSalt, serverSalt, 3)
+					if err != nil {
+						t.Fatalf("DeriveSessionKeys() with the envelope suite failed: %v", err)
+					}
+					if bytes.Equal(c2s[:negotiated.keyLen], envelopeKeys[:negotiated.keyLen]) {
+						t.Fatalf("the keys of %s equal the keys of the envelope suite %s", negotiated.name, envelope.name)
+					}
+				}
+				// The keys are usable AEAD keys of the negotiated suite.
+				send, err := NewBlockCipherFromKey(negotiated.suite, c2s, true)
+				if err != nil {
+					t.Fatalf("NewBlockCipherFromKey(c2s) failed: %v", err)
+				}
+				plaintext := []byte("a data plane message")
+				wire := make([]byte, send.NonceSize()+len(plaintext)+send.Overhead())
+				if err := send.Encrypt(wire[:0], plaintext); err != nil {
+					t.Fatalf("Encrypt() failed: %v", err)
+				}
+				recv, err := NewBlockCipherFromKey(negotiated.suite, c2s, true)
+				if err != nil {
+					t.Fatalf("NewBlockCipherFromKey(c2s) failed: %v", err)
+				}
+				got, err := recv.Decrypt(wire)
+				if err != nil {
+					t.Fatalf("Decrypt() failed: %v", err)
+				}
+				if !bytes.Equal(got, plaintext) {
+					t.Fatalf("plaintext after Decrypt() = %q, want %q", got, plaintext)
+				}
+			})
+		}
 	}
 }

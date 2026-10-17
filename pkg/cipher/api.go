@@ -34,6 +34,11 @@ const (
 
 	NoncePrefixLenForUserHint = 16 // 16 bytes user hint input
 	NonceSuffixLenForUserHint = 4  // 4 bytes user hint output
+
+	// HintPepperLen is the length in bytes of the user hint pepper returned by
+	// HintPepper. Only the first HintPepperLen bytes of a pepper are used, both
+	// when a hint is written and when it is checked.
+	HintPepperLen = 16
 )
 
 // BlockCipher is an interface of block encryption and decryption.
@@ -127,7 +132,59 @@ type BlockCipher interface {
 
 // BlockContext contains optional context associated to a cipher block.
 type BlockContext struct {
+	// UserName is the name of the user the block belongs to. When it is not
+	// empty the block embeds a user hint in the last
+	// NonceSuffixLenForUserHint bytes of every wire nonce it writes, see
+	// CheckUserFromHint and CheckUserFromHintV3.
 	UserName string
+
+	// Pepper is the optional user hint pepper of the user, see HintPepper. It
+	// is only read when UserName is not empty.
+	//
+	// When Pepper is empty the legacy user hint of protocol v2 is written: it
+	// is computed from the user name only, so anyone who knows a user name can
+	// compute the hint of that user. When Pepper is not empty the keyed hint of
+	// protocol v3 is written: it also depends on the credential shared by the
+	// client and the server, so an attacker who does not hold that credential
+	// cannot compute or verify a candidate hint.
+	//
+	// The caller must not modify the bytes of Pepper while the block is in use,
+	// and must keep them alive for as long as the block is used: the block
+	// keeps a reference to the slice, it does not copy it.
+	Pepper []byte
+}
+
+// hintPepperUniqueValue separates the keyed user hint pepper from the uses of
+// HashPassword that derive a credential, so the pepper of a user is a value of
+// its own and never the credential of a user.
+const hintPepperUniqueValue = "mieru protocol v3 user hint pepper"
+
+// HintPepper derives the HintPepperLen bytes pepper of the keyed user hint
+// from a user name and the credential shared with the server. In mieru that
+// credential is HashPassword(rawPassword, userName), which is also the
+// password the block cipher keys are derived from.
+//
+// The result is deterministic: it depends only on the arguments, never on the
+// current time slot or on the cipher suite. A server can therefore precompute
+// the pepper of its users and use it to check the hint of an incoming packet.
+// An empty user name or an empty password returns nil, which selects the
+// unkeyed legacy hint.
+//
+// Security: the pepper is derived from the shared credential, so an attacker
+// who does not hold that credential cannot compute the hint of a user, nor
+// tell whether a candidate hint belongs to a user. The pepper is not an
+// authentication secret: whoever holds the credential can still compute hints,
+// so a matching hint never authenticates a segment by itself, it only narrows
+// down which credentials are worth an AEAD trial. A hint match must never be
+// used as an access control check.
+func HintPepper(userName, password string) []byte {
+	if userName == "" || password == "" {
+		return nil
+	}
+	hashed := HashPassword([]byte(password), []byte(hintPepperUniqueValue+userName))
+	pepper := make([]byte, HintPepperLen)
+	copy(pepper, hashed)
+	return pepper
 }
 
 // HashPassword generates a hashed password from
@@ -155,9 +212,10 @@ func NewBlockCipherFromKey(suite Suite, key []byte, stateless bool) (BlockCipher
 }
 
 // BlockCipherFromPassword creates a BlockCipher object from the password
-// with the supplied cipher suite and the default settings.
+// with the supplied cipher suite and the default settings. The key is derived
+// with KeyIterV3 PBKDF2 iterations.
 func BlockCipherFromPassword(suite Suite, password []byte, stateless bool) (BlockCipher, error) {
-	entry, err := getCachedCiphers(string(password), suite, time.Now())
+	entry, err := getCachedCiphers(string(password), suite, time.Now(), KeyIterV3)
 	if err != nil {
 		return nil, err
 	}
@@ -172,10 +230,17 @@ func BlockCipherFromPassword(suite Suite, password []byte, stateless bool) (Bloc
 // cipher suite, using three different salts from the password with the default
 // settings. Element 0 uses the salt of the previous key refresh interval,
 // element 1 uses the salt of the current one, and element 2 uses the salt of
-// the next one, which allows a caller to handle a peer with a clock offset of
-// up to two minutes in either direction.
+// the next one, which covers a peer key slot offset of up to one refresh
+// interval (KeyRefreshInterval, two minutes) in either direction.
+//
+// These three ciphers only cover the key derivation layer. Every data segment
+// also carries a timestamp in its metadata, which is accepted only within ±1
+// minute of the local clock, so a caller that implements the protocol end to
+// end tolerates a peer clock offset of ±1 minute rather than two minutes.
+//
+// The keys are derived with KeyIterV3 PBKDF2 iterations.
 func BlockCipherListFromPassword(suite Suite, password []byte, stateless bool) ([]BlockCipher, error) {
-	entry, err := getCachedCiphers(string(password), suite, time.Now())
+	entry, err := getCachedCiphers(string(password), suite, time.Now(), KeyIterV3)
 	if err != nil {
 		return nil, err
 	}
@@ -212,11 +277,75 @@ func CheckUserFromHint(user, nonce []byte) bool {
 	return bytes.Equal(output[:NonceSuffixLenForUserHint], nonce[len(nonce)-NonceSuffixLenForUserHint:])
 }
 
+// CheckUserFromHintV3 checks if the user is the one associated with the nonce,
+// using the keyed user hint of protocol v3. pepper is the HintPepper of the
+// user and name is the user name; at most the first HintPepperLen bytes of
+// pepper are used. It is the counterpart of the keyed hint that
+// addUserHintToNonce writes, and it must be used for a nonce whose block had a
+// non-empty BlockContext.Pepper.
+//
+// The user hint embedded in the nonce is only used to quickly filter candidate
+// users before real authentication. Unlike the legacy hint of
+// CheckUserFromHint, it cannot be computed without the credential shared by the
+// client and the server, so an attacker who only knows a user name cannot tell
+// whether a hint belongs to that user. It is still not an authentication
+// check: whoever holds the credential can compute a matching hint, so a match
+// only narrows down the users worth an AEAD trial and must never grant access.
+//
+// It panics if the pepper or the user is empty, if the user is too long, or if
+// the nonce is too short.
+func CheckUserFromHintV3(pepper, name, nonce []byte) bool {
+	if len(pepper) == 0 {
+		panic("user hint pepper is empty")
+	}
+	if len(name) == 0 {
+		panic("user is empty")
+	}
+	if len(name) > constant.MaxUserNameLen {
+		panic(fmt.Sprintf("user name length %d exceeds maximum %d", len(name), constant.MaxUserNameLen))
+	}
+	if len(nonce) < NoncePrefixLenForUserHint+NonceSuffixLenForUserHint {
+		panic(fmt.Sprintf("nonce length %d is too short", len(nonce)))
+	}
+	var input [HintPepperLen + constant.MaxUserNameLen + NoncePrefixLenForUserHint]byte
+	n := copy(input[:], pepper)
+	n += copy(input[n:], name)
+	n += copy(input[n:], nonce[:NoncePrefixLenForUserHint])
+	output := sha256.Sum256(input[:n])
+	return bytes.Equal(output[:NonceSuffixLenForUserHint], nonce[len(nonce)-NonceSuffixLenForUserHint:])
+}
+
 // NewStatelessDecryptor builds a StatelessDecryptor for the given cipher
-// suites and password. An empty suite list means all the supported cipher
-// suites. The password bytes are copied, so the caller can erase the input
-// afterwards.
+// suites and password, using the protocol v3 key derivation (KeyIterV3). An
+// empty suite list means all the supported cipher suites. The password bytes
+// are copied, so the caller can erase the input afterwards.
+//
+// A server that has to accept an old client must use
+// NewCompatStatelessDecryptor instead.
 func NewStatelessDecryptor(suites []Suite, password []byte) (*StatelessDecryptor, error) {
+	return newStatelessDecryptor(suites, password, []int{KeyIterV3})
+}
+
+// NewCompatStatelessDecryptor builds a StatelessDecryptor that accepts both the
+// protocol v3 key derivation (KeyIterV3) and the legacy one (KeyIter), so that
+// a server can decrypt the handshake request of an old client as well as the
+// request of a current one.
+//
+// The iteration variants are tried in the order KeyIterV3 then KeyIter, after
+// the cipher suites. The BlockCipher returned by TryDecrypt is always the one
+// that authenticated the ciphertext, so it carries the key derivation variant
+// of the sender: the caller must use that block, and not a freshly built cipher
+// of its own, to protect the handshake response.
+//
+// An empty suite list means all the supported cipher suites. The credential
+// bytes are copied, so the caller can erase the input afterwards.
+func NewCompatStatelessDecryptor(suites []Suite, credential []byte) (*StatelessDecryptor, error) {
+	return newStatelessDecryptor(suites, credential, []int{KeyIterV3, KeyIter})
+}
+
+// newStatelessDecryptor builds a StatelessDecryptor that tries the supplied
+// PBKDF2 iteration variants, in order.
+func newStatelessDecryptor(suites []Suite, password []byte, iters []int) (*StatelessDecryptor, error) {
 	if len(password) == 0 {
 		return nil, fmt.Errorf("password is empty")
 	}
@@ -232,12 +361,13 @@ func NewStatelessDecryptor(suites []Suite, password []byte) (*StatelessDecryptor
 	}
 	p := make([]byte, len(password))
 	copy(p, password)
-	return &StatelessDecryptor{password: p, suites: configured}, nil
+	return &StatelessDecryptor{password: p, suites: configured, iters: append([]int(nil), iters...)}, nil
 }
 
 // preparedCiphers holds the decryption material of a StatelessDecryptor for a
-// single key epoch. It contains one list per configured cipher suite, and each
-// list contains the three time slot ciphers of that suite.
+// single key epoch. It contains one list per configured cipher suite and key
+// derivation variant; each list contains the three time slot ciphers of that
+// (suite, variant) pair.
 type preparedCiphers struct {
 	lists [][]*aeadBlockCipher
 	epoch int64
@@ -245,11 +375,15 @@ type preparedCiphers struct {
 
 // StatelessDecryptor is optimized and safe for concurrent decryption.
 type StatelessDecryptor struct {
-	// mu guards password and suites. Caller must hold mu to access them.
+	// mu guards password, suites and iters. Caller must hold mu to access them.
 	mu       sync.RWMutex
 	password []byte
 	suites   []Suite
-	ciphers  atomic.Pointer[preparedCiphers]
+	// iters are the PBKDF2 iteration variants this decryptor accepts, in the
+	// order they are tried. See NewStatelessDecryptor and
+	// NewCompatStatelessDecryptor.
+	iters   []int
+	ciphers atomic.Pointer[preparedCiphers]
 }
 
 // Clear erases the password stored in the decryptor. The decryptor must not be
@@ -265,14 +399,17 @@ func (d *StatelessDecryptor) Clear() {
 	}
 	d.password = nil
 	d.suites = nil
+	d.iters = nil
 	d.ciphers.Store(nil)
 }
 
 // TryDecrypt tries to decrypt the ciphertext with the three time slot ciphers
-// of every configured cipher suite, with its prepended wire format nonce.
-// The suite ciphers are tried in the configured order, and the first cipher
-// suite whose AEAD tag verifies wins. The returned BlockCipher exposes the
-// cipher suite that authenticated the ciphertext through Suite().
+// of every configured cipher suite and key derivation variant, with its
+// prepended wire format nonce. The variants are tried in the configured order,
+// and the first combination whose AEAD tag verifies wins. The returned
+// BlockCipher exposes the cipher suite that authenticated the ciphertext
+// through Suite(), and it is the cipher that authenticated it, so it can be
+// used to protect the response to that ciphertext.
 func (d *StatelessDecryptor) TryDecrypt(ciphertext, dst []byte) (BlockCipher, []byte, error) {
 	return d.tryDecryptAt(ciphertext, dst, time.Now())
 }
@@ -291,20 +428,23 @@ func (d *StatelessDecryptor) tryDecryptAt(ciphertext, dst []byte, now time.Time)
 	epoch := cipherKeyEpoch(now)
 	entry := d.ciphers.Load()
 	if entry == nil || entry.epoch != epoch {
-		lists := make([][]*aeadBlockCipher, 0, len(d.suites))
+		lists := make([][]*aeadBlockCipher, 0, len(d.suites)*len(d.iters))
 		for _, suite := range d.suites {
-			cached, err := getCachedCiphers(string(d.password), suite, now)
-			if err != nil {
-				return nil, nil, err
+			for _, iter := range d.iters {
+				cached, err := getCachedCiphers(string(d.password), suite, now, iter)
+				if err != nil {
+					return nil, nil, err
+				}
+				lists = append(lists, cached.cipherList)
 			}
-			lists = append(lists, cached.cipherList)
 		}
 		entry = &preparedCiphers{lists: lists, epoch: epoch}
 		d.ciphers.Store(entry)
 	}
-	// The cipher suites are tried in the configured order, and the three time
-	// slots of a suite are tried by selectDecryptStateless. The first cipher
-	// suite that authenticates the ciphertext wins.
+	// The cipher suite and iteration variants are tried in the configured
+	// order, and the three time slots of a variant are tried by
+	// selectDecryptStateless. The first variant that authenticates the
+	// ciphertext wins.
 	for _, list := range entry.lists {
 		block, plaintext, err := selectDecryptStateless(ciphertext, dst, list)
 		if err == nil {

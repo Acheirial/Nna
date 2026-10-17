@@ -86,18 +86,30 @@ func SharedSecret(priv *ecdh.PrivateKey, peerPub []byte) ([]byte, error) {
 // DeriveSessionKeys derives the client to server session key and the server to
 // client session key from the X25519 shared secret and the handshake salts.
 //
-// The cipher suite of c selects the key length and the cipher suite identifier
-// mixed into the HKDF info. The static key of c is mixed into the HKDF salt, so
-// a peer must also know the user credential to derive the session keys.
+// suite selects the key length and the cipher suite identifier mixed into the
+// HKDF info, and the returned keys are suite.KeyLen() bytes long. From protocol
+// version 3 on it is the negotiated data plane suite, which may differ from the
+// suite of c and may need more key material than the handshake envelope
+// provides. A version 2 peer passes the suite of the handshake envelope, which
+// is the only suite its session keys can be derived from, so that its keys stay
+// bit for bit identical to the keys of an older build.
+//
+// The static key of c is mixed into the HKDF salt, so a peer must also know the
+// user credential to derive the session keys. c must be the cipher that
+// decrypted the handshake envelope, because only the envelope cipher records
+// the time slot of the peer.
 //
 // The session keys are ephemeral: they are not derived from the user credential
 // alone, so an attacker who learns the credential later can't decrypt a session
 // that has already ended.
-func DeriveSessionKeys(c BlockCipher, shared, clientSalt, serverSalt []byte, version uint8) (c2s, s2c []byte, err error) {
+func DeriveSessionKeys(c BlockCipher, suite Suite, shared, clientSalt, serverSalt []byte, version uint8) (c2s, s2c []byte, err error) {
 	if c == nil {
 		return nil, nil, fmt.Errorf("block cipher is nil")
 	}
-	suite, staticKey, staticKeyErr := suiteAndStaticKey(c)
+	if !suite.IsValid() {
+		return nil, nil, fmt.Errorf("invalid cipher suite %d", uint8(suite))
+	}
+	_, staticKey, staticKeyErr := suiteAndStaticKey(c)
 	if staticKeyErr != nil {
 		return nil, nil, staticKeyErr
 	}
