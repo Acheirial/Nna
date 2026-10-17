@@ -86,10 +86,10 @@ mieru replace config <FILE>
 3. 在 `profiles` -> `servers` -> `ipAddress` 属性中，填写代理服务器的公网地址。支持 IPv4 和 IPv6 地址。
 4. 【可选】如果你为代理服务器注册了域名，请在 `profiles` -> `servers` -> `domainName` 中填写域名。否则，请勿修改这个属性。
 5. 在 `profiles` -> `servers` -> `portBindings` -> `port` 中填写 mita 监听的 TCP 或 UDP 端口号。这个端口号必须与代理服务器中的设置相同。如果想要监听连续的端口号，也可以改为使用 `portRange` 属性。
-6. 【可选】请为 `profiles` -> `mtu` 属性中指定一个从 1280 到 1500 之间的值。默认值为 1400。这个值必须与代理服务器相同；只有两端取值一致，才能避免因分片导致的性能下降。
+6. 【可选】请为 `profiles` -> `mtu` 属性指定一个从 1280 到 1500 之间的值，默认值为 1400。该值是 L3 MTU，即网络路径能够通过的最大 IP 报文长度；UDP 代理协议的有效载荷预算会在此基础上另外扣除 IP 报文头与 UDP 报文头（IPv6 下最多 48 字节）。这个值必须与代理服务器相同；只有两端取值一致，才能避免因分片导致的性能下降。
 7. 【可选】如果想要调整多路复用的频率，是更多地创建新连接，还是更多地重用旧连接，可以为 `profiles` -> `multiplexing` -> `level` 属性设定一个值。这里可以使用的值包括 `MULTIPLEXING_OFF`, `MULTIPLEXING_LOW`, `MULTIPLEXING_MIDDLE`, `MULTIPLEXING_HIGH`。其中 `MULTIPLEXING_OFF` 会关闭多路复用功能。默认值为 `MULTIPLEXING_LOW`。
 8. 【可选】如果想开启 0-RTT 握手，请将 `profiles` -> `handshakeMode` 属性的值设置为 `HANDSHAKE_NO_WAIT`，否则请设置为 `HANDSHAKE_STANDARD`。默认值为 `HANDSHAKE_STANDARD`。
-9. 【可选】`profiles` -> `cipherSuites` 属性是客户端愿意使用的密码套件列表，**第一个元素最优先**。可以使用的值包括 `CIPHER_SUITE_XCHACHA20_POLY1305`，`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`。**未设置或者设置为空列表时，客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`**，与旧版本配置的行为一致。会话最终使用的套件由客户端与服务端在握手时协商决定，规则和适用场景见[密码套件](./protocol.md#密码套件)。
+9. 【可选】`profiles` -> `cipherSuites` 属性是客户端愿意使用的密码套件列表，**第一个元素最优先**。可以使用的值包括 `CIPHER_SUITE_XCHACHA20_POLY1305`，`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`。**未设置或者设置为空列表时，客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`**，与旧版本配置的行为一致。会话最终使用的套件由客户端与服务端在握手时协商决定，规则和适用场景见[密码套件](./protocol.md#密码套件)。列表的第 0 项还会决定握手信封的密钥长度：**当协商出协议版本 2 时**，服务端只会从交集中挑选密钥长度不超过它的套件，因此把 `CIPHER_SUITE_AES_128_GCM` 排在首位会排除另外两种套件；协议版本 3 不受这一限制（详见[版本与套件协商](./protocol.md#版本与套件协商)）。
 10. 请为 `socks5Port` 属性指定一个从 1025 到 65535 之间的数值。
 11. 【可选】如果客户端需要为局域网中的其他设备提供代理服务，请将 `socks5ListenLAN` 属性设置为 `true`。
 
@@ -285,7 +285,7 @@ proxies:
 
 可以使用的值包括 `CIPHER_SUITE_XCHACHA20_POLY1305`，`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`。未设置 `cipherSuites` 或者设置为空列表时，客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`，因此不含有该字段的旧版本配置文件可以继续使用，行为保持不变。
 
-会话实际使用的套件由两端在握手时协商：取「客户端列表」与「服务端允许集合」的交集，按**服务端偏好顺序**取第一个，因此最终套件可能不是客户端列表的第一项。交集为空时握手失败，服务端返回 `status` = 2，两端的 `cipherSuites` 必须至少有一个共同的套件。
+会话实际使用的套件由两端在握手时协商：先取「客户端列表」与「服务端允许集合」的交集，再在交集中按**服务端偏好顺序**选出最终成员，因此最终套件可能不是客户端列表的第一项。**只有协商出协议版本 2 时**，才会额外要求该成员的长度不超过客户端列表第 0 项（信封套件）的密钥长度：对端是 v2 服务端时，把 `CIPHER_SUITE_AES_128_GCM`（16 字节密钥）排在首位，`CIPHER_SUITE_XCHACHA20_POLY1305` 与 `CIPHER_SUITE_AES_256_GCM`（都是 32 字节密钥）都不会被选中；只要服务端的允许集合中包含 `CIPHER_SUITE_AES_128_GCM`，双方就会协商出它并正常建立会话。反之，如果交集为空，或者（在 v2 下）交集中没有任何密钥长度不超过信封套件的成员，握手就会失败，服务端返回 `status` = 2。协议版本 3 用协商出的套件派生会话密钥，不受密钥长度限制，交集中的任何套件都可能被选中，因此 v3 下把密钥更短的套件放在首位不会再排除密钥更长的套件。无论如何，两端至少要有一个共同的套件。
 
 一般建议保留默认的 `CIPHER_SUITE_XCHACHA20_POLY1305`：它的性能不依赖 CPU 的硬件特性。`CIPHER_SUITE_AES_256_GCM` 与 `CIPHER_SUITE_AES_128_GCM` 只有在 CPU 支持 AES 硬件指令时才有优势，详见[密码套件](./protocol.md#密码套件)；运维和排查注意事项见[密码套件协商](./operation.md#密码套件协商)。
 
