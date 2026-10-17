@@ -30,6 +30,8 @@ import (
 	"github.com/enfein/mieru/v3/pkg/mathext"
 )
 
+// The estimator of RFC 6298, Section 2.3: the smoothed RTT is updated with the
+// weight alpha and the mean deviation with the weight beta.
 const (
 	rttAlpha          = 0.125
 	oneMinusAlpha     = 1 - rttAlpha
@@ -37,6 +39,18 @@ const (
 	oneMinusBeta      = 1 - rttBeta
 	defaultInitialRTT = time.Second
 	infDuration       = time.Duration(math.MaxInt64)
+
+	// minRTO is the lower bound applied to the retransmission timeout computed
+	// by RTO. RFC 6298, Section 2.4 rounds the RTO of TCP up to one second, but
+	// that bound exists because TCP traditionally uses coarse grain clocks both
+	// to measure the RTT and to run its retransmission timer. The timers here
+	// are driven by a microsecond clock and belong to a single connection, so a
+	// one second floor would only delay the recovery of a lost segment on the
+	// low latency paths these sessions run on. 200 milliseconds stays an order
+	// of magnitude above the round trip time of such paths, and above the
+	// estimate plus four times its deviation, which is what keeps a spurious
+	// retransmission from being armed.
+	minRTO = 200 * time.Millisecond
 )
 
 // RTTStats provides round-trip statistics
@@ -46,7 +60,6 @@ type RTTStats struct {
 	// them with the first sample, and SetInitialRTT is allowed.
 	hasMeasurement bool
 
-	minRTT        time.Duration
 	latestRTT     time.Duration
 	smoothedRTT   time.Duration
 	meanDeviation time.Duration
@@ -63,14 +76,6 @@ func NewRTTStats() *RTTStats {
 	return &RTTStats{
 		rtoMultiplier: 1.0,
 	}
-}
-
-// MinRTT Returns the minRTT for the entire connection.
-// May return Zero if no valid updates have occurred.
-func (r *RTTStats) MinRTT() time.Duration {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.minRTT
 }
 
 // LatestRTT returns the most recent rtt measurement.
@@ -111,11 +116,19 @@ func (r *RTTStats) RTO() time.Duration {
 	// mu is already held for reading, so the fields are read directly instead
 	// of calling the getters, which would acquire the lock again.
 	if r.smoothedRTT == 0 {
+		// Without a measurement the conservative initial timeout is used. It is
+		// above minRTO by construction.
 		return 2 * defaultInitialRTT
 	}
 	rto := r.smoothedRTT + mathext.Max(4*r.meanDeviation, 10*time.Millisecond)
 	rto += r.maxAckDelay
-	return time.Duration(float64(rto) * r.rtoMultiplier)
+	rto = time.Duration(float64(rto) * r.rtoMultiplier)
+	// The lower bound is applied last, so that neither a small estimate nor a
+	// small multiplier can arm the timer below minRTO.
+	if rto < minRTO {
+		rto = minRTO
+	}
+	return rto
 }
 
 // UpdateRTT updates the RTT based on a new sample.
@@ -125,10 +138,6 @@ func (r *RTTStats) UpdateRTT(sample time.Duration) {
 
 	if sample == infDuration || sample <= 0 {
 		return
-	}
-
-	if r.minRTT == 0 || r.minRTT > sample {
-		r.minRTT = sample
 	}
 
 	r.latestRTT = sample
@@ -188,18 +197,6 @@ func (r *RTTStats) Reset() {
 
 	r.hasMeasurement = false
 	r.latestRTT = 0
-	r.minRTT = 0
 	r.smoothedRTT = 0
 	r.meanDeviation = 0
-}
-
-// ExpireSmoothedMetrics causes the smoothed_rtt to be increased to the latest_rtt if the latest_rtt
-// is larger. The mean deviation is increased to the most recent deviation if
-// it's larger.
-func (r *RTTStats) ExpireSmoothedMetrics() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.meanDeviation = mathext.Max(r.meanDeviation, mathext.Abs(r.smoothedRTT-r.latestRTT))
-	r.smoothedRTT = mathext.Max(r.smoothedRTT, r.latestRTT)
 }

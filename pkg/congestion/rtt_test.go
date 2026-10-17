@@ -44,13 +44,13 @@ func mustPanic(t *testing.T, name string, f func()) {
 }
 
 // TestUpdateRTT verifies the contract of the estimators instead of their current
-// smoothing coefficients: every sample is reflected in LatestRTT and MinRTT, the
-// smoothed RTT stays inside the range of the samples seen so far, the first
-// valid sample seeds the estimators, and an unmeasurable sample changes nothing.
+// smoothing coefficients: every sample is reflected in LatestRTT, the smoothed
+// RTT stays inside the range of the samples seen so far, the first valid sample
+// seeds the estimators, and an unmeasurable sample changes nothing.
 func TestUpdateRTT(t *testing.T) {
 	s := NewRTTStats()
-	if s.MinRTT() != 0 || s.LatestRTT() != 0 || s.SmoothedRTT() != 0 || s.MeanDeviation() != 0 {
-		t.Fatalf("new stats are not zeroed: min=%v latest=%v smoothed=%v deviation=%v", s.MinRTT(), s.LatestRTT(), s.SmoothedRTT(), s.MeanDeviation())
+	if s.LatestRTT() != 0 || s.SmoothedRTT() != 0 || s.MeanDeviation() != 0 {
+		t.Fatalf("new stats are not zeroed: latest=%v smoothed=%v deviation=%v", s.LatestRTT(), s.SmoothedRTT(), s.MeanDeviation())
 	}
 
 	minSample, maxSample := rttSamples[0], rttSamples[0]
@@ -65,9 +65,6 @@ func TestUpdateRTT(t *testing.T) {
 
 		if got := s.LatestRTT(); got != sample {
 			t.Errorf("LatestRTT() after sample %d = %v, want %v", i, got, sample)
-		}
-		if got := s.MinRTT(); got != minSample {
-			t.Errorf("MinRTT() after sample %d = %v, want %v", i, got, minSample)
 		}
 		// The smoothed RTT is a weighted average of the samples seen so far, so
 		// it can't leave the observed range. A wrong blend weight, a missing
@@ -89,13 +86,91 @@ func TestUpdateRTT(t *testing.T) {
 	}
 
 	// Zero, negative and infinite samples are not measurements.
-	minBefore, latestBefore := s.MinRTT(), s.LatestRTT()
-	smoothedBefore, devBefore := s.SmoothedRTT(), s.MeanDeviation()
+	latestBefore, smoothedBefore, devBefore := s.LatestRTT(), s.SmoothedRTT(), s.MeanDeviation()
 	for _, invalid := range []time.Duration{0, -1 * time.Millisecond, infDuration} {
 		s.UpdateRTT(invalid)
-		if s.MinRTT() != minBefore || s.LatestRTT() != latestBefore || s.SmoothedRTT() != smoothedBefore || s.MeanDeviation() != devBefore {
-			t.Errorf("UpdateRTT(%v) changed the stats: min=%v latest=%v smoothed=%v deviation=%v", invalid, s.MinRTT(), s.LatestRTT(), s.SmoothedRTT(), s.MeanDeviation())
+		if s.LatestRTT() != latestBefore || s.SmoothedRTT() != smoothedBefore || s.MeanDeviation() != devBefore {
+			t.Errorf("UpdateRTT(%v) changed the stats: latest=%v smoothed=%v deviation=%v", invalid, s.LatestRTT(), s.SmoothedRTT(), s.MeanDeviation())
 		}
+	}
+}
+
+// TestUpdateRTTEstimator verifies the numbers of the estimator of RFC 6298,
+// Section 2.3, which updates the estimates with
+//
+//	SRTT   <- (1 - alpha) * SRTT + alpha * R
+//	RTTVAR <- (1 - beta) * RTTVAR + beta * |SRTT - R|
+//
+// where alpha = 0.125, beta = 0.25 and the first sample seeds SRTT = R and
+// RTTVAR = R / 2. The expected values are computed by hand and compared with a
+// tolerance of one microsecond, because UpdateRTT keeps each estimate as a whole
+// number of microseconds.
+func TestUpdateRTTEstimator(t *testing.T) {
+	const tolerance = time.Microsecond
+
+	tests := []struct {
+		name      string
+		samples   []time.Duration
+		smoothed  time.Duration
+		deviation time.Duration
+		rto       time.Duration
+	}{
+		{
+			name:      "first sample seeds the estimators",
+			samples:   []time.Duration{300 * time.Millisecond},
+			smoothed:  300 * time.Millisecond,
+			deviation: 150 * time.Millisecond,
+			rto:       900 * time.Millisecond,
+		},
+		{
+			// SRTT = 0.875*300ms + 0.125*100ms = 275ms
+			// RTTVAR = 0.75*150ms + 0.25*|300ms-100ms| = 162.5ms
+			// RTO = 275ms + 4*162.5ms
+			name:      "a smaller sample pulls both estimates down",
+			samples:   []time.Duration{300 * time.Millisecond, 100 * time.Millisecond},
+			smoothed:  275 * time.Millisecond,
+			deviation: 162500 * time.Microsecond,
+			rto:       925 * time.Millisecond,
+		},
+		{
+			// SRTT = 0.875*275ms + 0.125*500ms = 303.125ms
+			// RTTVAR = 0.75*162.5ms + 0.25*|275ms-500ms| = 178.125ms
+			name:      "a bigger sample pushes both estimates up",
+			samples:   []time.Duration{300 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond},
+			smoothed:  303125 * time.Microsecond,
+			deviation: 178125 * time.Microsecond,
+			rto:       1015625 * time.Microsecond,
+		},
+		{
+			// SRTT = 0.875*303.125ms + 0.125*250ms = 296484.375us
+			// RTTVAR = 0.75*178.125ms + 0.25*|303.125ms-250ms| = 146.875ms
+			name:      "the deviation reacts faster than the average",
+			samples:   []time.Duration{300 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond, 250 * time.Millisecond},
+			smoothed:  296484375 * time.Nanosecond,
+			deviation: 146875 * time.Microsecond,
+			rto:       883984 * time.Microsecond,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewRTTStats()
+			for _, sample := range tc.samples {
+				s.UpdateRTT(sample)
+			}
+			if got := s.LatestRTT(); got != tc.samples[len(tc.samples)-1] {
+				t.Errorf("LatestRTT() = %v, want %v", got, tc.samples[len(tc.samples)-1])
+			}
+			if got := s.SmoothedRTT(); got < tc.smoothed-tolerance || got > tc.smoothed+tolerance {
+				t.Errorf("SmoothedRTT() = %v, want %v", got, tc.smoothed)
+			}
+			if got := s.MeanDeviation(); got < tc.deviation-tolerance || got > tc.deviation+tolerance {
+				t.Errorf("MeanDeviation() = %v, want %v", got, tc.deviation)
+			}
+			if got := s.RTO(); got != tc.rto {
+				t.Errorf("RTO() = %v, want %v", got, tc.rto)
+			}
+		})
 	}
 }
 
@@ -134,14 +209,11 @@ func TestUpdateRTTSampleCountInvariance(t *testing.T) {
 	const sample = 333 * time.Millisecond
 	for _, n := range []int{1, 2, 10, 1000} {
 		s := NewRTTStats()
-		for i := 0; i < n; i++ {
+		for range n {
 			s.UpdateRTT(sample)
 		}
 		if got := s.SmoothedRTT(); got != sample {
 			t.Errorf("SmoothedRTT() after %d identical samples = %v, want %v", n, got, sample)
-		}
-		if got := s.MinRTT(); got != sample {
-			t.Errorf("MinRTT() after %d identical samples = %v, want %v", n, got, sample)
 		}
 		if got := s.LatestRTT(); got != sample {
 			t.Errorf("LatestRTT() after %d identical samples = %v, want %v", n, got, sample)
@@ -158,7 +230,7 @@ func TestUpdateRTTSampleCountInvariance(t *testing.T) {
 	const bound = 1 * time.Second
 	for _, n := range []int{1, 10, 10000} {
 		s := NewRTTStats()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			s.UpdateRTT(bound - time.Duration(i%1000)*time.Millisecond)
 		}
 		if got := s.SmoothedRTT(); got > bound {
@@ -203,6 +275,11 @@ func TestRTO(t *testing.T) {
 	if got := s.RTO(); got != want {
 		t.Errorf("RTO() = %v, want %v", got, want)
 	}
+	// SmoothedRTT is 279652us and MeanDeviation is 128193us after the sample
+	// sequence above, so the RTO is 279652us + 4*128193us + 2s.
+	if got, want := s.RTO(), 2792424*time.Microsecond; got != want {
+		t.Errorf("RTO() = %v, want %v", got, want)
+	}
 	if got := s.RTO(); got <= smoothed+maxAckDelay {
 		t.Errorf("RTO() = %v, want > %v", got, smoothed+maxAckDelay)
 	}
@@ -216,6 +293,9 @@ func TestRTO(t *testing.T) {
 	noAckDelay := NewRTTStats()
 	for _, sample := range rttSamples {
 		noAckDelay.UpdateRTT(sample)
+	}
+	if got, want := noAckDelay.RTO(), 792424*time.Microsecond; got != want {
+		t.Errorf("RTO() without ack delay = %v, want %v", got, want)
 	}
 	if got, want := s.RTO()-noAckDelay.RTO(), maxAckDelay; got != want {
 		t.Errorf("RTO() difference with and without ack delay = %v, want %v", got, want)
@@ -234,16 +314,96 @@ func TestRTO(t *testing.T) {
 
 	// A reset drops the measurement and restores the fallback RTO.
 	s.Reset()
-	if s.MinRTT() != 0 || s.LatestRTT() != 0 || s.SmoothedRTT() != 0 || s.MeanDeviation() != 0 {
-		t.Errorf("stats after Reset() are min=%v latest=%v smoothed=%v deviation=%v, want all zero", s.MinRTT(), s.LatestRTT(), s.SmoothedRTT(), s.MeanDeviation())
+	if s.LatestRTT() != 0 || s.SmoothedRTT() != 0 || s.MeanDeviation() != 0 {
+		t.Errorf("stats after Reset() are latest=%v smoothed=%v deviation=%v, want all zero", s.LatestRTT(), s.SmoothedRTT(), s.MeanDeviation())
 	}
 	if got, want := s.RTO(), 2*defaultInitialRTT; got != want {
 		t.Errorf("RTO() after Reset() = %v, want %v", got, want)
 	}
 }
 
-// TestRTTStateTransitions verifies SetInitialRTT, ExpireSmoothedMetrics and the
-// guards of the setters.
+// TestRTOMinimum verifies that the RTO is clamped to minRTO. The clamp is what
+// keeps a short estimate from arming a retransmission timer that fires before a
+// lost segment could possibly have been acknowledged.
+func TestRTOMinimum(t *testing.T) {
+	tests := []struct {
+		name        string
+		samples     []time.Duration
+		maxAckDelay time.Duration
+		multiplier  float64
+		wantRTO     time.Duration
+		wantClamped bool
+	}{
+		{
+			// A single 10ms sample gives 10ms + 4*5ms = 30ms.
+			name:        "a short estimate is clamped",
+			samples:     []time.Duration{10 * time.Millisecond},
+			multiplier:  1,
+			wantRTO:     minRTO,
+			wantClamped: true,
+		},
+		{
+			// 60ms + 4*30ms = 180ms is just below the bound.
+			name:        "an estimate just below the bound is clamped",
+			samples:     []time.Duration{60 * time.Millisecond},
+			multiplier:  1,
+			wantRTO:     minRTO,
+			wantClamped: true,
+		},
+		{
+			// The ack delay is part of the value that gets clamped.
+			name:        "the ack delay is included before the clamp",
+			samples:     []time.Duration{50 * time.Millisecond},
+			maxAckDelay: 25 * time.Millisecond,
+			multiplier:  1,
+			wantRTO:     minRTO,
+			wantClamped: true,
+		},
+		{
+			// 100ms + 4*50ms = 300ms.
+			name:       "an estimate above the bound is not clamped",
+			samples:    []time.Duration{100 * time.Millisecond},
+			multiplier: 1,
+			wantRTO:    300 * time.Millisecond,
+		},
+		{
+			// The bound is applied after the multiplier, so a small multiplier
+			// can't arm a timer below it either.
+			name:        "a small multiplier is clamped",
+			samples:     []time.Duration{100 * time.Millisecond},
+			multiplier:  0.5,
+			wantRTO:     minRTO,
+			wantClamped: true,
+		},
+		{
+			// 300ms + 4*150ms = 900ms, doubled by the multiplier.
+			name:       "a large multiplier scales the value",
+			samples:    []time.Duration{300 * time.Millisecond},
+			multiplier: 2,
+			wantRTO:    1800 * time.Millisecond,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewRTTStats()
+			s.SetMaxAckDelay(tc.maxAckDelay)
+			for _, sample := range tc.samples {
+				s.UpdateRTT(sample)
+			}
+			s.SetRTOMultiplier(tc.multiplier)
+			if got := s.RTO(); got != tc.wantRTO {
+				t.Errorf("RTO() = %v, want %v", got, tc.wantRTO)
+			}
+			if got := s.RTO() == minRTO; got != tc.wantClamped {
+				t.Errorf("RTO() == minRTO is %v, want %v", got, tc.wantClamped)
+			}
+		})
+	}
+}
+
+// TestRTTStateTransitions verifies SetInitialRTT, the setter guards and the
+// reset that a connection migration performs.
 func TestRTTStateTransitions(t *testing.T) {
 	// SetInitialRTT seeds the estimators before the first measurement.
 	const initial = 150 * time.Millisecond
@@ -255,32 +415,44 @@ func TestRTTStateTransitions(t *testing.T) {
 	if got := restored.LatestRTT(); got != initial {
 		t.Errorf("LatestRTT() after SetInitialRTT() = %v, want %v", got, initial)
 	}
-	if got := restored.RTO(); got <= initial {
-		t.Errorf("RTO() after SetInitialRTT() = %v, want > %v", got, initial)
-	}
-
-	// ExpireSmoothedMetrics only moves the estimates towards the latest sample.
-	s := NewRTTStats()
-	for _, sample := range rttSamples {
-		s.UpdateRTT(sample)
-	}
-	smoothed, deviation, latest := s.SmoothedRTT(), s.MeanDeviation(), s.LatestRTT()
-	diff := smoothed - latest
-	if diff < 0 {
-		diff = -diff
-	}
-	s.ExpireSmoothedMetrics()
-	if got := s.SmoothedRTT(); got < smoothed || got < latest {
-		t.Errorf("SmoothedRTT() after ExpireSmoothedMetrics() = %v, want >= %v and >= %v", got, smoothed, latest)
-	}
-	if got := s.MeanDeviation(); got < deviation || got < diff {
-		t.Errorf("MeanDeviation() after ExpireSmoothedMetrics() = %v, want >= %v and >= %v", got, deviation, diff)
+	// Without a deviation the estimate is 150ms + 10ms, which minRTO clamps up.
+	if got := restored.RTO(); got != minRTO {
+		t.Errorf("RTO() after SetInitialRTT() = %v, want %v", got, minRTO)
 	}
 
 	// The setters reject values that would corrupt the stats.
+	const maxAckDelay = 25 * time.Millisecond
+	s := NewRTTStats()
+	s.SetMaxAckDelay(maxAckDelay)
+	s.SetRTOMultiplier(2)
+	for _, sample := range rttSamples {
+		s.UpdateRTT(sample)
+	}
 	mustPanic(t, "SetInitialRTT", func() { s.SetInitialRTT(initial) })
 	mustPanic(t, "SetRTOMultiplier", func() { s.SetRTOMultiplier(0) })
 	mustPanic(t, "SetRTOMultiplier", func() { s.SetRTOMultiplier(-1) })
+
+	// Reset drops the measurement, so the next sample seeds the estimators
+	// again instead of blending them with the cleared values, and SetInitialRTT
+	// is allowed again. The connection level settings are kept.
+	s.Reset()
+	s.SetInitialRTT(initial)
+	if got := s.SmoothedRTT(); got != initial {
+		t.Errorf("SmoothedRTT() after Reset() and SetInitialRTT() = %v, want %v", got, initial)
+	}
+	s.UpdateRTT(400 * time.Millisecond)
+	if got := s.SmoothedRTT(); got != 400*time.Millisecond {
+		t.Errorf("SmoothedRTT() after the first sample following Reset() = %v, want %v", got, 400*time.Millisecond)
+	}
+	if got := s.MeanDeviation(); got != 200*time.Millisecond {
+		t.Errorf("MeanDeviation() after the first sample following Reset() = %v, want %v", got, 200*time.Millisecond)
+	}
+	// 400ms + 4*200ms + maxAckDelay, doubled by the multiplier that survived
+	// the reset.
+	wantRTO := 2 * (400*time.Millisecond + 4*200*time.Millisecond + maxAckDelay)
+	if got := s.RTO(); got != wantRTO {
+		t.Errorf("RTO() after Reset() = %v, want %v", got, wantRTO)
+	}
 }
 
 // TestUpdateRTTConcurrent verifies that concurrent updates and reads are
@@ -310,22 +482,23 @@ func TestUpdateRTTConcurrent(t *testing.T) {
 	s := NewRTTStats()
 	bad := make([]int, goroutines+1)
 	var wg sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				s.UpdateRTT(samples[(g+i)%len(samples)])
 			}
 		}(g)
 	}
 	// A concurrent reader must not observe a torn or out of range value. The
-	// fallback RTO of 2 seconds also fits in the range checked below.
+	// RTO of an estimate that is still being seeded is bounded by the largest
+	// sample plus four times the largest deviation.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iterations; i++ {
-			if rto := s.RTO(); rto < minSample || rto > 5*maxSample {
+		for range iterations {
+			if rto := s.RTO(); rto < minRTO || rto > 5*maxSample {
 				bad[goroutines]++
 			}
 		}
@@ -336,11 +509,6 @@ func TestUpdateRTTConcurrent(t *testing.T) {
 		if n != 0 {
 			t.Errorf("worker %d observed %d out of range values.", g, n)
 		}
-	}
-	// Every value of the sample set is fed at least once, so the minimum is
-	// known exactly.
-	if got := s.MinRTT(); got != minSample {
-		t.Errorf("MinRTT() = %v, want %v", got, minSample)
 	}
 	if got := s.LatestRTT(); got < minSample || got > maxSample {
 		t.Errorf("LatestRTT() = %v, want in [%v, %v]", got, minSample, maxSample)

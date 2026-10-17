@@ -15,7 +15,10 @@
 
 package common
 
-import "fmt"
+import (
+	"fmt"
+	"math/bits"
+)
 
 // BitDistribution describes the probability of bit 0 and bit 1 in a byte array.
 type BitDistribution struct {
@@ -38,20 +41,19 @@ func ToBitDistribution(arr []byte) BitDistribution {
 		}
 	}
 
-	var bit0Count, bit1Count float64
+	// Bit1Count is the total number of set bits of arr, which
+	// math/bits.OnesCount8 computes for each byte with a single machine
+	// instruction. Bit0Count is the number of remaining bits.
+	bit1Count := 0
 	for _, b := range arr {
-		for i := 0; i < 8; i++ {
-			if (b>>i)&1 == 0 {
-				bit0Count++
-			} else {
-				bit1Count++
-			}
-		}
+		bit1Count += bits.OnesCount8(b)
 	}
+	bit0Count := len(arr)*8 - bit1Count
+	total := float64(len(arr) * 8)
 	return BitDistribution{
-		Bit0:      bit0Count / float64(len(arr)*8),
-		Bit1:      bit1Count / float64(len(arr)*8),
-		Bit0Count: int(bit0Count),
-		Bit1Count: int(bit1Count),
+		Bit0:      float64(bit0Count) / total,
+		Bit1:      float64(bit1Count) / total,
+		Bit0Count: bit0Count,
+		Bit1Count: bit1Count,
 	}
 }
