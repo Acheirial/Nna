@@ -22,7 +22,7 @@ TEST_CONTAINER_IMAGE ?= mieru_basic:${SHORT_SHA}
 BENCH_TIME ?= 10s
 FUZZ_TIME ?= 10s
 BENCH_PACKAGES ?= ./pkg/cipher ./pkg/common ./pkg/protocol ./pkg/protocol/serveruser
-FUZZ_PACKAGES ?= ./pkg/protocol
+FUZZ_PACKAGES ?= ./pkg/cipher ./pkg/protocol
 
 # With .ONESHELL, each recipe is executed in a single shell instance.
 # This allows `cd` to affect subsequent commands in the same recipe.

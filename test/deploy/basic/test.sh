@@ -46,6 +46,16 @@ echo "========== BEGIN OF UDP ASSOCIATE TEST =========="
 ./test_mix_udp_associate.sh
 echo "==========  END OF UDP ASSOCIATE TEST  =========="
 
+# Run AES-256-GCM over UDP test.
+echo "========== BEGIN OF AES OVER UDP TEST =========="
+./test_aes_udp.sh
+echo "==========  END OF AES OVER UDP TEST  =========="
+
+# Run cipher suite mismatch test.
+echo "========== BEGIN OF CIPHER SUITE MISMATCH TEST =========="
+./test_suite_mismatch.sh
+echo "==========  END OF CIPHER SUITE MISMATCH TEST  =========="
+
 echo "Test is successful."
 sleep 1
 exit 0

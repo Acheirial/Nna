@@ -58,6 +58,32 @@ jobs:
         # Runs the race detector with -count=1, so a cached test result can not
         # hide a failure. Generates coverage.out and coverage.html.
         run: make test
+      - name: Check code coverage threshold
+        # A real gate: the total coverage of `make test` must not fall below
+        # COVERAGE_THRESHOLD. It runs before the coverage artifact is uploaded.
+        # The threshold is a floor, not a target: it was set to the value
+        # observed in the first successful CI run (43.8%), rounded down, so
+        # that new code that ships without tests can not silently lower the
+        # coverage of the repository. Raise it as the coverage improves.
+        env:
+          COVERAGE_THRESHOLD: "40"
+        run: |
+          if [ ! -f coverage.out ]; then
+            echo "coverage.out is not found, the test step didn't generate it"
+            exit 1
+          fi
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ { sub(/%$/, "", $3); print $3 }')
+          if [ -z "$total" ]; then
+            echo "coverage.out doesn't contain a total coverage line"
+            exit 1
+          fi
+          echo "total code coverage: ${total}%"
+          awk -v total="${total}" -v threshold="${COVERAGE_THRESHOLD}" 'BEGIN {
+            if (total + 0 < threshold + 0) {
+              printf "code coverage %.1f%% is below the threshold %s%%\n", total, threshold
+              exit 1
+            }
+          }'
       - name: Upload code coverage
         # Also upload for a failed run, to make it debuggable.
         if: always()

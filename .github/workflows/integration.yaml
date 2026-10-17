@@ -47,6 +47,12 @@ jobs:
           - name: basic - AES
             script: test_aes.sh
             cache_scope: aes
+          - name: basic - AES over UDP
+            script: test_aes_udp.sh
+            cache_scope: aes-udp
+          - name: basic - cipher suite mismatch
+            script: test_suite_mismatch.sh
+            cache_scope: suite-mismatch
     steps:
       - name: Check out repository code
         uses: actions/checkout@v6

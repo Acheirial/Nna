@@ -1,0 +1,43 @@
+{
+    "profiles": [
+        {
+            "profileName": "default",
+            "user": {
+                "name": "user1",
+                "password": "password1"
+            },
+            "servers": [
+                {
+                    "ipAddress": "127.0.0.1",
+                    "portBindings": [
+                        {
+                            "port": 10002,
+                            "protocol": "UDP"
+                        },
+                        {
+                            "port": 10003,
+                            "protocol": "UDP"
+                        }
+                    ]
+                }
+            ],
+            "mtu": 1400,
+            "cipherSuites": [
+                "CIPHER_SUITE_AES_256_GCM",
+                "CIPHER_SUITE_XCHACHA20_POLY1305"
+            ],
+            "multiplexing": {
+                "level": "MULTIPLEXING_HIGH"
+            },
+            "trafficPattern": {
+                "lowEntropy": {
+                    "mode": "LOW_ENTROPY_MODE_32"
+                }
+            }
+        }
+    ],
+    "activeProfile": "default",
+    "socks5Port": 1080,
+    "loggingLevel": "DEBUG",
+    "socks5ListenLAN": true
+}
