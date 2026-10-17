@@ -85,13 +85,19 @@ const (
 	// acceptBurst is the size of the token bucket of one source IP address in
 	// the server TCP accept path: how many underlays a source IP address can
 	// open back to back. It covers a client that starts many sessions at once,
-	// and it covers several clients that share the same NAT address.
-	acceptBurst = 128
+	// and it covers several clients that share the same NAT address. The
+	// integration test opens more than a thousand underlays from 127.0.0.1 in a
+	// few seconds with multiplexing enabled, so the burst is well above that:
+	// the bound of the number of underlays is maxUnderlays, and this limiter
+	// only keeps a single source address from draining that bound instantly.
+	acceptBurst = 2048
 
 	// acceptRefillPerSecond is the token refill rate of one source IP address.
 	// It bounds the sustained rate at which an unauthenticated peer can make the
-	// server allocate and handshake new TCP underlays.
-	acceptRefillPerSecond = 32
+	// server allocate and handshake new TCP underlays. It is calibrated the same
+	// way as acceptBurst: it has to stay above the churn of a legitimate client,
+	// or a busy client is disconnected.
+	acceptRefillPerSecond = 512
 
 	// acceptBucketIdleTimeout is how long a source IP address keeps its token
 	// bucket after its last new underlay.
@@ -864,7 +870,9 @@ func (m *Mux) acceptTCPUnderlay(rawListener net.Listener, properties UnderlayPro
 			return nil, fmt.Errorf("Accept() underlay failed: %w", err)
 		}
 		if !m.acceptLimiter.allow(underlaySourceAddr(rawConn.RemoteAddr())) {
-			log.Debugf("Rejecting new server underlay from %v: the source address exceeded the accept rate limit", rawConn.RemoteAddr())
+			if m.acceptLimiter.shouldLogRefusal(time.Now()) {
+				log.Warnf("Rejecting new server underlays: a source address exceeded the accept rate limit of %d underlays per second (last refused peer %v)", acceptRefillPerSecond, rawConn.RemoteAddr())
+			}
 			rawConn.Close()
 			continue
 		}
@@ -1229,6 +1237,25 @@ type sourceRateLimiter struct {
 	perSecond float64
 	mu        sync.Mutex
 	buckets   map[netip.Addr]*sourceBucket
+	// lastRefusalLog is the time of the last refusal that was logged. The
+	// limiter refuses every connection of a flooding source, so the refusal is
+	// logged at most once per second instead of once per connection.
+	lastRefusalLog time.Time
+}
+
+// shouldLogRefusal reports whether a refused connection should be logged now.
+// It bounds the log rate of a flood to one line per second.
+func (l *sourceRateLimiter) shouldLogRefusal(now time.Time) bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.lastRefusalLog.IsZero() && now.Sub(l.lastRefusalLog) < time.Second {
+		return false
+	}
+	l.lastRefusalLog = now
+	return true
 }
 
 // newSourceRateLimiter creates a limiter with the given bucket size and refill

@@ -2048,20 +2048,34 @@ func (s *Session) closeWithError(err error) error {
 	// the session is closed.
 	s.forwardStateTo(sessionClosed)
 	close(s.closedChan)
-	// Return the storage of the segments of the send path to the pool before
-	// the queues are cleared. The segments were removed from the queues here,
-	// so no other goroutine can observe them any more. This runs at most once,
-	// because the compare and swap above accepted this call.
-	s.sendQueue.Ascend(func(seg *segment) bool {
-		releaseSendSegment(seg)
-		return true
-	})
-	s.sendBuf.Ascend(func(seg *segment) bool {
-		releaseSendSegment(seg)
-		return true
-	})
-	s.sendQueue.DeleteAll()
-	s.sendBuf.DeleteAll()
+	// Return the storage of the segments of the send path to the pool, but only
+	// when the output lock is free right now. An output loop holds that lock
+	// while it writes to the underlay, and a write can block until the write
+	// deadline of the transport expires, so waiting for the lock would make
+	// Close() as slow as a stuck peer. A skipped drain costs nothing but the
+	// reuse of the storage, which the garbage collector reclaims with the
+	// session.
+	//
+	// The segments are removed from the queues before they are released, while
+	// the output loops are excluded: a released segment has a nil metadata, so
+	// a pass that still walks the tree of a queue must never see one.
+	if s.oLock.TryLock() {
+		var drained []*segment
+		s.sendQueue.Ascend(func(seg *segment) bool {
+			drained = append(drained, seg)
+			return true
+		})
+		s.sendBuf.Ascend(func(seg *segment) bool {
+			drained = append(drained, seg)
+			return true
+		})
+		s.sendQueue.DeleteAll()
+		s.sendBuf.DeleteAll()
+		s.oLock.Unlock()
+		for _, seg := range drained {
+			releaseSendSegment(seg)
+		}
+	}
 
 	if !sendCloseRequest {
 		log.Debugf("Closed %v", s)
