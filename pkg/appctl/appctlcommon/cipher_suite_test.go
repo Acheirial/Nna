@@ -16,6 +16,8 @@
 package appctlcommon
 
 import (
+	"bytes"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -23,6 +25,7 @@ import (
 	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/enfein/mieru/v3/pkg/log"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -135,6 +138,211 @@ func TestValidateCipherSuiteList(t *testing.T) {
 				t.Fatalf("ValidateCipherSuiteList() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// cipherSuiteLengthWarningMark is a stable part of the warning logged by
+// warnIfFirstSuiteKeyLenLimitsNegotiation, which is used to detect the warning
+// in test output.
+const cipherSuiteLengthWarningMark = "handshake envelope"
+
+// TestValidateClientCipherSuiteListWarning checks that a client cipher suite
+// list which puts a shorter key suite before a longer key suite is accepted
+// with a warning, while a list that is already ordered by decreasing key length
+// stays silent. The server side validation never warns, because a server list
+// is not the handshake envelope.
+func TestValidateClientCipherSuiteListWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		client   bool
+		field    string
+		suites   []pb.CipherSuite
+		want     []cipher.Suite
+		wantWarn bool
+		wantErr  string
+	}{
+		{
+			name:   "client list starts with the short key suite",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+				pb.CipherSuite_CIPHER_SUITE_XCHACHA20_POLY1305,
+			},
+			want: []cipher.Suite{
+				cipher.SuiteAES128GCM,
+				cipher.SuiteXChaCha20Poly1305,
+			},
+			wantWarn: true,
+		},
+		{
+			name:   "client list starts with a long key suite",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_XCHACHA20_POLY1305,
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+			},
+			want: []cipher.Suite{
+				cipher.SuiteXChaCha20Poly1305,
+				cipher.SuiteAES128GCM,
+			},
+		},
+		{
+			name:   "client list with equal key length suites",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_XCHACHA20_POLY1305,
+				pb.CipherSuite_CIPHER_SUITE_AES_256_GCM,
+			},
+			want: []cipher.Suite{
+				cipher.SuiteXChaCha20Poly1305,
+				cipher.SuiteAES256GCM,
+			},
+		},
+		{
+			name:   "client list with a single short key suite",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: []pb.CipherSuite{pb.CipherSuite_CIPHER_SUITE_AES_128_GCM},
+			want:   []cipher.Suite{cipher.SuiteAES128GCM},
+		},
+		{
+			name:   "client list with an empty list",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: nil,
+			want:   []cipher.Suite{},
+		},
+		{
+			name:   "client list with a duplicated short key suite first",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+				pb.CipherSuite_CIPHER_SUITE_AES_256_GCM,
+			},
+			want: []cipher.Suite{
+				cipher.SuiteAES128GCM,
+				cipher.SuiteAES256GCM,
+			},
+			wantWarn: true,
+		},
+		{
+			name:   "client list where the longer key suite is a duplicate of the first",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+			},
+			want: []cipher.Suite{cipher.SuiteAES128GCM},
+		},
+		{
+			name:   "server list with the short key suite first is not a preference",
+			client: false,
+			field:  "server config cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+				pb.CipherSuite_CIPHER_SUITE_XCHACHA20_POLY1305,
+			},
+			want: []cipher.Suite{
+				cipher.SuiteAES128GCM,
+				cipher.SuiteXChaCha20Poly1305,
+			},
+		},
+		{
+			name:   "client list with a short key suite and an unspecified suite is rejected",
+			client: true,
+			field:  "client profile cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+				pb.CipherSuite_CIPHER_SUITE_UNSPECIFIED,
+			},
+			wantErr: "client profile cipherSuites[1] is CIPHER_SUITE_UNSPECIFIED",
+		},
+		{
+			name:   "server list with an unknown suite is rejected",
+			client: false,
+			field:  "server config cipherSuites",
+			suites: []pb.CipherSuite{
+				pb.CipherSuite_CIPHER_SUITE_XCHACHA20_POLY1305,
+				pb.CipherSuite(9),
+			},
+			wantErr: "server config cipherSuites[1] is not a supported cipher suite, got value 9",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			defer log.SetOutput(os.Stdout)
+
+			var got []cipher.Suite
+			var err error
+			if tc.client {
+				got, err = ValidateClientCipherSuiteList(tc.field, tc.suites)
+			} else {
+				got, err = ValidateCipherSuiteList(tc.field, tc.suites)
+			}
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("validation succeeded, want error %q", tc.wantErr)
+				}
+				if err.Error() != tc.wantErr {
+					t.Fatalf("validation error = %q, want %q", err.Error(), tc.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("validation result = %v, want nil", got)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("validation failed: %v", err)
+				}
+				if !slices.Equal(got, tc.want) {
+					t.Fatalf("validation = %v, want %v", got, tc.want)
+				}
+			}
+			logged := buf.String()
+			if gotWarn := strings.Contains(logged, cipherSuiteLengthWarningMark); gotWarn != tc.wantWarn {
+				t.Fatalf("cipher suite key length warning logged = %v (log %q), want %v", gotWarn, logged, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestValidateClientCipherSuiteListWarningMessage checks that the warning of a
+// list which puts a shorter key suite first names the field, the suite used as
+// the handshake envelope, and the suite that can never be negotiated.
+func TestValidateClientCipherSuiteListWarningMessage(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stdout)
+
+	got, err := ValidateClientCipherSuiteList("client profile cipherSuites", []pb.CipherSuite{
+		pb.CipherSuite_CIPHER_SUITE_AES_128_GCM,
+		pb.CipherSuite_CIPHER_SUITE_XCHACHA20_POLY1305,
+	})
+	if err != nil {
+		t.Fatalf("ValidateClientCipherSuiteList() failed: %v", err)
+	}
+	if want := []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305}; !slices.Equal(got, want) {
+		t.Fatalf("ValidateClientCipherSuiteList() = %v, want %v", got, want)
+	}
+	logged := buf.String()
+	for _, want := range []string{
+		"client profile cipherSuites[0]",
+		"AES_128_GCM",
+		"16-byte key",
+		"client profile cipherSuites[1]",
+		"XCHACHA20_POLY1305",
+		"32-byte key",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("warning %q doesn't contain %q", logged, want)
+		}
 	}
 }
 

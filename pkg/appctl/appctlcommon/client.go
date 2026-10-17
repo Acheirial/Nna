@@ -89,7 +89,7 @@ func ValidateClientConfigSingleProfile(profile *pb.ClientProfile) error {
 	if err := validateClientProfileDialer(profile); err != nil {
 		return err
 	}
-	if _, err := ValidateCipherSuiteList("client profile cipherSuites", profile.GetCipherSuites()); err != nil {
+	if _, err := ValidateClientCipherSuiteList("client profile cipherSuites", profile.GetCipherSuites()); err != nil {
 		return err
 	}
 	return nil
@@ -159,6 +159,8 @@ func NewClientMuxFromProfile(activeProfile *pb.ClientProfile, dialer apicommon.D
 
 	// Set cipher suites the client is willing to use.
 	// An empty list lets the mux pick its default suite.
+	// The client config validation has already warned if the list starts with
+	// a shorter key cipher suite, so this path doesn't warn again.
 	cipherSuites, err := ValidateCipherSuiteList("client profile cipherSuites", activeProfile.GetCipherSuites())
 	if err != nil {
 		return nil, err

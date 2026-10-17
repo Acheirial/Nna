@@ -488,6 +488,26 @@ func TestServerProxyListenIPAddress(t *testing.T) {
 	}
 }
 
+func TestResolveUserHintIsMandatory(t *testing.T) {
+	cases := []struct {
+		name string
+		adv  *pb.ServerAdvancedSettings
+		want bool
+	}{
+		{"nil settings", nil, true},
+		{"unset field", &pb.ServerAdvancedSettings{}, true},
+		{"explicit true", &pb.ServerAdvancedSettings{UserHintIsMandatory: proto.Bool(true)}, true},
+		{"explicit false", &pb.ServerAdvancedSettings{UserHintIsMandatory: proto.Bool(false)}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveUserHintIsMandatory(c.adv); got != c.want {
+				t.Fatalf("resolveUserHintIsMandatory(%v) = %t, want %t", c.adv, got, c.want)
+			}
+		})
+	}
+}
+
 type recordingListenerFactory struct{ addresses chan string }
 
 func (f *recordingListenerFactory) Listen(_ context.Context, _, address string) (net.Listener, error) {
