@@ -39,6 +39,54 @@ import (
 
 var streamReplayCache = replay.NewCache(64*1024, cipher.KeyRefreshInterval*3)
 
+// idleStreamSessionTimeout is the idle period after which the event loop
+// reclaims a stream session that received no segment since. It is measured
+// from the last received segment, like the idle timeout of the packet
+// transport, but it is far longer, because the two transports differ in what
+// keeps a session fresh:
+//
+//   - the packet data plane sends a heartbeat, so an idle session of a live
+//     peer keeps updating its receive time and the short timeout only catches
+//     a peer that is gone;
+//   - the stream data plane is silent when the application is silent: TCP
+//     carries the connection, and neither peer sends anything until the
+//     application does. A tunnel that the user leaves open is therefore quiet
+//     for minutes or hours without being dead.
+//
+// The reclaim only releases the state of a peer that disappeared without
+// closing the connection, so the timeout is set well above the silence of a
+// normal tunnel.
+const idleStreamSessionTimeout = 30 * time.Minute
+
+// streamWriteTimeout bounds a single write to the connection of a stream
+// underlay.
+//
+// The stream transport is reliable, so a peer that reads its socket drains the
+// data quickly and a write completes at the speed of the link. A peer that
+// stops reading is a different matter: its socket receive buffer fills up and
+// then every write blocks until the peer reads or the connection breaks. The
+// block is expensive, because the write happens while the sendMutex of the
+// underlay is held and it is the output loop of a session that performs it:
+//
+//   - Session.Close() and RemoveSession() wait for the output loop, and the
+//     stream transport removes a session inside the event loop of the
+//     connection;
+//   - the output loop holds the output lock of the session while it writes, so
+//     the close session request of that session waits behind the blocked write
+//     as well;
+//   - a write that never returns therefore hangs Close(), the session cleanup
+//     and the whole event loop of the connection, which serves the other
+//     sessions of that connection too.
+//
+// The deadline converts the block into a timeout error, and the output loop
+// treats it as a broken session, like any other write error. The value is far
+// above the time a live peer needs to accept a segment, so a slow but reading
+// peer is never cut off: only a peer that makes no progress for the whole
+// timeout fails. The deadline is armed again before every write, so a write
+// never inherits an expired deadline and a peer that drains slowly doesn't
+// accumulate the timeout over a sequence of writes.
+const streamWriteTimeout = 30 * time.Second
+
 type StreamUnderlay struct {
 	baseUnderlay
 	conn net.Conn
@@ -60,6 +108,14 @@ type StreamUnderlay struct {
 	// longer than the framing of the following messages.
 	sendNoncePending bool
 
+	// chainSwitched is true once the handshake of the first session replaced
+	// the cipher chain of this connection with the session keys. A connection
+	// switches its chain at most once, so a second openSessionRequest received
+	// after the switch is dropped instead of rekeying the connection and
+	// breaking the session that already runs on it. Only the event loop
+	// goroutine reads and writes this field.
+	chainSwitched bool
+
 	sessionCleanTicker *time.Ticker
 
 	// Receive buffers of the event loop. Only the goroutine that runs
@@ -71,8 +127,7 @@ type StreamUnderlay struct {
 	// message are decrypted into fresh allocations, so reusing a buffer never
 	// extends the lifetime of a decrypted message.
 	rxMetaBuf    []byte // encrypted metadata, and the wire nonce on the first read
-	rxPayloadBuf []byte // encrypted payload
-	rxPadBuf     []byte // prefix or suffix padding, which is discarded
+	rxPayloadBuf []byte // message body: prefix padding, encrypted payload and suffix padding
 
 	// Send buffers of the data plane. sendMutex protects both of them, and the
 	// connection write is synchronous and copies the bytes, so neither buffer
@@ -87,6 +142,13 @@ type StreamUnderlay struct {
 	// padding strategy inspects.
 	txBuf     []byte
 	txScratch []byte
+
+	// padScratch is empty and holds the padding of one message. Generating the
+	// padding into a reusable buffer keeps the send path from allocating a
+	// buffer per message. Like txBuf and txScratch it is only used while
+	// sendMutex is held, and the padding is copied into txBuf before the next
+	// message rewrites the buffer.
+	padScratch []byte
 
 	// ---- client fields ----
 	block cipher.BlockCipher
@@ -350,6 +412,19 @@ func (t *StreamUnderlay) onOpenSessionRequest(seg *segment) error {
 		return stderror.ErrInvalidOperation
 	}
 
+	// The handshake of the first session replaced the cipher chain of this
+	// connection with the session keys, and a chain can be switched only once.
+	// A second openSessionRequest can only reach this point when the peer
+	// protects it with the session keys, which a peer that follows the
+	// protocol never does: a new session travels on a new connection. The
+	// request is dropped, because answering it would rekey the connection
+	// under the session that is already running on it and break a healthy
+	// connection of an established user.
+	if t.chainSwitched {
+		log.Debugf("%v ignores openSessionRequest %d received after the cipher chain switched", t, seg.metadata.(*sessionStruct).sessionID)
+		return nil
+	}
+
 	// Create a new session.
 	sessionID := seg.metadata.(*sessionStruct).sessionID
 	if sessionID == 0 {
@@ -404,6 +479,7 @@ func (t *StreamUnderlay) onOpenSessionRequest(seg *segment) error {
 	t.recv = c2s
 	t.recvNoncePending = true
 	t.sendMutex.Unlock()
+	t.chainSwitched = true
 	session.forwardStateTo(sessionEstablished)
 
 	if !t.deliverSegmentToSession(session, seg) {
@@ -546,11 +622,13 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 	}
 	t.inBytes.Add(int64(len(encryptedMeta)))
 
+	// Replay protection of the message that starts an inbound cipher chain.
+	// The lookup is read-only: the signature is recorded after the message has
+	// passed the authentication and the framing checks below, so a forged or
+	// truncated message can't enter the cache.
 	isNewSessionReplay := false
-	if streamReplayCache.IsDuplicate(encryptedMeta[:cipher.DefaultOverhead], replay.EmptyTag) {
-		if firstRead {
-			isNewSessionReplay = true
-		}
+	if firstRead && streamReplayCache.Seen(replay.DomainStream, encryptedMeta[:cipher.DefaultOverhead], replay.Tag{}) {
+		isNewSessionReplay = true
 	}
 
 	// Decrypt metadata.
@@ -624,40 +702,64 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 			return nil, stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
 		}
 	}
+	if firstRead {
+		// Record the signature that Seen() looked up before the decryption.
+		// Only the first message of a cipher chain can be replayed: the nonce
+		// of every later message is derived from the state of the chain, so a
+		// copy of such a message fails authentication instead of being
+		// accepted twice. Recording here, after the metadata, the payload and
+		// the padding of the message are all consistent, keeps a message that
+		// failed a check out of the cache.
+		streamReplayCache.Record(replay.DomainStream, encryptedMeta[:cipher.DefaultOverhead], replay.Tag{})
+	}
 	return seg, nil
 }
 
-func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error) {
-	var decryptedPayload []byte
-	var err error
+// readMessageBody reads the part of the current message that follows the
+// metadata in a single read. The caller knows the total size of that part from
+// the decrypted metadata, so it slices the padding regions and the encrypted
+// payload out of the returned buffer, and the padding never costs a read of its
+// own. One message therefore costs at most two reads of the connection: the
+// metadata read of readOneSegment() and this one.
+//
+// The returned slice belongs to the receive buffer of the event loop, which
+// holds wire bytes only: the payload is decrypted into a fresh allocation, so
+// the next message can reuse the buffer.
+func (t *StreamUnderlay) readMessageBody(bodyLen int) ([]byte, error) {
+	if bodyLen == 0 {
+		return nil, nil
+	}
+	if cap(t.rxPayloadBuf) < bodyLen {
+		t.rxPayloadBuf = make([]byte, bodyLen)
+	}
+	body := t.rxPayloadBuf[:bodyLen]
+	if _, err := io.ReadFull(t.conn, body); err != nil {
+		err = fmt.Errorf("message body: read %d bytes from StreamUnderlay failed: %w", bodyLen, err)
+		return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
+	}
+	t.inBytes.Add(int64(bodyLen))
+	return body, nil
+}
 
+func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error) {
+	// A session message is the encrypted payload followed by the suffix
+	// padding; it has no prefix padding.
+	wirePayloadLen := 0
 	if ss.payloadLen > 0 {
-		wirePayloadLen := int(ss.payloadLen) + cipher.DefaultOverhead
-		if cap(t.rxPayloadBuf) < wirePayloadLen {
-			t.rxPayloadBuf = make([]byte, wirePayloadLen)
-		}
-		encryptedPayload := t.rxPayloadBuf[:wirePayloadLen]
-		if _, err := io.ReadFull(t.conn, encryptedPayload); err != nil {
-			err = fmt.Errorf("payload: read %d bytes from StreamUnderlay failed: %w", wirePayloadLen, err)
-			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
-		}
-		t.inBytes.Add(int64(len(encryptedPayload)))
-		decryptedPayload, err = t.recv.Decrypt(encryptedPayload)
+		wirePayloadLen = int(ss.payloadLen) + cipher.DefaultOverhead
+	}
+	body, err := t.readMessageBody(wirePayloadLen + int(ss.suffixLen))
+	if err != nil {
+		return nil, err
+	}
+
+	var decryptedPayload []byte
+	if ss.payloadLen > 0 {
+		decryptedPayload, err = t.recv.Decrypt(body[:wirePayloadLen])
 		if err != nil {
 			err = fmt.Errorf("Decrypt() failed: %w", err)
 			return nil, stderror.WrapErrorWithType(err, stderror.CRYPTO_ERROR)
 		}
-	}
-	if ss.suffixLen > 0 {
-		if cap(t.rxPadBuf) < int(ss.suffixLen) {
-			t.rxPadBuf = make([]byte, ss.suffixLen)
-		}
-		padding := t.rxPadBuf[:ss.suffixLen]
-		if _, err := io.ReadFull(t.conn, padding); err != nil {
-			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", ss.suffixLen, err)
-			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
-		}
-		t.inBytes.Add(int64(len(padding)))
 	}
 
 	return &segment{
@@ -669,31 +771,23 @@ func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error)
 }
 
 func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error) {
-	var decryptedPayload []byte
-	var err error
-
-	if das.prefixLen > 0 {
-		if cap(t.rxPadBuf) < int(das.prefixLen) {
-			t.rxPadBuf = make([]byte, das.prefixLen)
-		}
-		padding1 := t.rxPadBuf[:das.prefixLen]
-		if _, err := io.ReadFull(t.conn, padding1); err != nil {
-			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", das.prefixLen, err)
-			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
-		}
-		t.inBytes.Add(int64(len(padding1)))
-	}
+	// A data or ack message is the prefix padding, the encrypted payload and
+	// the suffix padding. The metadata carries the length of all three parts,
+	// so they are read with one call and sliced out of the buffer, and the
+	// padding of either side is discarded in place.
+	prefixLen := int(das.prefixLen)
+	wirePayloadLen := 0
 	if das.payloadLen > 0 {
-		wirePayloadLen := int(das.payloadLen) + cipher.DefaultOverhead
-		if cap(t.rxPayloadBuf) < wirePayloadLen {
-			t.rxPayloadBuf = make([]byte, wirePayloadLen)
-		}
-		encryptedPayload := t.rxPayloadBuf[:wirePayloadLen]
-		if _, err := io.ReadFull(t.conn, encryptedPayload); err != nil {
-			err = fmt.Errorf("payload: read %d bytes from StreamUnderlay failed: %w", wirePayloadLen, err)
-			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
-		}
-		t.inBytes.Add(int64(len(encryptedPayload)))
+		wirePayloadLen = int(das.payloadLen) + cipher.DefaultOverhead
+	}
+	body, err := t.readMessageBody(prefixLen + wirePayloadLen + int(das.suffixLen))
+	if err != nil {
+		return nil, err
+	}
+
+	var decryptedPayload []byte
+	if das.payloadLen > 0 {
+		encryptedPayload := body[prefixLen : prefixLen+wirePayloadLen]
 		if isLowEntropyProtocol(das.Protocol()) {
 			encryptedPayload, err = decodeLowEntropyEncryptedPayload(encryptedPayload, das)
 			if err != nil {
@@ -706,17 +800,6 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 			err = fmt.Errorf("Decrypt() failed: %w", err)
 			return nil, stderror.WrapErrorWithType(err, stderror.CRYPTO_ERROR)
 		}
-	}
-	if das.suffixLen > 0 {
-		if cap(t.rxPadBuf) < int(das.suffixLen) {
-			t.rxPadBuf = make([]byte, das.suffixLen)
-		}
-		padding2 := t.rxPadBuf[:das.suffixLen]
-		if _, err := io.ReadFull(t.conn, padding2); err != nil {
-			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", das.suffixLen, err)
-			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
-		}
-		t.inBytes.Add(int64(len(padding2)))
 	}
 
 	return &segment{
@@ -761,9 +844,15 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 		}
 		existingData := append(t.txScratch[:0], metaBuf[:]...)
 		existingData = append(existingData, seg.payload...)
-		padding := newPadding(
+		padding, err := newPaddingInto(t.padScratch[:0],
 			buildRecommendedPaddingOpts(maxPaddingSize, existingData, t.send.BlockContext().UserName),
 		)
+		if err != nil {
+			return fmt.Errorf("newPaddingInto() failed: %w", err)
+		}
+		// Keep the grown buffer for the next message; the padding itself is
+		// copied into the wire buffer below.
+		t.padScratch = padding[:0]
 		ss.suffixLen = uint8(len(padding))
 		if log.IsLevelEnabled(log.TraceLevel) {
 			log.Tracef("%v is sending %v", t, seg)
@@ -810,19 +899,30 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 			}
 		}
 		maxMiddlePaddingSize := maxPaddingSizeWithTrafficPattern(t.mtu, t.TransportProtocol(), int(das.payloadLen), 0, t.trafficPattern, middlePadding)
-		padding1 := newPadding(paddingOpts{
+		padding1, err := newPaddingInto(t.padScratch[:0], paddingOpts{
 			maxLen: maxMiddlePaddingSize,
 			ascii: &asciiPaddingOpts{
 				minConsecutiveASCIILen: mathext.Min(maxMiddlePaddingSize, recommendedConsecutiveASCIILen),
 			},
 		})
+		if err != nil {
+			return fmt.Errorf("newPaddingInto() failed: %w", err)
+		}
 		maxEndPaddingSize := maxPaddingSizeWithTrafficPattern(t.mtu, t.TransportProtocol(), int(das.payloadLen), len(padding1), t.trafficPattern, endPadding)
-		padding2 := newPadding(paddingOpts{
+		// The end padding is appended after the middle padding in the same
+		// scratch buffer, so the two regions never overwrite each other, and
+		// padding2 is sliced back to the end padding before it is used.
+		padding2WithPrefix, err := newPaddingInto(padding1, paddingOpts{
 			maxLen: maxEndPaddingSize,
 			ascii: &asciiPaddingOpts{
 				minConsecutiveASCIILen: mathext.Min(maxEndPaddingSize, recommendedConsecutiveASCIILen),
 			},
 		})
+		if err != nil {
+			return fmt.Errorf("newPaddingInto() failed: %w", err)
+		}
+		t.padScratch = padding2WithPrefix[:0]
+		padding2 := padding2WithPrefix[len(padding1):]
 		das.prefixLen = uint8(len(padding1))
 		das.suffixLen = uint8(len(padding2))
 		if log.IsLevelEnabled(log.TraceLevel) {
@@ -933,10 +1033,7 @@ func (t *StreamUnderlay) maybeInitSendBlockCipher() error {
 // with or without fragmentation depending on the traffic pattern.
 func (t *StreamUnderlay) writeWithPossibleFragment(dataToSend []byte) error {
 	if t.trafficPattern == nil || t.trafficPattern.GetTcpFragment() == nil || !t.trafficPattern.GetTcpFragment().GetEnable() {
-		if _, err := t.conn.Write(dataToSend); err != nil {
-			return fmt.Errorf("Write() failed: %w", err)
-		}
-		return nil
+		return t.writeToConn(dataToSend)
 	}
 
 	remaining := dataToSend
@@ -947,14 +1044,43 @@ func (t *StreamUnderlay) writeWithPossibleFragment(dataToSend []byte) error {
 		if lenToSend > len(remaining) {
 			lenToSend = len(remaining)
 		}
-		if _, err := t.conn.Write(remaining[:lenToSend]); err != nil {
-			return fmt.Errorf("Write() failed: %w", err)
+		if err := t.writeToConn(remaining[:lenToSend]); err != nil {
+			return err
 		}
 		if t.trafficPattern.GetTcpFragment().GetMaxSleepMs() > 0 {
 			sleepMs := mrand.Intn(int(t.trafficPattern.GetTcpFragment().GetMaxSleepMs()) + 1)
 			time.Sleep(time.Duration(sleepMs) * time.Millisecond)
 		}
 		remaining = remaining[lenToSend:]
+	}
+	return nil
+}
+
+// writeToConn writes one chunk of an outbound message to the connection of the
+// underlay.
+//
+// Every write is bounded by streamWriteTimeout. The deadline is armed before
+// the write and the next write arms it again, so an expired deadline is never
+// left behind for the write that follows it. See streamWriteTimeout for why a
+// write must not block forever.
+//
+// A timeout is distinguishable from a connection error. Both are reported as
+// network errors, because both make the session unusable, but a timeout also
+// carries stderror.ErrTimeout in its error chain: stderror.IsTimeout() reports
+// true for a peer that stopped reading and false for a peer that closed the
+// connection.
+func (t *StreamUnderlay) writeToConn(data []byte) error {
+	if err := t.conn.SetWriteDeadline(time.Now().Add(streamWriteTimeout)); err != nil {
+		err = fmt.Errorf("SetWriteDeadline() failed: %w", err)
+		return stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
+	}
+	if _, err := t.conn.Write(data); err != nil {
+		if stderror.IsTimeout(err) {
+			err = fmt.Errorf("Write() timed out after %v: %w", streamWriteTimeout, errors.Join(err, stderror.ErrTimeout))
+		} else {
+			err = fmt.Errorf("Write() failed: %w", err)
+		}
+		return stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
 	}
 	return nil
 }
@@ -988,6 +1114,10 @@ func (t *StreamUnderlay) drainAfterError() {
 }
 
 func (t *StreamUnderlay) cleanSessions() {
+	// now is read once, so every session is compared against the same instant
+	// and a cleanup run can't remove a session that received a segment while
+	// the map is being scanned.
+	now := time.Now().UnixMicro()
 	t.sessionMap.Range(func(k, v any) bool {
 		session := v.(*Session)
 		select {
@@ -997,6 +1127,18 @@ func (t *StreamUnderlay) cleanSessions() {
 				log.Debugf("%v RemoveSession() failed: %v", t, err)
 			}
 		default:
+			// Reclaim a session whose peer disappeared without closing the
+			// connection, so that a stream connection doesn't keep the state
+			// of a dead session forever. See idleStreamSessionTimeout for why
+			// the timeout is far longer than the one of the packet transport.
+			// The session is removed by the event loop, which is the only
+			// caller of this method.
+			if now-session.lastRXTime.Load() > idleStreamSessionTimeout.Microseconds() {
+				log.Debugf("Found idle %v", session)
+				if err := t.RemoveSession(session); err != nil {
+					log.Debugf("%v RemoveSession() failed: %v", t, err)
+				}
+			}
 		}
 		return true
 	})

@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
@@ -38,10 +40,70 @@ const (
 	packetOverhead          = cipher.DefaultNonceSize + MetadataLength + cipher.DefaultOverhead*2
 	packetNonHeaderPosition = cipher.DefaultNonceSize + MetadataLength + cipher.DefaultOverhead
 
+	// packetIPUDPHeaderMax is the largest number of bytes that the IP header
+	// and the UDP header add to the payload of a datagram: 40 bytes of IPv6
+	// header, the longer of the two IP header versions, plus 8 bytes of UDP
+	// header.
+	//
+	// The MTU of a packet underlay is the MTU of layer 3: the largest IP
+	// packet that the network path accepts without fragmenting it. Deducting
+	// this constant once, where the MTU enters the packet underlay, turns the
+	// MTU into the payload budget that every other budget of the packet data
+	// plane is computed from (the fragment size of a session and the padding
+	// of a datagram), so an endpoint that is configured with an MTU of 1400
+	// never makes the kernel fragment its datagrams.
+	packetIPUDPHeaderMax = 48
+
+	// packetTransientReadErrorBackoff is the delay before a packet underlay
+	// reads its socket again after a read error that describes a datagram
+	// instead of the socket (see isTransientPacketReadError).
+	//
+	// A socket reports the fate of a datagram it has sent on one of its later
+	// reads, and it reports it again on every read until the peer or the route
+	// comes back. The delay keeps a persistent error from spinning the event
+	// loop at full speed, and it is short enough that a datagram which arrives
+	// during the delay waits at most this long.
+	packetTransientReadErrorBackoff = 10 * time.Millisecond
+
 	idleSessionTimeout = time.Minute
+
+	// readySessionTimeout is the time that a new session waits for room in the
+	// accept queue of the underlay.
+	//
+	// The handover happens in the event loop, so waiting without a limit lets
+	// an application that doesn't consume Accept() stop the underlay from
+	// reading packets, which stops the service of every other session of the
+	// endpoint. A handover that times out closes the session instead, which is
+	// the behavior of a lost datagram: the peer retries later.
+	readySessionTimeout = 100 * time.Millisecond
+
+	// sessionReaperQueueCapacity is the number of detached sessions that wait
+	// for the background removal of the underlay. The queue is bounded, so a
+	// burst of sessions can't make the underlay allocate without a limit.
+	sessionReaperQueueCapacity = 64
+
+	// sessionReaperStopTimeout is the time that Close() waits for the reaper
+	// goroutine to remove the sessions that the cleanup detached. The wait is
+	// bounded, because the teardown of a session that ignores the close of its
+	// underlay must not hang the caller.
+	sessionReaperStopTimeout = 5 * time.Second
 )
 
 var packetReplayCache = replay.NewCache(64*1024, cipher.KeyRefreshInterval*3)
+
+// packetUnderlayMTU returns the payload budget of a packet underlay that serves
+// a network path with the given layer 3 MTU.
+//
+// The IP and UDP headers are deducted here, at the single point where the MTU
+// of an endpoint enters the packet data plane, so that every budget that is
+// derived from the MTU (the fragment size of a session, the padding of a
+// datagram) is a payload budget and no combination of them can exceed the MTU
+// of the path. An MTU that has no room for the headers leaves no budget at all;
+// the data plane then sends the smallest datagrams it can instead of failing,
+// and the configuration layer refuses an MTU below 1280.
+func packetUnderlayMTU(l3MTU int) int {
+	return l3MTU - packetIPUDPHeaderMax
+}
 
 type PacketUnderlay struct {
 	// ---- common fields ----
@@ -60,19 +122,13 @@ type PacketUnderlay struct {
 	// never extends the lifetime of a decrypted datagram.
 	rxBuf []byte
 
-	// Send buffers of the data plane. sendMutex protects both of them, and the
-	// connection write is synchronous and copies the bytes, so neither buffer
-	// is referenced after writeOneSegment returns.
-	//
-	// txBuf has len == cap and holds the encrypted wire bytes of one outbound
-	// datagram. The datagram is sliced out of it with a full slice expression,
-	// so its capacity is exactly its length and Encrypt() keeps rejecting a
-	// destination that is too short.
-	//
-	// txScratch is empty and holds the plaintext metadata and payload that the
-	// padding strategy inspects.
-	txBuf     []byte
-	txScratch []byte
+	// sendBufPool hands out the buffers of one outbound datagram. A datagram
+	// takes one buffer for the whole of its assembly, so two sessions of the
+	// underlay assemble and encrypt their datagrams at the same time; only the
+	// write of a datagram on the socket is ordered by sendMutex. See
+	// packetSendBuf for what a buffer holds and why the assembly doesn't need
+	// the mutex.
+	sendBufPool sync.Pool
 
 	// ---- client fields ----
 	serverAddr net.Addr
@@ -82,13 +138,84 @@ type PacketUnderlay struct {
 
 	// ---- server fields ----
 	serverUsers *serveruser.Registry
+
+	// readySessionTimeoutOverride replaces readySessionTimeout when it is not
+	// zero. A test sets it to a short value, so that it can exercise the
+	// timeout of the accept queue handover without waiting for the production
+	// timeout.
+	readySessionTimeoutOverride time.Duration
+
+	// The session reaper runs the blocking part of the session removal, which
+	// is Session.Close() and the wait for the goroutines of the session,
+	// outside the event loop. reaperMu protects the fields below, which are
+	// set up when the cleanup detaches the first session of the underlay.
+	//
+	// reaperQueue is bounded by sessionReaperQueueCapacity. reaperDone is
+	// closed when the reaper goroutine stops, which lets Close() wait for the
+	// removal of the sessions that the cleanup already detached.
+	reaperMu    sync.Mutex
+	reaperQueue chan *Session
+	reaperDone  chan struct{}
 }
 
 var _ Underlay = &PacketUnderlay{}
 
+// packetSendBuf holds the reusable buffers of one outbound datagram of a packet
+// underlay.
+//
+// wire holds the encrypted wire bytes of the datagram. After the assembly it
+// has len == cap, and the datagram is handed to the connection as a slice of it
+// with a full slice expression, so its capacity is exactly its length and
+// Encrypt() keeps rejecting a destination that is too short.
+//
+// plain is empty and holds the plaintext metadata and the payload that the
+// padding strategy inspects. padding and padding2 are empty and hold the
+// padding bytes of the datagram: a data or ack datagram carries a middle
+// padding and an end padding at the same time, and both are needed while the
+// wire bytes are assembled.
+//
+// The connection write is synchronous and copies the bytes, so none of these
+// buffers is referenced after writeOneSegment returns. A buffer is held for the
+// assembly of a single datagram and never by two senders at the same time,
+// which is what lets the assembly and the encryption of a datagram run outside
+// the send mutex of the underlay: every datagram of the packet transport
+// carries a nonce of its own, so the order in which the sessions encrypt their
+// datagrams is irrelevant.
+type packetSendBuf struct {
+	wire    []byte
+	plain   []byte
+	padding []byte
+	// padding2 is the second padding of a data or ack datagram.
+	padding2 []byte
+}
+
+// acquireSendBuf takes the buffers of one outbound datagram from the pool of
+// the underlay. The caller must return them with releaseSendBuf after the
+// datagram is on the wire.
+func (u *PacketUnderlay) acquireSendBuf() *packetSendBuf {
+	if v := u.sendBufPool.Get(); v != nil {
+		return v.(*packetSendBuf)
+	}
+	return &packetSendBuf{}
+}
+
+// releaseSendBuf returns the buffers of an outbound datagram to the pool of the
+// underlay. A released buffer is reused by the next datagram of the underlay.
+func (u *PacketUnderlay) releaseSendBuf(buf *packetSendBuf) {
+	if buf != nil {
+		u.sendBufPool.Put(buf)
+	}
+}
+
 // NewPacketUnderlay connects to the remote address "addr" on the network
 // with packet encryption.
 // "block" is the block encryption algorithm to encrypt packets.
+//
+// mtu is the MTU of layer 3 of the network path, i.e. the largest IP packet
+// that the path accepts without fragmenting it. The IP and the UDP header of a
+// datagram are deducted from it (see packetIPUDPHeaderMax), so the payload
+// budget that the underlay hands to its sessions is mtu - 48 and a datagram is
+// never larger than the MTU of the path.
 //
 // This function is only used by proxy client.
 func NewPacketUnderlay(
@@ -138,7 +265,7 @@ func NewPacketUnderlay(
 		return nil, fmt.Errorf("ListenPacket() failed: %w", errors.Join(listenErrs...))
 	}
 	u := &PacketUnderlay{
-		baseUnderlay:       *newBaseUnderlay(true, mtu, trafficPattern),
+		baseUnderlay:       *newBaseUnderlay(true, packetUnderlayMTU(mtu), trafficPattern),
 		conn:               conn,
 		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
 		serverAddr:         remoteUDPAddr,
@@ -175,6 +302,18 @@ func (u *PacketUnderlay) Close() error {
 	// Unblock any pending I/O before closing sessions.
 	u.conn.SetReadDeadline(time.Now())
 	u.baseUnderlay.Close()
+	// The reaper removes the sessions that the cleanup detached from the
+	// registry, which are not in the registry anymore when the base underlay
+	// closes the sessions that are still there. Wait for it for a bounded
+	// time, so that Close() usually doesn't return while a session goroutine
+	// of this underlay still runs. The base underlay closed u.done above, so
+	// the reaper stops as soon as its queue is empty.
+	_, reaperDone := u.sessionReaper()
+	select {
+	case <-reaperDone:
+	case <-time.After(sessionReaperStopTimeout):
+		log.Debugf("%v session reaper is still running after %v", u, sessionReaperStopTimeout)
+	}
 	return nil
 }
 
@@ -198,6 +337,13 @@ func (u *PacketUnderlay) AddSession(s *Session, remoteAddr net.Addr) error {
 		return err
 	}
 	s.conn = u // override base underlay
+	// A session that is created before the connection of the underlay exists,
+	// which is what the mux does for a client, carries no remote address of
+	// its own. Its remote address is the address of the peer of the underlay,
+	// which is known once the connection is installed, so index the session
+	// again here. The index of the session is what lets a received packet find
+	// its session without scanning the whole registry.
+	u.baseUnderlay.indexSession(s)
 	s.transportProtocol = u.TransportProtocol()
 	if u.isClient {
 		s.setClientCipherSuites(u.cipherSuites)
@@ -263,6 +409,29 @@ func (u *PacketUnderlay) mayDeliverToSession(s *Session, seg *segment) bool {
 	return segUser != "" && segUser == sessionUserName(s)
 }
 
+// RunEventLoop reads datagrams and dispatches the segments they carry, until
+// the socket of the underlay can't be read anymore or the underlay is closed.
+//
+// The errors of this loop are classified, because the socket of a packet
+// underlay is the listener of its endpoint: returning makes the mux rebuild the
+// listener (see acceptUnderlayLoop), so only a socket level failure may end the
+// loop.
+//   - A datagram level failure, which is a segment that failed to parse, a
+//     segment that carries the session ID of a session that this underlay
+//     doesn't serve, a segment of a user that doesn't own the session, and a
+//     write that fails for the peer that sent the datagram, is logged and
+//     dropped. The sender of a datagram is not authenticated yet, so no failure
+//     that a peer can cause may interrupt the service of the other peers of the
+//     endpoint.
+//   - A session level failure is reported by the session itself; the event loop
+//     only drops the segment, and the session is closed by the session, by its
+//     peer or by the session cleanup.
+//   - A socket level failure of ReadFrom ends the loop. readOneSegment
+//     classifies the errors of ReadFrom and only reports the ones that leave
+//     the socket unreadable: an error that describes the fate of a datagram is
+//     retried there after packetTransientReadErrorBackoff.
+//   - The close of the underlay and the end of ctx end the loop without an
+//     error.
 func (u *PacketUnderlay) RunEventLoop(ctx context.Context) error {
 	if u.conn == nil {
 		return stderror.ErrNullPointer
@@ -290,6 +459,12 @@ func (u *PacketUnderlay) RunEventLoop(ctx context.Context) error {
 				return nil
 			default:
 			}
+			// A socket level failure: the event loop can't read the socket
+			// anymore, and the listener of the endpoint has to be rebuilt.
+			// readOneSegment() reports an error only when it left the socket
+			// unreadable: a read error that describes a datagram instead of
+			// the socket is retried there, and every other failure of this
+			// loop is handled below without leaving the loop.
 			return fmt.Errorf("readOneSegment() failed: %w", err)
 		} else if seg == nil && addr == nil {
 			// Timeout reading the segment, will try again later.
@@ -341,7 +516,11 @@ func (u *PacketUnderlay) RunEventLoop(ctx context.Context) error {
 						block:     seg.block,
 					}
 					if err := u.writeOneSegment(closeReq, addr); err != nil {
-						return fmt.Errorf("writeOneSegment() failed: %w", err)
+						// The request failed for the peer that sent the
+						// datagram, which is a datagram level failure: the
+						// answer of one unknown session must not end the
+						// service of the other peers of the endpoint.
+						log.Debugf("%v failed to request the close of session %d from peer %v: %v", u, das.sessionID, addr, err)
 					}
 				}
 				continue
@@ -431,13 +610,40 @@ func (u *PacketUnderlay) onOpenSessionRequest(seg *segment, remoteAddr net.Addr)
 	if !u.deliverSegmentToSession(session, seg) {
 		return fmt.Errorf("failed to deliver open session request for session %d", sessionID)
 	}
-	select {
-	case u.readySessions <- session:
-	case <-u.done:
-		return io.ErrClosedPipe
+	if err := u.enqueueReadySession(session); err != nil {
+		return err
 	}
 	u.commitServerUserAuthentication(seg)
 	return nil
+}
+
+// enqueueReadySession hands one session to the queue that Accept() reads from.
+// It is called by the event loop, so it never waits for the application for
+// more than readySessionTimeout.
+//
+// A session that is not consumed in time is closed with an error: the
+// application is too far behind to serve it, and the event loop must keep
+// reading packets for the other sessions of the endpoint. The peer observes a
+// closed session, which is the same observable behavior as a lost datagram.
+func (u *PacketUnderlay) enqueueReadySession(session *Session) error {
+	timeout := u.readySessionTimeoutOverride
+	if timeout <= 0 {
+		timeout = readySessionTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case u.readySessions <- session:
+		return nil
+	case <-u.done:
+		// The underlay is closing: its cleanup removes the session.
+		return io.ErrClosedPipe
+	case <-timer.C:
+		err := fmt.Errorf("session %d is not consumed by the application after %v", session.id, timeout)
+		log.Debugf("%v %v", u, err)
+		session.closeWithError(err)
+		return err
+	}
 }
 
 // allowedCipherSuites returns the cipher suite set that the server allows.
@@ -521,6 +727,19 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 				return nil, nil, io.ErrClosedPipe
 			default:
 			}
+			if isTransientPacketReadError(err) {
+				// The error describes the fate of a datagram instead of this
+				// socket, so the socket can still serve the sessions of the
+				// underlay: wait for the backoff and read again. Closing the
+				// underlay releases the wait.
+				log.Debugf("%v: %v, retry the read after %v", u, err, packetTransientReadErrorBackoff)
+				select {
+				case <-u.done:
+					return nil, nil, io.ErrClosedPipe
+				case <-time.After(packetTransientReadErrorBackoff):
+				}
+				continue
+			}
 			return nil, nil, fmt.Errorf("ReadFrom() failed: %w", err)
 		}
 		if u.isClient && addr.String() != u.serverAddr.String() {
@@ -540,10 +759,21 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 
 		// Read encrypted metadata.
 		encryptedMeta := b[:packetNonHeaderPosition]
-		isNewSessionReplay := false
-		if packetReplayCache.IsDuplicate(encryptedMeta[:cipher.DefaultOverhead], addr.String()) {
-			isNewSessionReplay = true
+
+		// Replay protection of the packet. Seen() is a read only lookup, which
+		// is safe on a packet that is not authenticated yet: the signature is
+		// recorded only after the packet passed all the checks below, so a
+		// forged or truncated packet never enters the cache.
+		//
+		// The tag is the source address of the packet, which exempts an exact
+		// retransmission from the same source from the replay detection. The
+		// domain separates the two directions of the traffic.
+		replayDomain := replay.DomainPacketServerToClient
+		if !u.isClient {
+			replayDomain = replay.DomainPacketClientToServer
 		}
+		replayTag, _ := udpAddrPortKey(addr)
+		isNewSessionReplay := packetReplayCache.Seen(replayDomain, encryptedMeta[:cipher.DefaultOverhead], replayTag)
 		nonce := encryptedMeta[:cipher.DefaultNonceSize]
 
 		// Decrypt metadata.
@@ -645,6 +875,7 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 					continue
 				}
 			}
+			packetReplayCache.Record(replayDomain, encryptedMeta[:cipher.DefaultOverhead], replayTag)
 			return seg, addr, nil
 		} else if isDataAckProtocol(protocolType(p)) {
 			das := &dataAckStruct{}
@@ -667,12 +898,39 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 					continue
 				}
 			}
+			packetReplayCache.Record(replayDomain, encryptedMeta[:cipher.DefaultOverhead], replayTag)
 			return seg, addr, nil
 		} else {
 			log.Debugf("%v unable to handle unknown protocol %d", u, p)
 			continue
 		}
 	}
+}
+
+// isTransientPacketReadError reports whether an error returned by the read of a
+// packet socket describes the fate of a datagram instead of the socket.
+//
+// A packet socket reports the fate of a datagram that it sent on one of its
+// later reads, and it reports the same error again on every read until the peer
+// or the route comes back: a UDP socket returns the ICMP error of a datagram
+// that the peer refused, and it returns the error of a route that went away.
+// The socket stays readable, so the caller treats such an error as a datagram
+// level failure and reads again after packetTransientReadErrorBackoff instead
+// of ending the service of the endpoint.
+//
+// A closed socket is not transient, and an error that this function doesn't
+// recognize is not transient either: an unknown error may be the one that left
+// the socket unreadable, and the caller of the loop is the one that rebuilds
+// the listener.
+func isTransientPacketReadError(err error) bool {
+	if err == nil || stderror.IsClosed(err) || errors.Is(err, net.ErrClosed) {
+		return false
+	}
+	if stderror.IsConnRefused(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "network is unreachable") || strings.Contains(msg, "no route to host")
 }
 
 func (u *PacketUnderlay) parseSessionSegment(ss *sessionStruct, nonce, remaining []byte, blockCipher cipher.BlockCipher) (*segment, error) {
@@ -773,9 +1031,26 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		return fmt.Errorf("can't write to %v, server address is %v", addr, u.serverAddr)
 	}
 
-	u.sendMutex.Lock()
-	defer u.sendMutex.Unlock()
+	// One buffer holds the buffers of this datagram for the whole of its
+	// assembly, and it is returned after the datagram is on the wire, on the
+	// error paths as well.
+	buf := u.acquireSendBuf()
+	defer u.releaseSendBuf(buf)
 
+	// Choosing the cipher, assembling the datagram and encrypting it run
+	// outside sendMutex.
+	//
+	// Nothing of these steps is shared with another sender: the session
+	// registry and the cipher slots of a session are read under their own
+	// synchronization, the fields of the underlay that the steps read are
+	// immutable, and the buffers of the datagram belong to the one sender that
+	// took them from the pool. Two senders may encrypt with the cipher of the
+	// same session at the same time, and that is safe as well: a datagram of
+	// the packet transport carries a nonce of its own, so the order in which
+	// the datagrams are encrypted doesn't change any of them, and the lock
+	// inside the cipher only serializes the generation of the nonces.
+	// Only the write of the datagram, and the accounting of its bytes, take
+	// sendMutex (see writeDatagram).
 	var blockCipher cipher.BlockCipher
 	if u.isClient {
 		if u.block == nil {
@@ -820,19 +1095,25 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		// plaintext data to protect. The metadata is marshaled again below
 		// with the final suffix length.
 		//
-		// metaBuf is a stack array and txScratch is the reusable buffer of this
-		// underlay: both hold plaintext that is consumed inside this function,
-		// while sendMutex is held.
+		// metaBuf is a stack array and buf.plain is the reusable buffer of this
+		// datagram: both hold plaintext that is consumed while the datagram is
+		// assembled, and neither of them is shared with another sender.
 		var metaBuf [MetadataLength]byte
 		ss.marshalTo(metaBuf[:])
-		if cap(u.txScratch) < MetadataLength+len(seg.payload) {
-			u.txScratch = make([]byte, 0, MetadataLength+len(seg.payload))
+		if cap(buf.plain) < MetadataLength+len(seg.payload) {
+			buf.plain = make([]byte, 0, MetadataLength+len(seg.payload))
 		}
-		existingData := append(u.txScratch[:0], metaBuf[:]...)
+		existingData := append(buf.plain[:0], metaBuf[:]...)
 		existingData = append(existingData, seg.payload...)
-		padding := newPadding(
+		padding, err := newPaddingInto(buf.padding[:0],
 			buildRecommendedPaddingOpts(maxPaddingSize, existingData, blockCipher.BlockContext().UserName),
 		)
+		if err != nil {
+			return fmt.Errorf("newPaddingInto() failed: %w", err)
+		}
+		// Keep the grown buffer for the next datagram; the padding itself is
+		// copied into the wire buffer below.
+		buf.padding = padding[:0]
 		ss.suffixLen = uint8(len(padding))
 		if log.IsLevelEnabled(log.TraceLevel) {
 			log.Tracef("%v is sending %v", u, seg)
@@ -846,13 +1127,13 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 			encryptedPayloadLen = len(seg.payload) + blockCipher.Overhead()
 		}
 		wireLen := encryptedMetadataLen + encryptedPayloadLen + len(padding)
-		if cap(u.txBuf) < wireLen {
-			u.txBuf = make([]byte, wireLen)
+		if cap(buf.wire) < wireLen {
+			buf.wire = make([]byte, wireLen)
 		}
-		// The slice is capped at the exact message length, so Encrypt() still
+		// The slice is capped at the exact datagram length, so Encrypt() still
 		// rejects a wireLen that is too short instead of writing into the
-		// larger buffer of an earlier message.
-		dataToSend := u.txBuf[:wireLen:wireLen]
+		// larger buffer of an earlier datagram.
+		dataToSend := buf.wire[:wireLen:wireLen]
 		if err := blockCipher.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}
@@ -867,10 +1148,9 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 			offset += encryptedPayloadLen
 		}
 		copy(dataToSend[offset:], padding)
-		if _, err := u.conn.WriteTo(dataToSend, addr); err != nil {
+		if err := u.writeDatagram(dataToSend, addr); err != nil {
 			return fmt.Errorf("WriteTo() failed: %w", err)
 		}
-		u.outBytes.Add(int64(len(dataToSend)))
 	} else if das, ok := toDataAckStruct(seg.metadata); ok {
 		lowEntropy := isLowEntropyProtocol(das.Protocol())
 		if lowEntropy {
@@ -879,19 +1159,32 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 			}
 		}
 		maxMiddlePaddingSize := maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(das.payloadLen), 0, u.trafficPattern, middlePadding)
-		padding1 := newPadding(paddingOpts{
+		padding1, err := newPaddingInto(buf.padding[:0], paddingOpts{
 			maxLen: maxMiddlePaddingSize,
 			ascii: &asciiPaddingOpts{
 				minConsecutiveASCIILen: mathext.Min(maxMiddlePaddingSize, recommendedConsecutiveASCIILen),
 			},
 		})
+		if err != nil {
+			return fmt.Errorf("newPaddingInto() failed: %w", err)
+		}
+		// Keep the grown buffer for the next datagram.
+		buf.padding = padding1[:0]
 		maxEndPaddingSize := maxPaddingSizeWithTrafficPattern(u.mtu, u.TransportProtocol(), int(das.payloadLen), len(padding1), u.trafficPattern, endPadding)
-		padding2 := newPadding(paddingOpts{
+		// The end padding has a buffer of its own, because it is generated
+		// while the middle padding is still needed: both of them are copied
+		// into the wire buffer below, after the last one is generated.
+		padding2, err := newPaddingInto(buf.padding2[:0], paddingOpts{
 			maxLen: maxEndPaddingSize,
 			ascii: &asciiPaddingOpts{
 				minConsecutiveASCIILen: mathext.Min(maxEndPaddingSize, recommendedConsecutiveASCIILen),
 			},
 		})
+		if err != nil {
+			return fmt.Errorf("newPaddingInto() failed: %w", err)
+		}
+		// Keep the grown buffer for the next datagram.
+		buf.padding2 = padding2[:0]
 		das.prefixLen = uint8(len(padding1))
 		das.suffixLen = uint8(len(padding2))
 		if log.IsLevelEnabled(log.TraceLevel) {
@@ -910,13 +1203,13 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 			}
 		}
 		wireLen := encryptedMetadataLen + len(padding1) + wirePayloadLen + len(padding2)
-		if cap(u.txBuf) < wireLen {
-			u.txBuf = make([]byte, wireLen)
+		if cap(buf.wire) < wireLen {
+			buf.wire = make([]byte, wireLen)
 		}
-		// The slice is capped at the exact message length, so Encrypt() still
+		// The slice is capped at the exact datagram length, so Encrypt() still
 		// rejects a wireLen that is too short instead of writing into the
-		// larger buffer of an earlier message.
-		dataToSend := u.txBuf[:wireLen:wireLen]
+		// larger buffer of an earlier datagram.
+		dataToSend := buf.wire[:wireLen:wireLen]
 		if err := blockCipher.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}
@@ -943,13 +1236,31 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		if lowEntropy && len(dataToSend) > u.mtu {
 			return fmt.Errorf("low entropy datagram length %d exceeds MTU %d", len(dataToSend), u.mtu)
 		}
-		if _, err := u.conn.WriteTo(dataToSend, addr); err != nil {
+		if err := u.writeDatagram(dataToSend, addr); err != nil {
 			return fmt.Errorf("WriteTo() failed: %w", err)
 		}
-		u.outBytes.Add(int64(len(dataToSend)))
 	} else {
 		return stderror.ErrInvalidArgument
 	}
+	return nil
+}
+
+// writeDatagram writes one assembled datagram on the socket of the underlay
+// and adds its length to the outbound byte count.
+//
+// sendMutex covers the write and the count, so the datagrams of the sessions of
+// the underlay reach the socket one after another. The buffer of the datagram
+// is not part of the shared state: the write of a packet connection copies the
+// datagram into the socket before it returns, so the buffer of a datagram can
+// be returned to the pool, and reused by the next datagram, as soon as this
+// method returns.
+func (u *PacketUnderlay) writeDatagram(b []byte, addr net.Addr) error {
+	u.sendMutex.Lock()
+	defer u.sendMutex.Unlock()
+	if _, err := u.conn.WriteTo(b, addr); err != nil {
+		return err
+	}
+	u.outBytes.Add(int64(len(b)))
 	return nil
 }
 
@@ -1021,46 +1332,180 @@ func (u *PacketUnderlay) serverTryDecryptMetadataForNewSession(encryptedMeta []b
 	return matchedBlock, decryptedMetadata, authentication, nil
 }
 
+// tryDecryptSession attempts to decrypt the metadata of a segment with the
+// cipher of one session. It reports true when the segment is decrypted.
+//
+// The address of the session must match the address that the packet came from
+// before the cipher is used, so that a packet never reaches the cipher of a
+// session of another source. The match is required even when the caller found
+// the session with the address index, and both checks use the same comparison
+// function.
+func (u *PacketUnderlay) tryDecryptSession(session *Session, encryptedMeta []byte, addr net.Addr) (decryptedMeta []byte, blockCipher cipher.BlockCipher, matchedPolicy serveruser.Policy, decrypted bool) {
+	sessionBlock := session.block.Load()
+	if sessionBlock == nil || !isSamePacketAddr(session.RemoteAddr(), addr) {
+		return
+	}
+	plaintext, err := (*sessionBlock).Decrypt(encryptedMeta)
+	if err != nil {
+		return
+	}
+	decryptedMeta = plaintext
+	blockCipher = *sessionBlock
+	if policy := session.userPolicy.Load(); policy != nil {
+		matchedPolicy = *policy
+	}
+	decrypted = true
+	return
+}
+
+// tryDecryptExistingSession tries to decrypt the metadata of an incoming
+// segment with the cipher of a session that this underlay already serves.
+//
+// The candidates come from the address index, so the number of the ciphers
+// that are tried grows with the number of the sessions of the source address
+// and not with the number of the sessions of the underlay. The lookup of a
+// packet that arrives from an address that owns no session tries no cipher at
+// all.
+//
+// The index is used only when it can answer the question completely. When the
+// index is not complete, which is the case when the address of the packet or
+// the address of an attached session can't be converted to a netip.AddrPort
+// (the session of a byte stream transport, the session that a test attached
+// with a mock address), the whole session registry is scanned instead. The
+// fallback keeps the behavior of the transports and of the tests that never
+// populate the index, and the address comparison of the scan keeps the cipher
+// of a session out of the packets of another source.
 func (u *PacketUnderlay) tryDecryptExistingSession(encryptedMeta []byte, addr net.Addr) (decryptedMeta []byte, blockCipher cipher.BlockCipher, matchedPolicy serveruser.Policy, decrypted bool) {
-	u.sessionMap.Range(func(_, value any) bool {
-		session := value.(*Session)
-		sessionBlock := session.block.Load()
-		if sessionBlock != nil && isSamePacketAddr(session.RemoteAddr(), addr) {
-			plaintext, err := (*sessionBlock).Decrypt(encryptedMeta)
-			if err == nil {
-				decryptedMeta = plaintext
-				blockCipher = *sessionBlock
-				if policy := session.userPolicy.Load(); policy != nil {
-					matchedPolicy = *policy
-				}
-				decrypted = true
-				return false
+	candidates, complete := u.sessionsByRemoteAddr(addr)
+	if complete {
+		for _, session := range candidates {
+			decryptedMeta, blockCipher, matchedPolicy, decrypted = u.tryDecryptSession(session, encryptedMeta, addr)
+			if decrypted {
+				return
 			}
 		}
-		return true
+		return
+	}
+	u.sessionMap.Range(func(_, value any) bool {
+		decryptedMeta, blockCipher, matchedPolicy, decrypted = u.tryDecryptSession(value.(*Session), encryptedMeta, addr)
+		return !decrypted
 	})
 	return
 }
 
+// cleanSessions detaches the closed sessions and the sessions that didn't
+// receive any segment within idleSessionTimeout from the session registry and
+// from the address index, and hands them to the reaper goroutine.
+//
+// The event loop only detaches a session and marks it closed. Both steps are
+// bounded: detaching takes the lock of the index, and marking a session closed
+// takes the output lock of the session, sends the close session request on a
+// best effort basis and wakes up the loops of the session, but it never waits
+// for the peer. The blocking part of the removal, which closes the session and
+// waits for its goroutines, runs in the reaper goroutine. The cleanup of a
+// burst of sessions therefore never stops the underlay from serving the
+// sessions that stay.
+//
+// The ordering matters: a session is detached before it is handed to the
+// reaper, so a segment that arrives while the session is removed can't be
+// routed to it, and a caller that holds a snapshot of the index sees a session
+// that is still safe to decrypt with.
 func (u *PacketUnderlay) cleanSessions() {
 	u.sessionMap.Range(func(k, v any) bool {
 		session := v.(*Session)
+		closed := false
 		select {
 		case <-session.closedChan:
-			log.Debugf("Found closed %v", session)
-			if err := u.RemoveSession(session); err != nil {
-				log.Debugf("%v RemoveSession() failed: %v", u, err)
-			}
+			closed = true
 		default:
 		}
-		if time.Now().UnixMicro()-session.lastRXTime.Load() > idleSessionTimeout.Microseconds() {
-			log.Debugf("Found idle %v", session)
-			if err := u.RemoveSession(session); err != nil {
-				log.Debugf("%v RemoveSession() failed: %v", u, err)
-			}
+		idle := time.Now().UnixMicro()-session.lastRXTime.Load() > idleSessionTimeout.Microseconds()
+		if !closed && !idle {
+			return true
 		}
+		if !closed {
+			log.Debugf("Found idle %v", session)
+		} else {
+			log.Debugf("Found closed %v", session)
+		}
+		if err := u.baseUnderlay.detachSession(session); err != nil {
+			log.Debugf("%v detachSession() of %v failed: %v", u, session, err)
+			return true
+		}
+		if !closed {
+			// An idle session is closed with an error instead of a graceful
+			// close, because nothing waits for the peer of a session that
+			// receives nothing anymore. The close session request is still
+			// sent, so the peer releases the session as well.
+			session.closeWithError(fmt.Errorf("session is idle for %v", idleSessionTimeout))
+		}
+		u.reapSession(session)
 		return true
 	})
+}
+
+// sessionReaper returns the queue of the reaper goroutine and the channel that
+// the goroutine closes when it stops. The goroutine is created on the first
+// call, because an underlay that never removes a session doesn't need it.
+func (u *PacketUnderlay) sessionReaper() (chan *Session, chan struct{}) {
+	u.reaperMu.Lock()
+	defer u.reaperMu.Unlock()
+	if u.reaperQueue == nil {
+		u.reaperQueue = make(chan *Session, sessionReaperQueueCapacity)
+		u.reaperDone = make(chan struct{})
+		go u.runSessionReaper(u.reaperQueue, u.reaperDone)
+	}
+	return u.reaperQueue, u.reaperDone
+}
+
+// reapSession hands a detached session to the reaper goroutine. The caller
+// must have detached the session from the registry and from the index first.
+//
+// The handover never blocks the event loop. A full queue is the only case in
+// which the removal runs in the caller: skipping the handover would leave the
+// goroutines of the session running forever, and the queue is only full while
+// the teardown of a burst of sessions is slower than the cleanup.
+func (u *PacketUnderlay) reapSession(session *Session) {
+	queue, _ := u.sessionReaper()
+	select {
+	case queue <- session:
+	default:
+		log.Debugf("%v session reaper queue is full, removing %v in the event loop", u, session)
+		u.removeSessionBlocking(session)
+	}
+}
+
+// runSessionReaper removes the sessions of the queue. One goroutine serves the
+// whole underlay, so the removals are serialized: a burst of sessions doesn't
+// start a goroutine per session, and the memory of the teardown stays bounded.
+// The goroutine stops when the underlay is closed and its queue is empty.
+func (u *PacketUnderlay) runSessionReaper(queue chan *Session, done chan struct{}) {
+	defer close(done)
+	for {
+		select {
+		case session := <-queue:
+			u.removeSessionBlocking(session)
+		case <-u.done:
+			for {
+				select {
+				case session := <-queue:
+					u.removeSessionBlocking(session)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// removeSessionBlocking runs the part of RemoveSession() that waits: it closes
+// the session and waits for the goroutines of the session. It must not be
+// called by the event loop, except when the queue of the reaper is full.
+func (u *PacketUnderlay) removeSessionBlocking(session *Session) {
+	if err := session.Close(); err != nil {
+		log.Debugf("%v Close() of %v failed: %v", u, session, err)
+	}
+	session.wg.Wait()
 }
 
 // isSamePacketAddr compares UDP endpoints. If input type is not *net.UDPAddr,

@@ -162,46 +162,82 @@ func entropyPaddingParams(data []byte, targetProbability float64) (lowerBit byte
 	return
 }
 
-func newPadding(opts paddingOpts) []byte {
+// newPaddingInto generates padding that satisfies opts and appends it to dst.
+//
+// When dst has enough spare capacity, the returned slice aliases dst and the
+// padding is written into that buffer, so the call itself allocates nothing.
+// A caller should therefore keep one scratch buffer and pass it as dst for all
+// the messages it sends. When dst is nil, a fresh buffer is allocated instead,
+// so the returned padding is never a nil slice. The generated padding never
+// aliases the existingData of opts.
+//
+// Invalid options are reported with an error instead of a panic, and the bytes
+// of dst are left untouched when opts is invalid.
+//
+// Invariants of the generated padding:
+//   - it is never longer than opts.maxLen;
+//   - it has length 0 only when opts.maxLen is 0. A padding of length 0
+//     reveals the exact payload length, so it is only generated when the
+//     caller explicitly forbids padding;
+//   - when opts.maxLen is at least 2, the length is drawn uniformly from at
+//     least 2 distinct values. A padding length that is always opts.maxLen
+//     would be a fingerprint of the padding strategy, which is what happens
+//     when the minimum length required by the strategy is also opts.maxLen;
+//   - with the ASCII strategy, the padding contains at least 1 printable
+//     ASCII byte whenever it is not empty, and up to minConsecutiveASCIILen
+//     consecutive printable ASCII bytes;
+//   - with the entropy strategy, the padding lowers the probability of the
+//     less frequent bit value of opts.entropy.existingData to at most
+//     targetProbability whenever opts.maxLen makes that reachable, and is a
+//     fill of the more frequent bit value otherwise.
+func newPaddingInto(dst []byte, opts paddingOpts) ([]byte, error) {
 	if opts.ascii != nil {
+		// Both the ASCII and the entropy options may be set; the ASCII
+		// strategy keeps precedence, as it always did.
 		if opts.maxLen < opts.ascii.minConsecutiveASCIILen {
-			panic(fmt.Sprintf("Invalid padding options: maxLen %d is smaller than minConsecutiveASCIILen %d", opts.maxLen, opts.ascii.minConsecutiveASCIILen))
+			return nil, fmt.Errorf("Invalid padding options: maxLen %d is smaller than minConsecutiveASCIILen %d", opts.maxLen, opts.ascii.minConsecutiveASCIILen)
 		}
 
-		// Pick the length uniformly from [lower, maxLen]. The lower bound is
-		// at least 1 so that a zero length padding, which reveals the exact
-		// payload length, is not generated.
-		lower := mathext.Max(opts.ascii.minConsecutiveASCIILen, 1)
-		lower = mathext.Min(lower, opts.maxLen)
-		length := lower + mrand.Intn(opts.maxLen-lower+1)
-		p := make([]byte, length)
-		for {
-			if _, err := crand.Read(p); err == nil {
-				break
-			}
+		// The padding must contain at least 1 printable ASCII byte, and it
+		// should contain minConsecutiveASCIILen consecutive printable ASCII
+		// bytes. When minConsecutiveASCIILen does not fit under maxLen-1,
+		// honoring it would make the length always maxLen, so the consecutive
+		// printable content is shortened to the padding length (never below 1
+		// byte) to keep the length variable.
+		minPrintableLen := mathext.Min(opts.ascii.minConsecutiveASCIILen, opts.maxLen-1)
+		length := choosePaddingLength(mathext.Max(minPrintableLen, 1), opts.maxLen)
+		out, padding := growPadding(dst, length)
+		if length == 0 {
+			// Only reachable when opts.maxLen is 0.
+			return out, nil
 		}
+		if _, err := crand.Read(padding); err != nil {
+			return nil, fmt.Errorf("crypto/rand Read() failed: %w", err)
+		}
+		printableLen := mathext.Max(mathext.Min(opts.ascii.minConsecutiveASCIILen, length), 1)
 		beginIdx := 0
-		if length > opts.ascii.minConsecutiveASCIILen {
-			beginIdx = mrand.Intn(length - opts.ascii.minConsecutiveASCIILen)
+		if length > printableLen {
+			beginIdx = mrand.Intn(length - printableLen)
 		}
-		common.ToPrintableChar(p, beginIdx, beginIdx+opts.ascii.minConsecutiveASCIILen)
-		return p
+		common.ToPrintableChar(padding, beginIdx, beginIdx+printableLen)
+		return out, nil
 	} else if opts.entropy != nil {
 		if opts.entropy.targetProbability <= 0.0 || opts.entropy.targetProbability > 0.5 {
-			panic(fmt.Sprintf("Invalid padding options: targetProbability %f is out of range (0.0, 0.5]", opts.entropy.targetProbability))
+			return nil, fmt.Errorf("Invalid padding options: targetProbability %f is out of range (0.0, 0.5]", opts.entropy.targetProbability)
 		}
 
 		lowerBit, lowerBitCount, minPaddingBytes := entropyPaddingParams(opts.entropy.existingData, opts.entropy.targetProbability)
 
-		// Pick the padding length uniformly from [lower, maxLen]. The lower
-		// bound is at least 1 so that a zero length padding, which reveals
-		// the exact payload length, is not generated. It is also at least
-		// minPaddingBytes+1, otherwise the padding contains no bit with the
-		// lower probability and degenerates into a constant block.
+		// The lower bound is at least 1, and at least minPaddingBytes+1,
+		// otherwise the padding contains no bit with the lower probability and
+		// degenerates into a constant block. Keeping the length variable takes
+		// priority over the latter rule: when only maxLen can hold a bit with
+		// the lower probability, the shorter length is still used, and the
+		// padding falls back to the best effort fill of the higher probability
+		// bit, exactly like when maxLen itself is too small.
 		lower := mathext.Max(minPaddingBytes+1, 1)
-		lower = mathext.Min(lower, opts.maxLen)
-		length := lower + mrand.Intn(opts.maxLen-lower+1)
-		p := make([]byte, length)
+		length := choosePaddingLength(lower, opts.maxLen)
+		out, padding := growPadding(dst, length)
 
 		// Determine the number of bits in the padding that use the bit value
 		// with the lower probability in the existing data.
@@ -215,15 +251,56 @@ func newPadding(opts paddingOpts) []byte {
 		// reachable within maxLen, i.e. flip is not 0. When maxLen is too
 		// small to dilute the lower probability bit, the padding is the best
 		// effort fill of the higher probability bit.
-		for {
-			if _, err := crand.Read(p); err == nil {
-				break
-			}
+		if _, err := crand.Read(padding); err != nil {
+			return nil, fmt.Errorf("crypto/rand Read() failed: %w", err)
 		}
-		setBitCount(p, lowerBit, flip)
-		return p
+		setBitCount(padding, lowerBit, flip)
+		return out, nil
 	}
-	panic("Detailed padding options are not provided")
+	return nil, fmt.Errorf("Detailed padding options are not provided")
+}
+
+// choosePaddingLength returns a padding length drawn uniformly at random from
+// the inclusive range that starts at minLen when minLen fits, and documents the
+// invariants of the value it returns:
+//   - the length is in [0, maxLen];
+//   - the length is 0 only when maxLen is 0, so that the padding of a
+//     non-empty message never reveals the exact payload length;
+//   - when maxLen is at least 2, at least 2 distinct lengths are possible and
+//     they are equally likely. When the caller allows at least 2 bytes but the
+//     minimum length required by the strategy is maxLen, the returned length
+//     may be maxLen-1, i.e. below that minimum, because a padding length that
+//     is always maxLen fingerprints the padding strategy.
+func choosePaddingLength(minLen, maxLen int) int {
+	if maxLen <= 0 {
+		return 0
+	}
+	lower := mathext.Max(minLen, 1)
+	lower = mathext.Min(lower, maxLen)
+	if lower == maxLen && maxLen >= 2 {
+		lower = maxLen - 1
+	}
+	return lower + mrand.Intn(maxLen-lower+1)
+}
+
+// growPadding appends length reserved bytes to dst and returns the extended
+// slice together with the reserved region. The content of dst is preserved and
+// the reserved bytes are uninitialized. dst is reallocated when it is nil or
+// when it does not have enough spare capacity, so a scratch buffer of
+// sufficient capacity makes the operation allocation free.
+func growPadding(dst []byte, length int) (out, padding []byte) {
+	prefixLen := len(dst)
+	if dst == nil || cap(dst)-prefixLen < length {
+		// A nil dst is always replaced by a fresh buffer, even for a zero
+		// length padding, so that the padding generated without a caller
+		// buffer is never a nil slice.
+		grown := make([]byte, prefixLen, prefixLen+length)
+		copy(grown, dst)
+		dst = grown
+	}
+	out = dst[:prefixLen+length]
+	padding = out[prefixLen:]
+	return out, padding
 }
 
 // setBitCount rewrites p, so that exactly want bits are equal to bit and the

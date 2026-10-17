@@ -17,6 +17,7 @@ package replay_test
 
 import (
 	crand "crypto/rand"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -24,169 +25,388 @@ import (
 	"github.com/enfein/mieru/v3/pkg/replay"
 )
 
-func TestDuplicate(t *testing.T) {
-	cache := replay.NewCache(10, 1*time.Minute)
-	data := make([]byte, 256)
-	if _, err := crand.Read(data); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
+// Every test uses a fixed capacity and a one minute expire interval, so that
+// the cache can only be rotated by the operations the test performs. No test
+// waits for the clock to advance.
+const (
+	testCapacity       = 8
+	testExpireInterval = 1 * time.Minute
+)
+
+// TestSeenRetransmitWithSameTag verifies that a packet which was recorded with
+// a tag is not judged as a replay when it is sent again from the very same tag,
+// and that a lookup alone never records anything.
+func TestSeenRetransmitWithSameTag(t *testing.T) {
+	domain := replay.DomainPacketClientToServer
+	cache := replay.NewCache(testCapacity, testExpireInterval)
+	data := newDistinctData(t, 1)[0]
+	tag := tagOf(t, "192.0.2.10:40000")
+
+	// Seen() is a read only lookup: an unknown packet is not a duplicate, and
+	// the cache stays empty.
+	if res := cache.Seen(domain, data, tag); res == true {
+		t.Errorf("Seen() of an unknown packet = true, want false")
+	}
+	if curr, prev := cache.Sizes(); curr != 0 || prev != 0 {
+		t.Fatalf("cache sizes after a lookup are %d %d, want 0 0.", curr, prev)
 	}
 
-	if res := cache.IsDuplicate(data, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
-	}
+	cache.Record(domain, data, tag)
 	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
+		t.Fatalf("cache sizes after Record() are %d %d, want 1 0.", curr, prev)
 	}
 
-	if res := cache.IsDuplicate(data, replay.EmptyTag); res == false {
-		t.Errorf("IsDuplicate() = false, want true")
+	// The same content of the same tag is a retransmission, not a replay.
+	for i := range 3 {
+		if res := cache.Seen(domain, data, tag); res == true {
+			t.Errorf("Seen() with the recorded tag (call %d) = true, want false", i+1)
+		}
+		if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
+			t.Errorf("cache sizes (call %d) are %d %d, want 1 0.", i+1, curr, prev)
+		}
+	}
+}
+
+// TestSeenDifferentTagIsAlwaysReplay verifies that the same content of another
+// tag is a replay on every call. The lookup used to promote the signature into
+// the current map while storing the tag of the caller, so the second call of
+// that caller was judged as a retransmission and was let through.
+func TestSeenDifferentTagIsAlwaysReplay(t *testing.T) {
+	domain := replay.DomainPacketClientToServer
+	cache := replay.NewCache(testCapacity, testExpireInterval)
+	data := newDistinctData(t, 1)[0]
+	legit := tagOf(t, "192.0.2.10:40000")
+	attacker := tagOf(t, "198.51.100.7:40000")
+
+	cache.Record(domain, data, legit)
+
+	for i := range 3 {
+		if res := cache.Seen(domain, data, attacker); res == false {
+			t.Errorf("Seen() with a different tag (call %d) = false, want true", i+1)
+		}
+	}
+
+	// The recorded tag survived the replay attempts, so the retransmission of
+	// the legitimate tag is still accepted.
+	if res := cache.Seen(domain, data, legit); res == true {
+		t.Errorf("Seen() with the recorded tag = true, want false")
 	}
 	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
 		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
 	}
 }
 
-func TestNoDuplicate(t *testing.T) {
-	cache := replay.NewCache(10, 1*time.Minute)
-	a := make([]byte, 1)
-	if _, err := crand.Read(a); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
-	}
-	b := make([]byte, 31)
-	if _, err := crand.Read(b); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
+// TestSeenDifferentTagInPreviousGeneration verifies the same property for a
+// signature that was rotated out of the current maps, and that only Record()
+// promotes it back.
+func TestSeenDifferentTagInPreviousGeneration(t *testing.T) {
+	const capacity = 2
+	domain := replay.DomainPacketClientToServer
+	cache := replay.NewCache(capacity, testExpireInterval)
+	sigs := newDistinctData(t, capacity+1)
+	legit := tagOf(t, "192.0.2.10:40000")
+	attacker := tagOf(t, "198.51.100.7:40000")
+
+	cache.Record(domain, sigs[0], legit)
+	cache.Record(domain, sigs[1], tagOf(t, "192.0.2.11:40000"))
+	// The current maps are full, so this Record() rotates them into the
+	// previous maps.
+	cache.Record(domain, sigs[2], tagOf(t, "192.0.2.12:40000"))
+	if curr, prev := cache.Sizes(); curr != 1 || prev != capacity {
+		t.Fatalf("cache sizes are %d %d, want 1 %d.", curr, prev, capacity)
 	}
 
-	if res := cache.IsDuplicate(a, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
+	for i := range 3 {
+		if res := cache.Seen(domain, sigs[0], attacker); res == false {
+			t.Errorf("Seen() of a rotated out signature with a different tag (call %d) = false, want true", i+1)
+		}
+	}
+	// The retransmission exception still works for the tag of the recorded
+	// packet, which is stored in the previous map.
+	if res := cache.Seen(domain, sigs[0], legit); res == true {
+		t.Errorf("Seen() with the recorded tag in the previous map = true, want false")
+	}
+	// No lookup changed the cache.
+	if curr, prev := cache.Sizes(); curr != 1 || prev != capacity {
+		t.Errorf("cache sizes after the lookups are %d %d, want 1 %d.", curr, prev, capacity)
+	}
+
+	// Record() promotes the signature into the current map.
+	cache.Record(domain, sigs[0], legit)
+	if curr, prev := cache.Sizes(); curr != 2 || prev != capacity {
+		t.Errorf("cache sizes after the promotion are %d %d, want 2 %d.", curr, prev, capacity)
+	}
+}
+
+// TestSeenDomainIsolation verifies that the same content observed in two
+// domains is not a replay of itself.
+func TestSeenDomainIsolation(t *testing.T) {
+	cache := replay.NewCache(testCapacity, testExpireInterval)
+	data := newDistinctData(t, 1)[0]
+	tag := tagOf(t, "192.0.2.10:40000")
+	otherTag := tagOf(t, "192.0.2.11:40000")
+
+	cache.Record(replay.DomainStream, data, tag)
+
+	// The data is a duplicate in the domain it was recorded in.
+	if res := cache.Seen(replay.DomainStream, data, otherTag); res == false {
+		t.Errorf("Seen() in the recorded domain = false, want true")
+	}
+	// The same data of any other domain is unknown, with any tag.
+	for _, domain := range []replay.Domain{replay.DomainPacketClientToServer, replay.DomainPacketServerToClient} {
+		if res := cache.Seen(domain, data, otherTag); res == true {
+			t.Errorf("Seen() in domain %d = true, want false", domain)
+		}
+		if res := cache.Seen(domain, data, tag); res == true {
+			t.Errorf("Seen() in domain %d with the tag of the recorded data = true, want false", domain)
+		}
 	}
 	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
 		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
 	}
 
-	if res := cache.IsDuplicate(b, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
+	// Recording the same content in a second domain adds a second entry.
+	cache.Record(replay.DomainPacketClientToServer, data, tag)
+	if curr, prev := cache.Sizes(); curr != 2 || prev != 0 {
+		t.Errorf("cache sizes after the second domain are %d %d, want 2 0.", curr, prev)
+	}
+	if res := cache.Seen(replay.DomainPacketClientToServer, data, otherTag); res == false {
+		t.Errorf("Seen() in the second domain = false, want true")
+	}
+}
+
+// TestSeenZeroTag verifies that a zero tag never grants the retransmission
+// exception, so any duplicate of a packet without tag is a replay.
+func TestSeenZeroTag(t *testing.T) {
+	domain := replay.DomainPacketClientToServer
+	cache := replay.NewCache(testCapacity, testExpireInterval)
+	sigs := newDistinctData(t, 2)
+	var noTag replay.Tag
+	tagged := tagOf(t, "192.0.2.10:40000")
+
+	cache.Record(domain, sigs[0], noTag)
+	if res := cache.Seen(domain, sigs[0], noTag); res == false {
+		t.Errorf("Seen() of a packet without tag = false, want true")
+	}
+	if res := cache.Seen(domain, sigs[0], tagged); res == false {
+		t.Errorf("Seen() of a packet without tag, looked up with a tag = false, want true")
+	}
+
+	// A packet that was recorded with a tag is a duplicate as well when the
+	// same content is looked up without a tag.
+	cache.Record(domain, sigs[1], tagged)
+	if res := cache.Seen(domain, sigs[1], noTag); res == false {
+		t.Errorf("Seen() of a tagged packet without tag = false, want true")
+	}
+	if res := cache.Seen(domain, sigs[1], tagged); res == true {
+		t.Errorf("Seen() with the recorded tag = true, want false")
 	}
 	if curr, prev := cache.Sizes(); curr != 2 || prev != 0 {
 		t.Errorf("cache sizes are %d %d, want 2 0.", curr, prev)
 	}
 }
 
-func TestTag(t *testing.T) {
-	cache := replay.NewCache(10, 1*time.Minute)
-	data := make([]byte, 32)
-	if _, err := crand.Read(data); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
+// TestCapacityRotation verifies the rolling window behavior of a cache with a
+// capacity larger than one: exactly `capacity` distinct signatures fill the
+// current map, the next distinct signature rotates the current map into the
+// previous map, and the signatures of the previous map are still detected as
+// duplicates.
+func TestCapacityRotation(t *testing.T) {
+	const capacity = 4
+	domain := replay.DomainStream
+	cache := replay.NewCache(capacity, testExpireInterval)
+	sigs := newDistinctData(t, capacity+1)
+	var noTag replay.Tag
+
+	// The first `capacity` signatures exactly fill the current map. No rotation
+	// happens yet.
+	for i := range capacity {
+		if res := cache.Seen(domain, sigs[i], noTag); res == true {
+			t.Fatalf("Seen(sig %d) before Record() = true, want false", i)
+		}
+		cache.Record(domain, sigs[i], noTag)
+		if res := cache.Seen(domain, sigs[i], noTag); res == false {
+			t.Fatalf("Seen(sig %d) after Record() = false, want true", i)
+		}
+		if curr, prev := cache.Sizes(); curr != i+1 || prev != 0 {
+			t.Fatalf("cache sizes after %d inserts are %d %d, want %d 0.", i+1, curr, prev, i+1)
+		}
 	}
 
-	if res := cache.IsDuplicate(data, "tag1"); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
-	}
-
-	if res := cache.IsDuplicate(data, "tag1"); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
+	// The (capacity+1)-th distinct signature rotates the current map into the
+	// previous map and starts a new current map.
+	cache.Record(domain, sigs[capacity], noTag)
+	if curr, prev := cache.Sizes(); curr != 1 || prev != capacity {
+		t.Fatalf("cache sizes after %d inserts are %d %d, want 1 %d.", capacity+1, curr, prev, capacity)
 	}
 
-	if res := cache.IsDuplicate(data, "tag2"); res == false {
-		t.Errorf("IsDuplicate() = false, want true")
+	// Every signature of the rotated out map is still detected. A lookup
+	// doesn't promote a signature, so the sizes don't change.
+	for i := range capacity {
+		if res := cache.Seen(domain, sigs[i], noTag); res == false {
+			t.Errorf("Seen(sig %d) in the previous map = false, want true", i)
+		}
 	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
-	}
-
-	if res := cache.IsDuplicate(data, "tag1"); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
-	}
-
-	if res := cache.IsDuplicate(data, replay.EmptyTag); res == false {
-		t.Errorf("IsDuplicate() = false, want true")
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
+	if curr, prev := cache.Sizes(); curr != 1 || prev != capacity {
+		t.Errorf("cache sizes after the lookups are %d %d, want 1 %d.", curr, prev, capacity)
 	}
 }
 
-func TestCapacity(t *testing.T) {
-	cache := replay.NewCache(1, 1*time.Minute)
-	a := make([]byte, 256)
-	if _, err := crand.Read(a); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
-	}
-	b := make([]byte, 256)
-	if _, err := crand.Read(b); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
+// TestSeenDoesNotRotate verifies that a lookup neither records a signature nor
+// rotates a cache whose current maps are already full.
+func TestSeenDoesNotRotate(t *testing.T) {
+	const capacity = 1
+	domain := replay.DomainPacketClientToServer
+	cache := replay.NewCache(capacity, testExpireInterval)
+	sigs := newDistinctData(t, 2)
+	var noTag replay.Tag
+
+	cache.Record(domain, sigs[0], noTag)
+	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
+		t.Fatalf("cache sizes are %d %d, want 1 0.", curr, prev)
 	}
 
-	if res := cache.IsDuplicate(a, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
+	// The cache is full, but only Record() may rotate it.
+	for i := range 3 {
+		if res := cache.Seen(domain, sigs[0], noTag); res == false {
+			t.Errorf("Seen() of the recorded signature (call %d) = false, want true", i+1)
+		}
 	}
 	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
+		t.Errorf("cache sizes after the lookups are %d %d, want 1 0.", curr, prev)
 	}
 
-	if res := cache.IsDuplicate(a, replay.EmptyTag); res == false {
-		t.Errorf("IsDuplicate() = false, want true")
-	}
+	cache.Record(domain, sigs[1], noTag)
 	if curr, prev := cache.Sizes(); curr != 1 || prev != 1 {
-		t.Errorf("cache sizes are %d %d, want 1 1.", curr, prev)
+		t.Errorf("cache sizes after the rotation are %d %d, want 1 1.", curr, prev)
 	}
+	if res := cache.Seen(domain, sigs[0], noTag); res == false {
+		t.Errorf("Seen() of the rotated out signature = false, want true")
+	}
+}
 
-	if res := cache.IsDuplicate(b, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
+// TestSizesAndClear verifies the reported sizes and that Clear() removes every
+// entry and resets the rotation bookkeeping.
+func TestSizesAndClear(t *testing.T) {
+	const capacity = 2
+	domain := replay.DomainPacketClientToServer
+	cache := replay.NewCache(capacity, testExpireInterval)
+	sigs := newDistinctData(t, capacity)
+	var noTag replay.Tag
+
+	if curr, prev := cache.Sizes(); curr != 0 || prev != 0 {
+		t.Fatalf("cache sizes of a new cache are %d %d, want 0 0.", curr, prev)
 	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 1 {
-		t.Errorf("cache sizes are %d %d, want 1 1.", curr, prev)
+	for i := range sigs {
+		cache.Record(domain, sigs[i], noTag)
+		if curr, prev := cache.Sizes(); curr != i+1 || prev != 0 {
+			t.Fatalf("cache sizes after %d inserts are %d %d, want %d 0.", i+1, curr, prev, i+1)
+		}
+	}
+	for i := range sigs {
+		if res := cache.Seen(domain, sigs[i], noTag); res == false {
+			t.Fatalf("Seen(sig %d) = false, want true", i)
+		}
+	}
+	if curr, prev := cache.Sizes(); curr != capacity || prev != 0 {
+		t.Errorf("cache sizes after the lookups are %d %d, want %d 0.", curr, prev, capacity)
 	}
 
 	cache.Clear()
 	if curr, prev := cache.Sizes(); curr != 0 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 0 0.", curr, prev)
+		t.Errorf("cache sizes after Clear() are %d %d, want 0 0.", curr, prev)
+	}
+	for i := range sigs {
+		if res := cache.Seen(domain, sigs[i], noTag); res == true {
+			t.Errorf("Seen(sig %d) after Clear() = true, want false", i)
+		}
+	}
+	// Clear() resets the counter, so the next inserts don't rotate the cache.
+	for i := range sigs {
+		cache.Record(domain, sigs[i], noTag)
+		if curr, prev := cache.Sizes(); curr != i+1 || prev != 0 {
+			t.Fatalf("cache sizes after %d inserts following Clear() are %d %d, want %d 0.", i+1, curr, prev, i+1)
+		}
 	}
 }
 
-func TestExpireInterval(t *testing.T) {
-	cache := replay.NewCache(10, 100*time.Millisecond)
-	a := make([]byte, 256)
-	if _, err := crand.Read(a); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
+// TestDisabledCache verifies that a cache without capacity, and a nil cache,
+// accept every packet and store nothing.
+func TestDisabledCache(t *testing.T) {
+	domain := replay.DomainPacketClientToServer
+	cache := replay.NewCache(0, testExpireInterval)
+	data := newDistinctData(t, 1)[0]
+	tag := tagOf(t, "192.0.2.10:40000")
+
+	for range 3 {
+		cache.Record(domain, data, tag)
+		if res := cache.Seen(domain, data, tag); res == true {
+			t.Errorf("Seen() with a disabled cache = true, want false")
+		}
 	}
-	b := make([]byte, 256)
-	if _, err := crand.Read(b); err != nil {
-		t.Fatalf("rand.Read() failed: %v", err)
+	if curr, prev := cache.Sizes(); curr != 0 || prev != 0 {
+		t.Errorf("cache sizes are %d %d, want 0 0.", curr, prev)
 	}
 
-	if res := cache.IsDuplicate(a, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
+	var nilCache *replay.ReplayCache
+	nilCache.Record(domain, data, tag)
+	if res := nilCache.Seen(domain, data, tag); res == true {
+		t.Errorf("Seen() on a nil cache = true, want false")
 	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
+}
+
+// TestConcurrentSeenAndRecord verifies that concurrent users of the same cache
+// don't lose entries and don't judge a packet inconsistently. Run with -race.
+func TestConcurrentSeenAndRecord(t *testing.T) {
+	const (
+		workers   = 8
+		perWorker = 16
+		total     = workers * perWorker
+	)
+	domain := replay.DomainPacketClientToServer
+	// The capacity is larger than the number of signatures, so the cache never
+	// rotates and the number of live entries is deterministic.
+	cache := replay.NewCache(4*total, testExpireInterval)
+	var noTag replay.Tag
+
+	// The input is generated in the goroutine running the test, because t.Fatalf
+	// may only be called from that goroutine.
+	data := make([][][]byte, workers)
+	for w := range data {
+		data[w] = newDistinctData(t, perWorker)
 	}
 
-	time.Sleep(150 * time.Millisecond)
-
-	if res := cache.IsDuplicate(a, replay.EmptyTag); res == false {
-		t.Errorf("IsDuplicate() = false, want true")
+	// Every worker records its own signatures. A signature must not be a
+	// duplicate before it is recorded, and must be a duplicate right after.
+	early := make([]int, workers)
+	lost := make([]int, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for _, d := range data[w] {
+				if cache.Seen(domain, d, noTag) {
+					early[w]++
+				}
+				cache.Record(domain, d, noTag)
+				if !cache.Seen(domain, d, noTag) {
+					lost[w]++
+				}
+			}
+		}(w)
 	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 1 {
-		t.Errorf("cache sizes are %d %d, want 1 1.", curr, prev)
+	wg.Wait()
+	for w := range workers {
+		if early[w] != 0 {
+			t.Errorf("worker %d judged %d unknown signatures as duplicate.", w, early[w])
+		}
+		if lost[w] != 0 {
+			t.Errorf("worker %d missed %d of the recorded signatures.", w, lost[w])
+		}
 	}
-
-	time.Sleep(200 * time.Millisecond)
-
-	if res := cache.IsDuplicate(b, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() = true, want false")
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 1 0.", curr, prev)
+	if curr, prev := cache.Sizes(); curr != total || prev != 0 {
+		t.Errorf("cache sizes after concurrent inserts are %d %d, want %d 0.", curr, prev, total)
 	}
 }
 
@@ -203,225 +423,12 @@ func newDistinctData(t *testing.T, n int) [][]byte {
 	return res
 }
 
-// TestCapacityRotation verifies the rolling window behavior of a cache with a
-// capacity larger than one: exactly `capacity` distinct signatures fill the
-// current map, the next distinct signature rotates the current map into the
-// previous map, and the signatures of the previous map are still detected as
-// duplicates.
-func TestCapacityRotation(t *testing.T) {
-	const capacity = 4
-	cache := replay.NewCache(capacity, 1*time.Minute)
-	sigs := newDistinctData(t, capacity+1)
-
-	// The first `capacity` signatures exactly fill the current map. No rotation
-	// happens yet.
-	for i := 0; i < capacity; i++ {
-		if res := cache.IsDuplicate(sigs[i], replay.EmptyTag); res == true {
-			t.Fatalf("IsDuplicate(sig %d) = true, want false", i)
-		}
-		if curr, prev := cache.Sizes(); curr != i+1 || prev != 0 {
-			t.Fatalf("cache sizes after %d inserts are %d %d, want %d 0.", i+1, curr, prev, i+1)
-		}
+// tagOf returns the tag of the given address and port.
+func tagOf(t *testing.T, addr string) replay.Tag {
+	t.Helper()
+	tag, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		t.Fatalf("netip.ParseAddrPort(%q) failed: %v", addr, err)
 	}
-
-	// The (capacity+1)-th distinct signature rotates the current map into the
-	// previous map and starts a new current map.
-	if res := cache.IsDuplicate(sigs[capacity], replay.EmptyTag); res == true {
-		t.Fatalf("IsDuplicate(sig %d) = true, want false", capacity)
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != capacity {
-		t.Fatalf("cache sizes after %d inserts are %d %d, want 1 %d.", capacity+1, curr, prev, capacity)
-	}
-
-	// Every signature of the rotated out map is still a duplicate. A lookup of a
-	// previous map signature re-inserts it into the current map, which grows the
-	// current map by one entry, so each signature is checked on a cache that was
-	// rotated exactly once.
-	for i := 0; i < capacity; i++ {
-		fresh := replay.NewCache(capacity, 1*time.Minute)
-		for j := 0; j <= capacity; j++ {
-			if res := fresh.IsDuplicate(sigs[j], replay.EmptyTag); res == true {
-				t.Fatalf("IsDuplicate(sig %d) = true, want false", j)
-			}
-		}
-		if res := fresh.IsDuplicate(sigs[i], replay.EmptyTag); res == false {
-			t.Errorf("IsDuplicate(sig %d) in the previous map = false, want true", i)
-		}
-		if curr, prev := fresh.Sizes(); curr != 2 || prev != capacity {
-			t.Errorf("cache sizes after rechecking sig %d are %d %d, want 2 %d.", i, curr, prev, capacity)
-		}
-	}
-}
-
-// TestConcurrentIsDuplicate verifies that concurrent users of the same cache
-// don't lose entries and don't judge duplicates inconsistently. Run with -race.
-func TestConcurrentIsDuplicate(t *testing.T) {
-	const (
-		goroutines    = 8
-		sigsPerWorker = 8
-		total         = goroutines * sigsPerWorker
-	)
-	// The capacity is larger than the number of signatures, so the cache never
-	// rotates and the number of live entries is deterministic.
-	cache := replay.NewCache(2*total, 1*time.Minute)
-
-	// The input is generated in the goroutine running the test, because t.Fatalf
-	// may only be called from that goroutine.
-	data := make([][][]byte, goroutines)
-	for g := range data {
-		data[g] = newDistinctData(t, sigsPerWorker)
-	}
-
-	// Phase 1: every worker inserts its own signatures. A signature seen for the
-	// first time must never be judged as a duplicate.
-	fresh := make([]int, goroutines)
-	var wg sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
-			for _, d := range data[g] {
-				if cache.IsDuplicate(d, replay.EmptyTag) {
-					fresh[g]++
-				}
-			}
-		}(g)
-	}
-	wg.Wait()
-	for g, n := range fresh {
-		if n != 0 {
-			t.Errorf("worker %d judged %d unknown signatures as duplicate.", g, n)
-		}
-	}
-	if curr, prev := cache.Sizes(); curr != total || prev != 0 {
-		t.Fatalf("cache sizes after concurrent inserts are %d %d, want %d 0.", curr, prev, total)
-	}
-
-	// Phase 2: every worker rechecks every signature of every worker. All of
-	// them must be judged as duplicate, and looking up a known signature must
-	// not change the cache.
-	lost := make([]int, goroutines)
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
-			for _, worker := range data {
-				for _, d := range worker {
-					if !cache.IsDuplicate(d, replay.EmptyTag) {
-						lost[g]++
-					}
-				}
-			}
-		}(g)
-	}
-	wg.Wait()
-	for g, n := range lost {
-		if n != 0 {
-			t.Errorf("worker %d missed %d of the cached signatures.", g, n)
-		}
-	}
-	if curr, prev := cache.Sizes(); curr != total || prev != 0 {
-		t.Errorf("cache sizes after concurrent lookups are %d %d, want %d 0.", curr, prev, total)
-	}
-
-	// Phase 3: exactly one worker can be the first to observe an unknown
-	// signature, every other worker must see it as a duplicate.
-	hot := replay.NewCache(2*total, 1*time.Minute)
-	hotData := newDistinctData(t, 1)[0]
-	seen := make([]bool, goroutines)
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
-			seen[g] = hot.IsDuplicate(hotData, replay.EmptyTag)
-		}(g)
-	}
-	wg.Wait()
-	firstSeen := 0
-	for _, isDup := range seen {
-		if !isDup {
-			firstSeen++
-		}
-	}
-	if firstSeen != 1 {
-		t.Errorf("%d workers observed the same signature for the first time, want 1.", firstSeen)
-	}
-	if curr, prev := hot.Sizes(); curr != 1 || prev != 0 {
-		t.Errorf("cache sizes after concurrent duplicate check are %d %d, want 1 0.", curr, prev)
-	}
-}
-
-// TestTagRetransmitAcrossRotation verifies the tag semantics of IsDuplicate when
-// the signature has moved from the current map to the previous map: a
-// retransmission carrying the same tag is accepted, while a different tag and an
-// empty tag are judged as duplicate.
-func TestTagRetransmitAcrossRotation(t *testing.T) {
-	cache := replay.NewCache(2, 1*time.Minute)
-	sigs := newDistinctData(t, 3)
-	a, b, c := sigs[0], sigs[1], sigs[2]
-
-	if res := cache.IsDuplicate(a, "tag1"); res == true {
-		t.Fatalf("IsDuplicate() = true, want false")
-	}
-	if res := cache.IsDuplicate(b, "tag1"); res == true {
-		t.Fatalf("IsDuplicate() = true, want false")
-	}
-	if curr, prev := cache.Sizes(); curr != 2 || prev != 0 {
-		t.Fatalf("cache sizes are %d %d, want 2 0.", curr, prev)
-	}
-
-	// The current map is full, so this retransmission rotates it into the
-	// previous map and re-inserts the signature into the current map.
-	if res := cache.IsDuplicate(a, "tag1"); res == true {
-		t.Errorf("IsDuplicate() with the same tag = true, want false")
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 2 {
-		t.Errorf("cache sizes are %d %d, want 1 2.", curr, prev)
-	}
-
-	// The same payload sent with a different tag is a replay.
-	if res := cache.IsDuplicate(a, "tag2"); res == false {
-		t.Errorf("IsDuplicate() with a different tag = false, want true")
-	}
-	// An empty tag disables the retransmission exception.
-	if res := cache.IsDuplicate(a, replay.EmptyTag); res == false {
-		t.Errorf("IsDuplicate() with an empty tag = false, want true")
-	}
-	if curr, prev := cache.Sizes(); curr != 1 || prev != 2 {
-		t.Errorf("cache sizes are %d %d, want 1 2.", curr, prev)
-	}
-
-	// The entry in the current map still carries tag1, so the retransmission is
-	// accepted again.
-	if res := cache.IsDuplicate(a, "tag1"); res == true {
-		t.Errorf("IsDuplicate() with the same tag = true, want false")
-	}
-
-	// A different payload with the same tag is not a duplicate.
-	if res := cache.IsDuplicate(c, "tag1"); res == true {
-		t.Errorf("IsDuplicate() with a new payload = true, want false")
-	}
-	if curr, prev := cache.Sizes(); curr != 2 || prev != 2 {
-		t.Errorf("cache sizes are %d %d, want 2 2.", curr, prev)
-	}
-}
-
-// TestDisabledCache verifies that a cache without capacity, and a nil cache,
-// accept every packet.
-func TestDisabledCache(t *testing.T) {
-	cache := replay.NewCache(0, 1*time.Minute)
-	data := newDistinctData(t, 1)[0]
-	for i := 0; i < 3; i++ {
-		if res := cache.IsDuplicate(data, replay.EmptyTag); res == true {
-			t.Errorf("IsDuplicate() with a disabled cache = true, want false")
-		}
-	}
-	if curr, prev := cache.Sizes(); curr != 0 || prev != 0 {
-		t.Errorf("cache sizes are %d %d, want 0 0.", curr, prev)
-	}
-
-	var nilCache *replay.ReplayCache
-	if res := nilCache.IsDuplicate(data, replay.EmptyTag); res == true {
-		t.Errorf("IsDuplicate() on a nil cache = true, want false")
-	}
+	return tag
 }

@@ -34,39 +34,77 @@ import (
 // The destination of packets are negotiated separately.
 type PacketOverStreamTunnel struct {
 	net.Conn
+
+	// rxHeader is the buffer of the packet header: the 0x00 prefix followed by
+	// the 2 bytes of the packet length. Keeping it here instead of allocating
+	// it for every packet removes two allocations per read. It is reused to
+	// read the 0xff suffix of a packet which doesn't leave room for the suffix
+	// in the buffer of the caller.
+	rxHeader [3]byte
+
+	// pendingLength is the length of the packet which a previous Read() didn't
+	// copy because it was larger than the buffer of the caller. The header of
+	// such a packet is consumed already, so the next Read() must continue that
+	// packet instead of parsing the next header. It is 0 when no packet is
+	// pending, which is unambiguous because a packet longer than p is at least
+	// 1 byte long.
+	pendingLength int
 }
 
 var _ net.PacketConn = (*PacketOverStreamTunnel)(nil)
 
+// Read reads the content of the next packet into p and returns its length.
+//
+// Read returns io.ErrShortBuffer when the packet is larger than p. In that case
+// the header of the packet is consumed but its content is not: calling Read
+// again with a larger p returns the whole content of that packet, so a caller
+// which doesn't know the size of the packets in advance (such as a UDP relay
+// which starts with a small buffer) can copy them without losing the packet
+// boundary.
+//
+// Read is not safe to call from multiple goroutines at the same time.
 func (c *PacketOverStreamTunnel) Read(p []byte) (n int, err error) {
-	delim := make([]byte, 1)
-	if _, err = io.ReadFull(c.Conn, delim); err != nil {
-		return 0, err
+	length := c.pendingLength
+	if length == 0 {
+		if _, err = io.ReadFull(c.Conn, c.rxHeader[:3]); err != nil {
+			return 0, err
+		}
+		if c.rxHeader[0] != 0x00 {
+			return 0, fmt.Errorf("packet prefix 0x%x is not 0x00", c.rxHeader[0])
+		}
+		length = int(binary.BigEndian.Uint16(c.rxHeader[1:3]))
 	}
-	if delim[0] != 0x00 {
-		return 0, fmt.Errorf("packet prefix 0x%x is not 0x00", delim[0])
-	}
-
-	lengthBytes := make([]byte, 2)
-	if _, err = io.ReadFull(c.Conn, lengthBytes); err != nil {
-		return 0, err
-	}
-	length := int(binary.BigEndian.Uint16(lengthBytes))
 	if length > len(p) {
+		c.pendingLength = length
 		return 0, io.ErrShortBuffer
 	}
+	c.pendingLength = 0
 
+	if length < len(p) {
+		// The packet content and its 0xff suffix are read with one call. The
+		// suffix is stored in the byte which follows the content, which is
+		// inside p: only the first length bytes of p are part of the packet.
+		if _, err = io.ReadFull(c.Conn, p[:length+1]); err != nil {
+			return 0, err
+		}
+		if p[length] != 0xff {
+			return 0, fmt.Errorf("packet suffix 0x%x is not 0xff", p[length])
+		}
+		return length, nil
+	}
+
+	// p is exactly the size of the packet content, so the suffix is read with a
+	// second call.
 	if n, err = io.ReadFull(c.Conn, p[:length]); err != nil {
 		return 0, err
 	}
-
-	if _, err = io.ReadFull(c.Conn, delim); err != nil {
+	if _, err = io.ReadFull(c.Conn, c.rxHeader[:1]); err != nil {
 		return 0, err
 	}
-	if delim[0] != 0xff {
-		return 0, fmt.Errorf("packet suffix 0x%x is not 0xff", delim[0])
+	if c.rxHeader[0] != 0xff {
+		return 0, fmt.Errorf("packet suffix 0x%x is not 0xff", c.rxHeader[0])
 	}
-	return
+	return n, nil
 }
 
 func (c *PacketOverStreamTunnel) Write(p []byte) (int, error) {

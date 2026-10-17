@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	crand "crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -60,8 +61,8 @@ const (
 	// minOutputInterval is the minimum interval between two output loops.
 	minOutputInterval = 1 * time.Millisecond
 
-	// backPressureDelay is a short sleep to add back pressure
-	// to the writer.
+	// backPressureDelay is the polling interval used to add back pressure
+	// while waiting for room in the receive queue.
 	backPressureDelay = 100 * time.Microsecond
 
 	// packetAckDelay is the maximum time the packet transport waits before it
@@ -83,14 +84,43 @@ const (
 	// Maximum back off duration.
 	maxBackOffDuration = 10 * time.Second
 
-	// gracefulCloseWait is the maximum time a graceful close waits for the
-	// output loop to send out the close session request.
-	gracefulCloseWait = 100 * time.Millisecond
+	// ackWindowUpdateThreshold is the number of segments the application must
+	// read before the session proactively sends an ACK that carries the updated
+	// receive window to the peer. A peer stops sending once the receive window
+	// it was told about reaches zero, and then no further segment arrives to
+	// trigger the delayed ACK, so the reading side has to refresh the window.
+	// Updating it after half of the receive window has been consumed keeps the
+	// extra ACK rate low while bounding how long the peer stays stalled.
+	ackWindowUpdateThreshold = segmentTreeCapacity / 2
 
-	// gracefulClosePollInterval is the interval between two checks of the
-	// close session request transmission.
-	gracefulClosePollInterval = time.Millisecond
+	// maxUnreadSegments is the hard limit of segments that a stream session
+	// buffers for the application without the application reading them. The
+	// receive trees of a session hold up to segmentTreeCapacity segments each,
+	// so without this limit an application that stopped reading lets one
+	// session hold ~128 MiB (4096 segments of up to 32 KiB) while the peer
+	// keeps sending; the limit bounds that at ~16 MiB. The packet transport
+	// doesn't need it, because the receive window a packet session advertises
+	// stops the peer before its trees fill up.
+	//
+	// A session that reaches the limit is closed with errUnreadLimit. The
+	// send path has its own bound: Write() blocks (back pressure) while the
+	// send queue holds segmentSendQueueTreeCapacity segments.
+	maxUnreadSegments = 512
+
+	// streamSendWindowFloor is the smallest number of segments that one pass of
+	// the stream output loop may send, whatever receive window the peer
+	// advertised. The stream transport has no window update of its own, so a
+	// stale window - in particular the zero that a peer with a full receive
+	// buffer advertises - may slow a pass down to this many segments but must
+	// never stop a session.
+	streamSendWindowFloor = 1
 )
+
+// errUnreadLimit is the sentinel error that closes a session whose unread
+// buffer reached maxUnreadSegments. It is recognizable with errors.Is, so a
+// caller can tell a session that was closed for buffering too much unread data
+// apart from any other failure.
+var errUnreadLimit = errors.New("session unread buffer is full")
 
 type sessionState int32
 
@@ -138,12 +168,22 @@ type Session struct {
 	ready          chan struct{} // indicate the session is ready to use
 	closeRequested atomic.Bool   // the session is being closed or has been closed
 	closedChan     chan struct{} // indicate the session is closed
-	readDeadline   atomic.Int64  // read deadline, in microseconds since Unix epoch
-	writeDeadline  atomic.Int64  // write deadline, in microseconds since Unix epoch
-	inputHasErr    atomic.Bool   // input has error
-	inputErr       chan error    // this channel is closed when input has error
-	outputHasErr   atomic.Bool   // output has error
-	outputErr      chan error    // this channel is closed when output has error
+	// readDeadline is the read deadline set by the application through
+	// SetReadDeadline, in microseconds since Unix epoch. 0 means no deadline.
+	readDeadline atomic.Int64
+	// writeDeadline is the write deadline set by the application through
+	// SetWriteDeadline, in microseconds since Unix epoch. 0 means no deadline.
+	writeDeadline atomic.Int64
+	// internalDeadline is the deadline the session arms for itself while the
+	// handshake of a client session is pending, in microseconds since Unix
+	// epoch. It bounds how long the client waits for the response of the
+	// server. It never overwrites an application deadline and is ignored once
+	// the handshake is done.
+	internalDeadline atomic.Int64
+	inputHasErr      atomic.Bool // input has error
+	inputErr         chan error  // this channel is closed when input has error
+	outputHasErr     atomic.Bool // output has error
+	outputErr        chan error  // this channel is closed when output has error
 
 	sendQueue *segmentTree  // segments waiting to send
 	sendBuf   *segmentTree  // segments sent but not acknowledged
@@ -160,7 +200,6 @@ type Session struct {
 
 	nextSend               atomic.Uint32 // next sequence number to send a segment
 	nextRecv               atomic.Uint32 // next sequence number to receive
-	lastSend               atomic.Uint32 // last segment sequence number sent
 	lastRXTime             atomic.Int64  // last timestamp when a segment is received, in microseconds since Unix epoch
 	lastTXTime             atomic.Int64  // last timestamp when a segment is sent, in microseconds since Unix epoch
 	heartbeatJitter        time.Duration // random jitter added to heartbeat interval to break periodic pattern
@@ -168,10 +207,17 @@ type Session struct {
 	ackOnDataRecv          atomic.Bool   // whether ack should be sent due to receive of new data
 	ackDeadline            atomic.Int64  // time to send the pending ack requested by ackOnDataRecv, in microseconds since Unix epoch
 	unreadBuf              []byte        // payload removed from the recvQueue that haven't been read by application
+	readSinceAck           int           // segments read by the application since the last receive window update, guarded by rLock
 
 	rttStat            *congestion.RTTStats
 	cubicSendAlgorithm *congestion.CubicSendAlgorithm
 	remoteWindowSize   atomic.Uint32
+	// remoteWindowUnAckSeq is the highest unAckSeq whose receive window has
+	// been applied to remoteWindowSize. A window update carried by a reordered
+	// or duplicated segment, whose unAckSeq is older than this one, must not
+	// shrink the window.
+	remoteWindowUnAckSeq      atomic.Uint32
+	remoteWindowUnAckSeqValid atomic.Bool
 
 	wg    sync.WaitGroup
 	rLock sync.Mutex // serialize application read
@@ -210,6 +256,12 @@ var (
 
 	// Session implements UserContext interface.
 	_ apicommon.UserContext = (*Session)(nil)
+
+	// Session implements io.ReaderFrom and io.WriterTo, so io.Copy and
+	// io.CopyBuffer move data with the buffers of the session instead of
+	// allocating their own relay buffer.
+	_ io.ReaderFrom = (*Session)(nil)
+	_ io.WriterTo   = (*Session)(nil)
 )
 
 // NewSession creates a new session.
@@ -227,7 +279,10 @@ func newSessionWithServerUserPolicy(
 ) *Session {
 	rttStat := congestion.NewRTTStats()
 	rttStat.SetMaxAckDelay(packetAckDelay)
-	rttStat.SetRTOMultiplier(txTimeoutBackOff)
+	// The RTO multiplier of the RTT stats stays at its default of 1.0. The
+	// retransmission timeout of a segment is backed off by txTimeoutBackOff
+	// once per transmission attempt, and letting RTO() apply the same
+	// multiplier as well would apply it twice to the first transmission.
 	s := &Session{
 		conn:                      nil,
 		block:                     atomic.Pointer[cipher.BlockCipher]{},
@@ -271,12 +326,13 @@ func (s *Session) String() string {
 
 // Read lets a user to read data from receive queue.
 // Read is allowed even after the session has been closed.
+//
+// Read honors the read deadline set by SetReadDeadline. The deadline stays
+// armed across calls: net.Conn semantics require a deadline to apply to every
+// subsequent read until the application changes or clears it.
 func (s *Session) Read(b []byte) (n int, err error) {
 	s.rLock.Lock()
 	defer s.rLock.Unlock()
-	defer func() {
-		s.readDeadline.Store(0)
-	}()
 	if len(b) == 0 {
 		return 0, nil
 	}
@@ -285,15 +341,10 @@ func (s *Session) Read(b []byte) (n int, err error) {
 		log.Tracef("%v trying to read %d bytes", s, len(b))
 	}
 
-	// Stop reading when deadline is reached. A deadline that is already in the
-	// past is ignored, because it can be left by a previous write and the
-	// session can still be healthy.
-	var timeC <-chan time.Time
-	if readDeadline := s.readDeadline.Load(); readDeadline != 0 {
-		if d := time.Until(time.UnixMicro(readDeadline)); d > 0 {
-			timeC = time.After(d)
-		}
-	}
+	// Stop reading when deadline is reached. An expired deadline fails the
+	// read right away, as net.Conn requires; ignoring it would leave a caller
+	// that set a deadline once blocked here forever.
+	timeC := deadlineChan(s.effectiveReadDeadline())
 
 	for {
 		// Read remaining data that application left last time.
@@ -318,6 +369,16 @@ func (s *Session) Read(b []byte) (n int, err error) {
 			}
 			if s.isClient && seg.metadata.Protocol() == openSessionResponse && s.isState(sessionAttached) {
 				s.forwardStateTo(sessionEstablished)
+			}
+			// Tell the peer that the receive window opened up. The window is
+			// otherwise only advertised when a segment is received, and the
+			// peer doesn't send anything once it believes the window is full.
+			if s.transportProtocol == common.PacketTransport {
+				s.readSinceAck++
+				if s.readSinceAck >= ackWindowUpdateThreshold {
+					s.readSinceAck = 0
+					s.requestPacketAck()
+				}
 			}
 			copied := copy(b[n:], seg.payload)
 			n += copied
@@ -354,6 +415,10 @@ func (s *Session) Read(b []byte) (n int, err error) {
 }
 
 // Write stores the data to send queue.
+//
+// Write honors the write deadline set by SetWriteDeadline. The deadline stays
+// armed across calls, as net.Conn requires, and the session never overwrites
+// it with an internal timeout.
 func (s *Session) Write(b []byte) (n int, err error) {
 	s.wLock.Lock()
 	defer s.wLock.Unlock()
@@ -368,9 +433,6 @@ func (s *Session) Write(b []byte) (n int, err error) {
 	if s.isStateAfter(sessionClosed, true) {
 		return 0, io.ErrClosedPipe
 	}
-	defer func() {
-		s.writeDeadline.Store(0)
-	}()
 
 	// Before the first write, client needs to send open session request.
 	// Open session request is sent only once. Underlay may retry if the packet is lost.
@@ -439,6 +501,95 @@ func (s *Session) Write(b []byte) (n int, err error) {
 	return n, nil
 }
 
+// copyBufferSize is the size of the buffer that ReadFrom and WriterTo move data
+// with. It matches maxPDU, so one read of ReadFrom fills exactly one segment of
+// the session and one read of WriteTo returns at most one segment of it.
+//
+// The buffers come from copyBufferPool instead of being owned by a session, so
+// a session that never copies with io.Copy holds no buffer and a copy allocates
+// nothing after the first one. The memory that copies hold is therefore bounded
+// by the number of copies that run at the same time.
+const copyBufferSize = maxPDU
+
+// copyBufferPool recycles the copy buffers of ReadFrom and WriterTo. It stores
+// a pointer to the slice header, because boxing a slice header itself would
+// allocate one object per Put.
+var copyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, copyBufferSize)
+		return &buf
+	},
+}
+
+// ReadFrom implements io.ReaderFrom.
+//
+// io.Copy and io.CopyBuffer use ReadFrom when a session is the destination of
+// the copy, so the data is written to the session without the relay buffer that
+// io.Copy would allocate. Nothing else changes: the data is written with Write,
+// in the same order and under the same back pressure.
+//
+// The returned count is the number of bytes written to the session. A read
+// error other than io.EOF, and a write error, are returned to the caller.
+func (s *Session) ReadFrom(r io.Reader) (n int64, err error) {
+	bufPtr := copyBufferPool.Get().(*[]byte)
+	defer copyBufferPool.Put(bufPtr)
+	buf := *bufPtr
+	for {
+		nr, rerr := r.Read(buf)
+		if nr > 0 {
+			wn, werr := s.Write(buf[:nr])
+			n += int64(wn)
+			if werr != nil {
+				return n, werr
+			}
+			if wn != nr {
+				return n, io.ErrShortWrite
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return n, nil
+			}
+			return n, rerr
+		}
+	}
+}
+
+// WriteTo implements io.WriterTo.
+//
+// io.Copy and io.CopyBuffer use WriteTo when a session is the source of the
+// copy. The data is read from the session with Read into one fixed buffer that
+// every segment of the copy reuses, and written to w, so the copy allocates no
+// buffer per segment.
+//
+// The returned count is the number of bytes written to w. The copy ends when
+// Read reports io.EOF, which is what a closed session reports once the data it
+// buffered has been read.
+func (s *Session) WriteTo(w io.Writer) (n int64, err error) {
+	bufPtr := copyBufferPool.Get().(*[]byte)
+	defer copyBufferPool.Put(bufPtr)
+	buf := *bufPtr
+	for {
+		nr, rerr := s.Read(buf)
+		if nr > 0 {
+			wn, werr := w.Write(buf[:nr])
+			n += int64(wn)
+			if werr != nil {
+				return n, werr
+			}
+			if wn != nr {
+				return n, io.ErrShortWrite
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return n, nil
+			}
+			return n, rerr
+		}
+	}
+}
+
 // Close terminates the session.
 func (s *Session) Close() error {
 	return s.closeWithError(nil)
@@ -490,6 +641,64 @@ func (s *Session) SetWriteDeadline(t time.Time) error {
 	}
 	s.writeDeadline.Store(micros)
 	return nil
+}
+
+// effectiveReadDeadline returns the deadline Read must honor, in microseconds
+// since Unix epoch. It is the earlier of the application read deadline and the
+// internal handshake deadline. The internal deadline is considered only while
+// the handshake of a client session is pending, so it can never cut a data
+// plane read short. A return value of 0 means no deadline.
+func (s *Session) effectiveReadDeadline() int64 {
+	deadline := s.readDeadline.Load()
+	if !s.clientHandshakePending() {
+		return deadline
+	}
+	internal := s.internalDeadline.Load()
+	if internal == 0 {
+		return deadline
+	}
+	if deadline == 0 || internal < deadline {
+		return internal
+	}
+	return deadline
+}
+
+// effectiveWriteDeadline returns the deadline Write must honor, in
+// microseconds since Unix epoch. It follows the same rule as
+// effectiveReadDeadline, based on the application write deadline.
+func (s *Session) effectiveWriteDeadline() int64 {
+	deadline := s.writeDeadline.Load()
+	if !s.clientHandshakePending() {
+		return deadline
+	}
+	internal := s.internalDeadline.Load()
+	if internal == 0 {
+		return deadline
+	}
+	if deadline == 0 || internal < deadline {
+		return internal
+	}
+	return deadline
+}
+
+// deadlineChan returns a channel that fires when the given deadline, in
+// microseconds since Unix epoch, expires. A deadline of 0 returns a nil
+// channel, which blocks forever.
+//
+// A deadline that is already in the past returns an already closed channel, so
+// that the caller times out immediately. net.Conn requires that behavior;
+// silently ignoring an expired deadline, as this code used to do, leaves a
+// caller that asked to stop waiting blocked forever.
+func deadlineChan(deadline int64) <-chan time.Time {
+	if deadline == 0 {
+		return nil
+	}
+	if d := time.Until(time.UnixMicro(deadline)); d > 0 {
+		return time.After(d)
+	}
+	expired := make(chan time.Time)
+	close(expired)
+	return expired
 }
 
 // UserName returns the user that owns this session,
@@ -705,6 +914,11 @@ func (s *Session) newSessionResponseSegment(payload []byte, block cipher.BlockCi
 // On failure the returned response carries the failure status, no session key
 // is installed, and the caller must send the response and then close the
 // session. A failure never panics.
+//
+// The negotiated cipher suite is bounded by the key length of the handshake
+// envelope under version 2 and unbounded from version 3 on, because from
+// version 3 on the session keys are derived from the negotiated suite. The
+// handshake status codes are the same for every supported version.
 func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher, allowedSuites []cipher.Suite, stateless bool) (*handshakeResponse, cipher.BlockCipher, cipher.BlockCipher, error) {
 	if s.isClient {
 		return nil, nil, nil, fmt.Errorf("%v is not a server session", s)
@@ -722,8 +936,8 @@ func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher
 
 	request, consumed, err := parseHandshakeRequest(seg.payload)
 	if err != nil {
-		// A peer that doesn't speak version 2 or that sends a corrupted
-		// request is rejected with a diagnostic response.
+		// A peer that doesn't speak a supported protocol version or that sends
+		// a corrupted request is rejected with a diagnostic response.
 		log.Debugf("%v rejected open session request from %v: %v", s, s.remoteAddr, err)
 		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("parseHandshakeRequest() failed: %w", err)
 	}
@@ -732,7 +946,19 @@ func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher
 		log.Debugf("%v rejected open session request: client protocol version range %d-%d doesn't intersect the server range %d-%d", s, request.versionMin, request.versionMax, minSupportedProtocolVersion, maxSupportedProtocolVersion)
 		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("no common protocol version with the client")
 	}
-	suite, ok := negotiateSuite(request.suites, allowedSuites)
+	// The suite that protects the data plane is chosen from the intersection of
+	// the client and the server preference lists. From protocol version 3 on
+	// the session keys are derived from the negotiated suite instead of the
+	// cipher that protected the handshake envelope, so the envelope key length
+	// doesn't bound the negotiated suite any more. A version 2 peer keeps the
+	// old behavior: a suite with a longer key than the envelope is skipped here,
+	// before the response, instead of failing the key derivation below.
+	var suite cipher.Suite
+	if version >= 3 {
+		suite, ok = negotiateSuite(request.suites, allowedSuites)
+	} else {
+		suite, ok = negotiateSuiteForEnvelope(request.suites, allowedSuites, requestCipher.Suite())
+	}
 	if !ok {
 		log.Debugf("%v rejected open session request: client cipher suites %v don't intersect the server cipher suites %v", s, request.suites, allowedSuites)
 		return handshakeFailureResponse(handshakeStatusNoSuite), nil, nil, fmt.Errorf("no common cipher suite with the client")
@@ -753,12 +979,16 @@ func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher
 	}
 	c2s, s2c, err := deriveSessionKeys(requestCipher, suite, privateKey, request.ephPub[:], request.clientSalt[:], response.serverSalt[:], version, stateless)
 	if err != nil {
-		if _, suiteErr := sessionSuite(suite, requestCipher.Suite()); suiteErr != nil {
-			// The negotiated suite needs more key material than the cipher
-			// that protected the handshake envelope can provide, so the peers
-			// can't agree on a data plane.
-			log.Debugf("%v rejected open session request: %v", s, suiteErr)
-			return handshakeFailureResponse(handshakeStatusNoSuite), nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
+		// Under version 2 the negotiated suite can still be longer than the
+		// envelope cipher if the caller skipped the filter above, in which
+		// case the peers can't agree on a data plane. From version 3 on the
+		// envelope key length doesn't bound the derivation, so a failure is
+		// reported as is.
+		if version < 3 {
+			if _, suiteErr := sessionSuite(suite, requestCipher.Suite()); suiteErr != nil {
+				log.Debugf("%v rejected open session request: %v", s, suiteErr)
+				return handshakeFailureResponse(handshakeStatusNoSuite), nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
+			}
 		}
 		return nil, nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
 	}
@@ -793,6 +1023,12 @@ func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher
 // On success the payload of seg is consumed and the returned response carries
 // the negotiated version and cipher suite. On failure the caller must close the
 // session. A failure never panics.
+//
+// The data plane keys follow the version of the response: from version 3 on
+// they are derived from the negotiated suite, which may need more key material
+// than the cipher that decrypted the handshake envelope; under version 2 they
+// are derived from the envelope cipher and a negotiated suite with a longer key
+// is rejected.
 func (s *Session) deriveClientHandshake(seg *segment, responseCipher cipher.BlockCipher, stateless bool) (c2s, s2c cipher.BlockCipher, _ *handshakeResponse, err error) {
 	if !s.isClient {
 		return nil, nil, nil, fmt.Errorf("%v is not a client session", s)
@@ -890,17 +1126,86 @@ func (s *Session) lowEntropySendConfig() (appctlpb.LowEntropyMode, appctlpb.LowE
 	return mode, rotation, true
 }
 
+// sendSegmentPool and sendMetadataPool recycle the storage of the segments that
+// the send path of a session creates: the data fragments of writeChunk and the
+// ACK or heartbeat segments of the packet output loop. A segment of the receive
+// path is never pooled, because the application reads its payload out of the
+// receive queue and the segment outlives the read there.
+//
+// Invariants of a pooled segment:
+//   - it is owned by the session between acquireSendSegment and
+//     releaseSendSegment, and it is referenced only by sendQueue, sendBuf or
+//     the output loop that is sending it;
+//   - it is released only where it was removed from sendQueue or sendBuf and
+//     no other goroutine can reach it any more;
+//   - it is released exactly once: releasing the same object twice would hand
+//     one segment to two senders;
+//   - its payload is allocated by the send path and is never handed to the
+//     application, so a pooled segment can't alias a buffer of the caller;
+//   - releaseSendSegment clears every reference of the segment, so a pooled
+//     segment never keeps a payload, a cipher or a user policy alive.
+//
+// The metadata of a segment stays an interface. Turning it into a value field
+// of segment would remove the interface indirection of every metadata access as
+// well, but that reaches metadata.go, both underlays and every test that builds
+// a segment, which is too wide for the win of the pooling alone.
+var (
+	sendSegmentPool  = sync.Pool{New: func() any { return new(segment) }}
+	sendMetadataPool = sync.Pool{New: func() any { return new(dataAckStruct) }}
+)
+
+// acquireSendSegment returns a segment of the send path, together with a
+// dataAckStruct metadata whose protocol, session ID and transport are set.
+// Every other field of the segment and of the metadata is zero, as it is after
+// releaseSendSegment.
+func acquireSendSegment(protocol protocolType, sessionID uint32, transport common.TransportProtocol) *segment {
+	seg := sendSegmentPool.Get().(*segment)
+	das := sendMetadataPool.Get().(*dataAckStruct)
+	*das = dataAckStruct{
+		baseStruct: baseStruct{
+			protocol: uint8(protocol),
+		},
+		sessionID: sessionID,
+	}
+	seg.metadata = das
+	seg.transport = transport
+	return seg
+}
+
+// releaseSendSegment returns a segment of the send path to the pool. It is a
+// no-op for a segment that the pool didn't create, so it is safe to call on
+// every segment that leaves sendQueue or sendBuf.
+func releaseSendSegment(seg *segment) {
+	if seg == nil {
+		return
+	}
+	das, ok := seg.metadata.(*dataAckStruct)
+	if !ok {
+		return
+	}
+	seg.metadata = nil
+	seg.payload = nil
+	seg.block = nil
+	seg.transport = 0
+	seg.ackCount = 0
+	seg.txCount = 0
+	seg.txTime = 0
+	seg.txTimeout = 0
+	seg.serverUserPolicy = serveruser.Policy{}
+	seg.serverUserAuthentication = serveruser.Authentication{}
+	sendMetadataPool.Put(das)
+	sendSegmentPool.Put(seg)
+}
+
 func (s *Session) writeChunk(b []byte) (n int, err error) {
 	if len(b) > maxPDU {
 		return 0, io.ErrShortWrite
 	}
 	lowEntropyMode, lowEntropyRotation, sendLowEntropy := s.lowEntropySendConfig()
 
-	// Stop writing when deadline is reached.
-	var timeC <-chan time.Time
-	if writeDeadline := s.writeDeadline.Load(); writeDeadline != 0 {
-		timeC = time.After(time.Until(time.UnixMicro(writeDeadline)))
-	}
+	// Stop writing when deadline is reached. An expired deadline fails the
+	// write right away instead of being ignored.
+	timeC := deadlineChan(s.effectiveWriteDeadline())
 
 	seqBeforeWrite, _ := s.sendQueue.MinSeq()
 
@@ -913,6 +1218,9 @@ func (s *Session) writeChunk(b []byte) (n int, err error) {
 	if len(b) > fragmentSize {
 		nFragment = (len(b)-1)/fragmentSize + 1
 	}
+	// Wait for room in the send queue instead of polling for it. The output
+	// loop signals the queue events when it drains segments, and the queue can
+	// only drain while this writer waits for it.
 	for s.sendQueue.Remaining() <= nFragment { // reserve one slot for Close()
 		select {
 		case <-s.closedChan:
@@ -921,9 +1229,8 @@ func (s *Session) writeChunk(b []byte) (n int, err error) {
 			return 0, io.ErrClosedPipe
 		case <-timeC:
 			return 0, stderror.ErrTimeout
-		default:
+		case <-s.sendQueue.chanEmptyEvent:
 		}
-		time.Sleep(backPressureDelay) // add back pressure if queue is full
 	}
 
 	s.oLock.Lock()
@@ -963,61 +1270,66 @@ func (s *Session) writeChunk(b []byte) (n int, err error) {
 				return 0, err
 			}
 		}
-		das := &dataAckStruct{
-			baseStruct: baseStruct{
-				protocol: uint8(protocol),
-			},
-			sessionID:  s.id,
-			seq:        s.nextSend.Load(),
-			unAckSeq:   s.nextRecv.Load(),
-			windowSize: uint16(s.receiveWindowSize()),
-			fragment:   uint8(i),
-			payloadLen: payloadLen,
-		}
+		// The segment and its metadata come from the pools of the send path,
+		// but the payload is a fresh copy of the data of the caller: a pooled
+		// segment never adopts a buffer of the application, and the receive
+		// path never reads this payload.
+		seg := acquireSendSegment(protocol, s.id, s.transportProtocol)
+		das := seg.metadata.(*dataAckStruct)
+		das.seq = s.nextSend.Load()
+		das.unAckSeq = s.nextRecv.Load()
+		das.windowSize = uint16(s.receiveWindowSize())
+		das.fragment = uint8(i)
+		das.payloadLen = payloadLen
 		if sendLowEntropy {
 			das.lowEntropyMode = uint8(lowEntropyMode)
 			das.extractedPayloadLen = uint16(partLen)
 			das.lowEntropyMaskRotation = uint8(lowEntropyRotation)
 		}
-		seg := &segment{
-			metadata:  das,
-			payload:   make([]byte, partLen),
-			transport: s.transportProtocol,
-		}
+		seg.payload = make([]byte, partLen)
 		copy(seg.payload, part)
 		s.nextSend.Add(1)
 		if !s.sendQueue.Insert(seg) {
+			insertErr := fmt.Errorf("insert %v to send queue failed", seg)
 			s.oLock.Unlock()
-			return 0, fmt.Errorf("insert %v to send queue failed", seg)
+			// The segment never reached a queue, so this is where its storage
+			// goes back to the pool.
+			releaseSendSegment(seg)
+			return 0, insertErr
 		}
 		ptr = ptr[partLen:]
 	}
 	s.oLock.Unlock()
 
-	// To create back pressure, wait until sendQueue is empty or moving.
-	shouldReturn := false
+	// To create back pressure, wait until the send queue is empty or its head
+	// moved past the segments written here. The wait blocks on the send queue
+	// events instead of polling for the queue state. The queue can only drain
+	// while this writer waits for it, so it eventually becomes empty.
+	//
+	// The sendQueue.chanNotEmptyEvent must not be consumed, because it drives
+	// the output loop.
 	for {
-		select {
-		case <-s.sendQueue.chanEmptyEvent:
-			shouldReturn = true
-		// do not consume s.sendQueue.chanNotEmptyEvent,
-		// because it is used to drive the output loop.
-		default:
-		}
-		if shouldReturn {
-			break
-		}
-
 		seqAfterWrite, err := s.sendQueue.MinSeq()
 		if err != nil || int32(seqAfterWrite-seqBeforeWrite) > 0 {
 			break
-		} else {
-			time.Sleep(backPressureDelay) // add back pressure if send queue is not moving
+		}
+		select {
+		case <-s.closedChan:
+			return 0, io.EOF
+		case <-s.outputErr:
+			return 0, io.ErrClosedPipe
+		case <-timeC:
+			return 0, stderror.ErrTimeout
+		case <-s.sendQueue.chanEmptyEvent:
 		}
 	}
 
-	if s.isClient {
-		s.readDeadline.Store(time.Now().Add(serverRespTimeout).UnixMicro())
+	if s.clientHandshakePending() {
+		// Bound how long the client waits for the handshake response of the
+		// server. This is an internal deadline: it lives in its own field, so
+		// it never overwrites the deadline the application set, and Read
+		// ignores it once the handshake is done.
+		s.internalDeadline.Store(time.Now().Add(serverRespTimeout).UnixMicro())
 	}
 	return len(b), nil
 }
@@ -1127,6 +1439,18 @@ func (s *Session) runOutputOnceStream() {
 		return
 	}
 
+	// Bound how many segments this pass hands to the underlay by the receive
+	// window that the peer advertised. Draining the send queue faster than the
+	// peer reads pushes the data into the socket buffers of both sides, and the
+	// peer can only advertise its window in the data segments it sends, so the
+	// window is advisory. It therefore never stops the session: a pass sends at
+	// least streamSendWindowFloor segments, and the loop wakes itself up while
+	// the send queue is not drained, so the queue always empties whatever the
+	// window says.
+	window := s.streamSendWindow()
+	sent := 0
+	deferWindow := false
+
 	s.oLock.Lock()
 	for {
 		if s.shouldDeferNextStreamData() {
@@ -1137,12 +1461,23 @@ func (s *Session) runOutputOnceStream() {
 			s.oLock.Unlock()
 			break
 		}
+		if sent >= window {
+			// The window is exhausted. Send the rest of the queue in the next
+			// pass, which the wake up below schedules.
+			deferWindow = true
+			s.oLock.Unlock()
+			break
+		}
 		seg, ok := s.sendQueue.DeleteMin()
 		if !ok {
 			s.oLock.Unlock()
 			break
 		}
+		sent++
 		if err := s.output(seg, nil); err != nil {
+			// The segment left the send queue and nothing else references it,
+			// whether the write reached the peer or not.
+			releaseSendSegment(seg)
 			err = fmt.Errorf("output() failed: %w", err)
 			log.Debugf("%v %v", s, err)
 			if s.outputHasErr.CompareAndSwap(false, true) {
@@ -1152,6 +1487,10 @@ func (s *Session) runOutputOnceStream() {
 			s.closeWithError(err)
 			break
 		}
+		releaseSendSegment(seg)
+	}
+	if deferWindow {
+		s.wakeOutput()
 	}
 }
 
@@ -1199,6 +1538,9 @@ func (s *Session) runOutputOncePacket() {
 				iter.ackCount = 0
 				iter.txCount++
 				iter.txTime = time.Now().UnixMicro()
+				// txTimeoutBackOff is the only backoff multiplier: the RTO
+				// multiplier of the RTT stats stays at 1.0, so the first
+				// transmission is not backed off twice.
 				iter.txTimeout = mathext.Min(s.rttStat.RTO()*time.Duration(math.Pow(txTimeoutBackOff, float64(iter.txCount))), maxBackOffDuration)
 				if isDataAckProtocol(iter.metadata.Protocol()) {
 					das, _ := toDataAckStruct(iter.metadata)
@@ -1234,8 +1576,11 @@ func (s *Session) runOutputOncePacket() {
 		}
 	}
 
-	// Send new segments in sendQueue.
-	skipSendNewSegment := s.sendWindowSize() <= 0
+	// Send new segments in sendQueue. The send window is computed once and
+	// reused by the loop, because reading it acquires both the lock of the
+	// congestion algorithm and the lock of the window fields.
+	sendWindow := s.sendWindowSize()
+	skipSendNewSegment := sendWindow <= 0
 	if s.sendQueue.Len() > 0 && !skipSendNewSegment {
 		s.oLock.Lock()
 		for {
@@ -1249,7 +1594,7 @@ func (s *Session) runOutputOncePacket() {
 			}
 
 			seg, deleted := s.sendQueue.DeleteMinIf(func(iter *segment) bool {
-				return totalTransmissionCount < s.sendWindowSize()
+				return totalTransmissionCount < sendWindow
 			})
 			if !deleted {
 				s.oLock.Unlock()
@@ -1308,24 +1653,22 @@ func (s *Session) runOutputOncePacket() {
 		// received concurrently either is covered by this ACK or
 		// requests a new one.
 		s.ackOnDataRecv.Store(false)
-		baseStruct := baseStruct{}
+		// The ACK goes straight to the underlay, which copies it into its own
+		// send buffer, so its storage can return to the pool right after the
+		// write. The segment is never queued.
+		ackProtocol := ackServerToClient
 		if s.isClient {
-			baseStruct.protocol = uint8(ackClientToServer)
-		} else {
-			baseStruct.protocol = uint8(ackServerToClient)
+			ackProtocol = ackClientToServer
 		}
 		s.oLock.Lock()
-		ackSeg := &segment{
-			metadata: &dataAckStruct{
-				baseStruct: baseStruct,
-				sessionID:  s.id,
-				seq:        uint32(mathext.Max(0, int(s.nextSend.Load())-1)),
-				unAckSeq:   s.nextRecv.Load(),
-				windowSize: uint16(s.receiveWindowSize()),
-			},
-			transport: s.transportProtocol}
+		ackSeg := acquireSendSegment(ackProtocol, s.id, s.transportProtocol)
+		das := ackSeg.metadata.(*dataAckStruct)
+		das.seq = uint32(mathext.Max(0, int(s.nextSend.Load())-1))
+		das.unAckSeq = s.nextRecv.Load()
+		das.windowSize = uint16(s.receiveWindowSize())
 		err := s.output(ackSeg, s.RemoteAddr())
 		s.oLock.Unlock()
+		releaseSendSegment(ackSeg)
 		if err != nil {
 			err = fmt.Errorf("output() failed: %w", err)
 			log.Debugf("%v %v", s, err)
@@ -1419,14 +1762,19 @@ func (s *Session) input(seg *segment) error {
 		if current := s.block.Load(); current != nil {
 			prevUserName := (*current).BlockContext().UserName
 			nextUserName := seg.block.BlockContext().UserName
+			// The user name of a cipher block is authenticated by the AEAD tag
+			// that decrypted the segment, so a peer can't choose it: these
+			// checks only catch a defect of the local code. They close the
+			// session instead of crashing the whole process, because a session
+			// is the smallest unit a transport can dispose of.
 			if prevUserName == "" {
-				panic(fmt.Sprintf("%v cipher block user name is not set", s))
+				return fmt.Errorf("%v cipher block user name is not set", s)
 			}
 			if nextUserName == "" {
-				panic(fmt.Sprintf("%v cipher block user name is not set", seg))
+				return fmt.Errorf("%v cipher block user name is not set", seg)
 			}
 			if prevUserName != nextUserName {
-				panic(fmt.Sprintf("%v cipher block user name %q is different from %v cipher block user name %q", s, prevUserName, seg, nextUserName))
+				return fmt.Errorf("%v cipher block user name %q is different from %v cipher block user name %q", s, prevUserName, seg, nextUserName)
 			}
 		} else {
 			s.block.Store(&seg.block)
@@ -1439,14 +1787,14 @@ func (s *Session) input(seg *segment) error {
 			s.pendingServerUserPolicies = nil
 			if current := s.userPolicy.Load(); current != nil {
 				if current.Name() != seg.block.BlockContext().UserName {
-					panic(fmt.Sprintf("%v user policy name %q differs from cipher user name %q", s, current.Name(), seg.block.BlockContext().UserName))
+					return fmt.Errorf("%v user policy name %q differs from cipher user name %q", s, current.Name(), seg.block.BlockContext().UserName)
 				}
 				if policy.Name() != "" && current.Name() != policy.Name() {
-					panic(fmt.Sprintf("%v retained user policy name %q differs from segment user policy name %q", s, current.Name(), policy.Name()))
+					return fmt.Errorf("%v retained user policy name %q differs from segment user policy name %q", s, current.Name(), policy.Name())
 				}
 			} else if policy.Name() != "" {
 				if policy.Name() != seg.block.BlockContext().UserName {
-					panic(fmt.Sprintf("%v user policy name %q differs from cipher user name %q", s, policy.Name(), seg.block.BlockContext().UserName))
+					return fmt.Errorf("%v user policy name %q differs from cipher user name %q", s, policy.Name(), seg.block.BlockContext().UserName)
 				}
 				s.userPolicy.Store(&policy)
 			}
@@ -1481,6 +1829,20 @@ func (s *Session) input(seg *segment) error {
 func (s *Session) inputData(seg *segment) error {
 	switch s.transportProtocol {
 	case common.StreamTransport:
+		// A segment of the peer carries its receive window, and that is the
+		// only place where a stream session can learn it: the transport has no
+		// window message of its own. The output loop uses the window to pace
+		// what it sends.
+		if das, ok := seg.metadata.(*dataAckStruct); ok {
+			s.updateRemoteWindowSize(das)
+		}
+		// Close the session instead of buffering without bound when the
+		// application of this session stopped reading. The receive queue of
+		// the stream transport would otherwise grow to its capacity, because
+		// nothing else tells the peer to slow down.
+		if unread := s.unreadSegments(); unread >= maxUnreadSegments {
+			return fmt.Errorf("%v holds %d unread segments, limit is %d: %w", s, unread, maxUnreadSegments, errUnreadLimit)
+		}
 		// Deliver the segment directly to recvQueue.
 		if s.waitForRecvQueueSpace() {
 			if !s.recvQueue.Insert(seg) {
@@ -1500,10 +1862,18 @@ func (s *Session) inputData(seg *segment) error {
 				if !deleted {
 					break
 				}
-				s.rttStat.UpdateRTT(time.Duration(time.Now().UnixMicro()-seg2.txTime) * time.Microsecond)
-				s.cubicSendAlgorithm.OnAck()
+				// Karn's algorithm: only a segment that was transmitted once
+				// gives an unambiguous RTT sample, because a retransmission
+				// overwrites the time it was sent.
+				if seg2.txCount == 1 {
+					s.rttStat.UpdateRTT(time.Duration(time.Now().UnixMicro()-seg2.txTime) * time.Microsecond)
+				}
+				s.cubicSendAlgorithm.OnAck(s.rttStat.SmoothedRTT())
+				// The send buffer released the segment, and nothing else
+				// references it, so its storage goes back to the pool.
+				releaseSendSegment(seg2)
 			}
-			s.remoteWindowSize.Store(uint32(das.windowSize))
+			s.updateRemoteWindowSize(das)
 		}
 		if s.sendQueue.Len() > 0 {
 			s.wakeOutput()
@@ -1556,10 +1926,18 @@ func (s *Session) inputAck(seg *segment) error {
 			if !deleted {
 				break
 			}
-			s.rttStat.UpdateRTT(time.Duration(time.Now().UnixMicro()-seg2.txTime) * time.Microsecond)
-			s.cubicSendAlgorithm.OnAck()
+			// Karn's algorithm: only a segment that was transmitted once gives
+			// an unambiguous RTT sample, because a retransmission overwrites
+			// the time it was sent.
+			if seg2.txCount == 1 {
+				s.rttStat.UpdateRTT(time.Duration(time.Now().UnixMicro()-seg2.txTime) * time.Microsecond)
+			}
+			s.cubicSendAlgorithm.OnAck(s.rttStat.SmoothedRTT())
+			// The send buffer released the segment, and nothing else
+			// references it, so its storage goes back to the pool.
+			releaseSendSegment(seg2)
 		}
-		s.remoteWindowSize.Store(uint32(das.windowSize))
+		s.updateRemoteWindowSize(das)
 
 		// Update acknowledge count.
 		s.sendBuf.Ascend(func(iter *segment) bool {
@@ -1636,8 +2014,6 @@ func (s *Session) output(seg *segment, remoteAddr net.Addr) error {
 	default:
 		return fmt.Errorf("unsupported transport protocol %v", s.transportProtocol)
 	}
-	seq, _ := seg.Seq()
-	s.lastSend.Store(seq)
 	s.lastTXTime.Store(time.Now().UnixMicro())
 	return nil
 }
@@ -1648,74 +2024,102 @@ func (s *Session) closeWithError(err error) error {
 		return nil
 	}
 
-	var gracefulClose bool
 	if err == nil {
 		log.Debugf("Closing %v", s)
-		gracefulClose = true
 	} else {
 		log.Debugf("Closing %v with error %v", s, err)
 	}
-	if (s.isState(sessionAttached) || s.isState(sessionEstablished)) && !s.clientHandshakePending() {
-		// Send closeSessionRequest, but don't wait for closeSessionResponse,
-		// because the underlay connection may be already broken.
-		//
-		// A client whose handshake is still pending doesn't send a close
-		// session request, because the server may have already switched to
-		// session keys that this client can't use yet. The peer cleans the
-		// session up when the transport is closed or the session is idle.
-		s.oLock.Lock()
-		closeRequestSeq := s.nextSend.Load()
-		seg := &segment{
-			metadata: &sessionStruct{
-				baseStruct: baseStruct{
-					protocol: uint8(closeSessionRequest),
-				},
-				sessionID:  s.id,
-				seq:        closeRequestSeq,
-				statusCode: uint8(s.status),
-			},
-			transport: s.transportProtocol,
-		}
-		s.nextSend.Add(1)
 
-		var gracefulCloseSuccess bool
-		if gracefulClose {
-			if !s.sendQueue.Insert(seg) {
-				s.oLock.Unlock()
-			} else {
-				s.oLock.Unlock()
-				// Wait for the output loop to send out the close session
-				// request. The wait must be short, because the connection may
-				// be already broken.
-				deadline := time.Now().Add(gracefulCloseWait)
-				for time.Now().Before(deadline) {
-					if int32(s.lastSend.Load()-closeRequestSeq) >= 0 {
-						gracefulCloseSuccess = true
-						break
-					}
-					time.Sleep(gracefulClosePollInterval)
-				}
-			}
-		} else {
-			s.oLock.Unlock()
-		}
-		if !gracefulCloseSuccess {
-			s.oLock.Lock()
-			if err := s.output(seg, s.RemoteAddr()); err != nil {
-				log.Debugf("output() failed: %v", err)
-			}
-			s.oLock.Unlock()
-		}
-	}
+	// The close session request is only useful for a session that reached the
+	// data plane. A client whose handshake is still pending doesn't send one,
+	// because the server may have already switched to session keys that this
+	// client can't use yet. The peer cleans the session up when the transport
+	// is closed or the session is idle. The decision is taken before the state
+	// is advanced below.
+	sendCloseRequest := (s.isState(sessionAttached) || s.isState(sessionEstablished)) && !s.clientHandshakePending()
 
+	// Mark the session closed and release everything that waits on it before
+	// doing any I/O. A previous implementation sent the close session request
+	// first and closed closedChan last, so a second Close() returned nil while
+	// the session was still open, and a peer that had stopped reading could
+	// block Close() forever.
+	//
 	// Don't clear receive buf and queue, because read is allowed after
 	// the session is closed.
-	s.sendQueue.DeleteAll()
-	s.sendBuf.DeleteAll()
 	s.forwardStateTo(sessionClosed)
 	close(s.closedChan)
+	// Return the storage of the segments of the send path to the pool before
+	// the queues are cleared. The segments were removed from the queues here,
+	// so no other goroutine can observe them any more. This runs at most once,
+	// because the compare and swap above accepted this call.
+	s.sendQueue.Ascend(func(seg *segment) bool {
+		releaseSendSegment(seg)
+		return true
+	})
+	s.sendBuf.Ascend(func(seg *segment) bool {
+		releaseSendSegment(seg)
+		return true
+	})
+	s.sendQueue.DeleteAll()
+	s.sendBuf.DeleteAll()
+
+	if !sendCloseRequest {
+		log.Debugf("Closed %v", s)
+		return nil
+	}
+
+	// Send closeSessionRequest, but don't wait for closeSessionResponse,
+	// because the underlay connection may be already broken.
+	seg := &segment{
+		metadata: &sessionStruct{
+			baseStruct: baseStruct{
+				protocol: uint8(closeSessionRequest),
+			},
+			sessionID:  s.id,
+			seq:        s.nextSend.Load(),
+			statusCode: uint8(s.status),
+		},
+		transport: s.transportProtocol,
+	}
+	s.nextSend.Add(1)
+
+	// The request is best effort: the session doesn't wait for the peer to
+	// receive it, and it is sent from its own goroutine because writing to a
+	// peer that stopped reading can block until the connection is closed.
+	go s.sendCloseSessionRequest(seg)
+
 	log.Debugf("Closed %v", s)
 	return nil
+}
+
+// sendCloseSessionRequest sends the close session request of a session that has
+// already been marked as closed. It is best effort and runs in its own
+// goroutine, so a peer that stopped reading can't block Close().
+func (s *Session) sendCloseSessionRequest(seg *segment) {
+	s.oLock.Lock()
+	defer s.oLock.Unlock()
+	if err := s.output(seg, s.RemoteAddr()); err != nil {
+		log.Debugf("%v failed to send the close session request: %v", s, err)
+	}
+}
+
+// updateRemoteWindowSize applies the receive window that the peer advertised in
+// das to this session.
+//
+// A reordered or duplicated segment can carry an older window than the one
+// already applied, and applying it would shrink the window and stall the
+// session even though the peer has room. Only an update whose unAckSeq is not
+// older than the newest applied one is accepted.
+func (s *Session) updateRemoteWindowSize(das *dataAckStruct) {
+	if s.remoteWindowUnAckSeqValid.Load() && int32(das.unAckSeq-s.remoteWindowUnAckSeq.Load()) < 0 {
+		if log.IsLevelEnabled(log.TraceLevel) {
+			log.Tracef("%v ignoring stale remote window %d from unAckSeq %d, newest is %d", s, das.windowSize, das.unAckSeq, s.remoteWindowUnAckSeq.Load())
+		}
+		return
+	}
+	s.remoteWindowUnAckSeq.Store(das.unAckSeq)
+	s.remoteWindowUnAckSeqValid.Store(true)
+	s.remoteWindowSize.Store(uint32(das.windowSize))
 }
 
 // sendWindowSize determines how many more packets this session can send.
@@ -1726,6 +2130,20 @@ func (s *Session) sendWindowSize() int {
 // receiveWindowSize determines how many more packets this session can receive.
 func (s *Session) receiveWindowSize() int {
 	return mathext.Max(0, segmentTreeCapacity-s.recvBuf.Len()-s.recvQueue.Len())
+}
+
+// streamSendWindow determines how many segments the stream output loop may send
+// in one pass. It is the receive window that the peer advertised, never less
+// than streamSendWindowFloor, because a stale window must not be able to stop
+// the session.
+func (s *Session) streamSendWindow() int {
+	return mathext.Max(streamSendWindowFloor, int(s.remoteWindowSize.Load()))
+}
+
+// unreadSegments returns the number of segments that this session holds for the
+// application without the application having read them.
+func (s *Session) unreadSegments() int {
+	return s.recvBuf.Len() + s.recvQueue.Len()
 }
 
 // waitForRecvQueueSpace returns true when the recv queue has empty space.
@@ -1778,7 +2196,7 @@ func (s *Session) moveRecvBufToRecvQueue() error {
 		// Update remote window size.
 		das, ok := seg.metadata.(*dataAckStruct)
 		if ok {
-			s.remoteWindowSize.Store(uint32(das.windowSize))
+			s.updateRemoteWindowSize(das)
 		}
 	}
 }

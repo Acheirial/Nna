@@ -42,11 +42,20 @@ type user struct {
 	id         uint32
 	name       string
 	credential [sha256.Size]byte
+	// pepper is the keyed user hint pepper of this user, precomputed from the
+	// name and the credential by HintPepper. It is immutable after
+	// publication, so the hint of an incoming packet can be checked without
+	// deriving it again.
+	pepper []byte
 	// suites is the cipher suite order that discovery tries for this user: the
 	// suites the server allows first, followed by the remaining supported
 	// suites. It also gates the single suite decryptor built from a cached
 	// hint, so a hint for a suite outside the allowed set stays usable.
-	suites    []cipher.Suite
+	suites []cipher.Suite
+	// decryptor accepts both key derivation variants of the envelope, see
+	// cipher.NewCompatStatelessDecryptor, so that the handshake request of an
+	// old client is still discoverable. The block it returns is the variant of
+	// the client, and it is the block used to protect the handshake response.
 	decryptor *cipher.StatelessDecryptor
 	policy    Policy
 
@@ -74,6 +83,10 @@ func (p Policy) Name() string { return p.name }
 type state struct {
 	users []user
 	cache *sourceUserCache
+	// failCache remembers recent (source, hint) discovery failures of this
+	// generation. It is retired together with cache when a new generation is
+	// published, so a user added by a reload is immediately discoverable.
+	failCache *sourceFailCache
 }
 
 // Registry owns the current server users and their source decryption cache.
@@ -245,6 +258,7 @@ func (r *Registry) SetUsers(users map[string]*appctlpb.User) {
 	old := r.users.Swap(state)
 	if old != nil {
 		old.cache.retire()
+		old.failCache.retire()
 	}
 }
 
@@ -307,6 +321,11 @@ func (r *Registry) HasUsers() bool {
 // Discover decrypts metadata with the current user registry. When
 // requireCurrent is true, discovery retries if users are reloaded before the
 // result is returned.
+//
+// When the registry requires a user hint, a source address that recently
+// failed discovery with the same hint is rejected before the trial
+// decryption loop; a successful discovery clears the recorded failure. The
+// negative cache is never consulted when hints are optional.
 func (r *Registry) Discover(encryptedMetadata []byte, source Source, requireCurrent bool) (cipher.BlockCipher, []byte, Authentication, error) {
 	result, err := discoverUser(&r.users, &r.hintMandatory, encryptedMetadata, source, requireCurrent, nil)
 	if err != nil {
@@ -402,7 +421,7 @@ func buildState(users map[string]*appctlpb.User, allowedSuites []cipher.Suite) *
 			log.Warnf("Skipping server user %q: %v", input.name, err)
 			continue
 		}
-		decryptor, err := cipher.NewStatelessDecryptor(suites, credential[:])
+		decryptor, err := cipher.NewCompatStatelessDecryptor(suites, credential[:])
 		if err != nil {
 			log.Warnf("Skipping server user %q: failed to prepare credential", input.name)
 			continue
@@ -411,6 +430,7 @@ func buildState(users map[string]*appctlpb.User, allowedSuites []cipher.Suite) *
 			id:         uint32(len(compiled) + 1),
 			name:       input.name,
 			credential: credential,
+			pepper:     cipher.HintPepper(input.name, string(credential[:])),
 			suites:     suites,
 			decryptor:  decryptor,
 			policy:     buildPolicy(input.user),
@@ -418,8 +438,9 @@ func buildState(users map[string]*appctlpb.User, allowedSuites []cipher.Suite) *
 	}
 
 	return &state{
-		users: compiled,
-		cache: newSourceUserCache(),
+		users:     compiled,
+		cache:     newSourceUserCache(),
+		failCache: newSourceFailCache(),
 	}
 }
 
@@ -493,6 +514,20 @@ func discoverUser(
 			mandatory = hintMandatory.Load()
 		}
 
+		// The negative cache is only consulted while a user hint is
+		// mandatory. With optional hints, a failing hint may simply mean that
+		// the packet carried no hint, so suppressing the source would reject
+		// a legitimate fallback user.
+		var failCache *sourceFailCache
+		var hint [cipher.NonceSuffixLenForUserHint]byte
+		if mandatory && source.valid {
+			hint = userHintFromMetadata(encryptedMetadata)
+			failCache = state.failCache
+			if failCache.miss(source.key, hint) {
+				return discoveryResult{}, fmt.Errorf("user hint is suppressed by the source failure cache")
+			}
+		}
+
 		result := tryState(state, encryptedMetadata, source, mandatory)
 		if afterAttempt != nil {
 			afterAttempt(state)
@@ -501,17 +536,66 @@ func discoverUser(
 			continue
 		}
 		if result.block == nil {
+			if failCache != nil {
+				failCache.recordFailure(source.key, hint)
+			}
 			return discoveryResult{}, fmt.Errorf("cipher.TryDecrypt() failed for all users")
+		}
+		if failCache != nil {
+			failCache.clear(source.key)
 		}
 		result.generation = state
 		return result, nil
 	}
 }
 
+// userHintFromMetadata returns the 4 byte user hint embedded at the end of the
+// wire nonce. The caller must ensure that the metadata is at least as long as
+// a nonce; discoverUser checks this before calling the function.
+func userHintFromMetadata(encryptedMetadata []byte) [cipher.NonceSuffixLenForUserHint]byte {
+	var hint [cipher.NonceSuffixLenForUserHint]byte
+	copy(hint[:], encryptedMetadata[cipher.DefaultNonceSize-cipher.NonceSuffixLenForUserHint:cipher.DefaultNonceSize])
+	return hint
+}
+
+// hintMatches reports whether the user hint embedded in the nonce belongs to
+// this user.
+//
+// A user accepts the keyed hint of protocol v3, which requires the credential
+// shared by the client and the server, as well as the legacy hint of protocol
+// v2, which only requires the user name, so that a client that predates the
+// keyed hint stays discoverable. Accepting the legacy hint is what makes the
+// name of a registered user observable to anyone who knows that name; it is
+// kept only while old clients exist.
+//
+// A matching hint never authenticates anything: it only decides which users are
+// worth an AEAD trial, see tryState.
+func (u *user) hintMatches(nonce []byte) bool {
+	if cipher.CheckUserFromHint([]byte(u.name), nonce) {
+		return true
+	}
+	return cipher.CheckUserFromHintV3(u.pepper, []byte(u.name), nonce)
+}
+
 // tryState applies the identity-preserving candidate order:
 // cached hint matches, remaining registry hint matches, cached optional
 // fallback, then remaining registry optional fallback. Each user is tried at
 // most once even when it appears in more than one phase.
+//
+// A coarse username-existence timing side channel remains as long as the
+// registry accepts the legacy hint of protocol v2: a hint that matches a
+// registered user name triggers the AEAD trial decryption of that user (up to
+// every supported cipher suite), while a hint that matches nothing costs only
+// the SHA-256 filter of every user and no AEAD work at all. The keyed hint of
+// protocol v3 closes the channel for a hint taken from a current client,
+// because such a hint cannot be built without the credential of the user, but
+// an attacker is free to send a legacy hint of its own, so the channel is only
+// gone once the legacy hint is dropped. With optional hints the difference is
+// hidden by the unconditional fallback trial; with mandatory hints it is
+// observable. The source failure cache bounds how often one source can repeat
+// the measurement with a repeated packet, but it does not remove the channel.
+// Removing it needs constant-work hashing for unmatched hints, or the removal
+// of the legacy hint from hintMatches.
 func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory bool) discoveryResult {
 	nonce := encryptedMeta[:cipher.DefaultNonceSize]
 	var trialPlaintext [metadataLength]byte
@@ -529,7 +613,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 	// without scanning the complete registry.
 	for i := 0; i < cachedCount; i++ {
 		user := userByID(state, cachedIDs[i].id)
-		if user == nil || userIDWasAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id) || !cipher.CheckUserFromHint([]byte(user.name), nonce) {
+		if user == nil || userIDWasAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id) || !user.hintMatches(nonce) {
 			continue
 		}
 		attemptedCachedCount = markUserIDAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id)
@@ -545,7 +629,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 	// Reaching this point enters a complete-registry phase.
 	for i := range state.users {
 		user := &state.users[i]
-		if userIDWasAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id) || !cipher.CheckUserFromHint([]byte(user.name), nonce) {
+		if userIDWasAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id) || !user.hintMatches(nonce) {
 			continue
 		}
 		attempts++
@@ -565,7 +649,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 			continue
 		}
 		// Hint matches were already tried in one of the two preceding phases.
-		if cipher.CheckUserFromHint([]byte(user.name), nonce) {
+		if user.hintMatches(nonce) {
 			continue
 		}
 		attemptedCachedCount = markUserIDAttempted(&attemptedCachedIDs, attemptedCachedCount, user.id)
@@ -583,7 +667,7 @@ func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory b
 		}
 		// Every hint match was tried during the registry hint phase. Skipping
 		// them here avoids a second cipher trial without an unbounded ID set.
-		if cipher.CheckUserFromHint([]byte(user.name), nonce) {
+		if user.hintMatches(nonce) {
 			continue
 		}
 		attempts++
@@ -633,7 +717,7 @@ func tryUser(user *user, encryptedMeta, dst []byte, origin matchOrigin, suiteHin
 				block:             block,
 				decryptedMetadata: plaintext,
 				userID:            user.id,
-				userContext:       cipher.BlockContext{UserName: user.name},
+				userContext:       cipher.BlockContext{UserName: user.name, Pepper: user.pepper},
 				suite:             suiteHint,
 				policy:            user.policy,
 				origin:            origin,
@@ -648,7 +732,7 @@ func tryUser(user *user, encryptedMeta, dst []byte, origin matchOrigin, suiteHin
 		block:             block,
 		decryptedMetadata: plaintext,
 		userID:            user.id,
-		userContext:       cipher.BlockContext{UserName: user.name},
+		userContext:       cipher.BlockContext{UserName: user.name, Pepper: user.pepper},
 		suite:             block.Suite(),
 		policy:            user.policy,
 		origin:            origin,
@@ -677,16 +761,18 @@ func (u *user) trySuite(suite cipher.Suite, encryptedMeta, dst []byte) (cipher.B
 }
 
 // suiteDecryptor returns the decryptor of a single cipher suite of this user,
-// building it on demand.
+// building it on demand. Like the decryptor of the whole user, it accepts both
+// key derivation variants, so a cached suite hint doesn't switch a legacy
+// client to the v3 variant.
 func (u *user) suiteDecryptor(suite cipher.Suite) (*cipher.StatelessDecryptor, error) {
 	u.suiteMu.Lock()
 	defer u.suiteMu.Unlock()
 	if u.preferred != nil && u.preferredSuite == suite {
 		return u.preferred, nil
 	}
-	decryptor, err := cipher.NewStatelessDecryptor([]cipher.Suite{suite}, u.credential[:])
+	decryptor, err := cipher.NewCompatStatelessDecryptor([]cipher.Suite{suite}, u.credential[:])
 	if err != nil {
-		return nil, fmt.Errorf("cipher.NewStatelessDecryptor() failed: %w", err)
+		return nil, fmt.Errorf("cipher.NewCompatStatelessDecryptor() failed: %w", err)
 	}
 	u.preferredSuite = suite
 	u.preferred = decryptor
