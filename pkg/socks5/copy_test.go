@@ -130,14 +130,24 @@ func TestBidiCopySocks5RelaysPayload(t *testing.T) {
 	}
 }
 
-// TestBidiCopyUDPRelaysDatagram verifies that the pooled copy buffers don't
-// change the datagrams relayed between the UDP endpoint of the user and the
-// proxy tunnel.
-func TestBidiCopyUDPRelaysDatagram(t *testing.T) {
+// udpTestRelay is a BidiCopyUDP() relay under test: the UDP endpoint of the
+// user and the peer of the tunnel which is connected to the relay.
+type udpTestRelay struct {
+	t          *testing.T
+	clientConn *net.UDPConn
+	tunnelPeer net.Conn
+	done       chan error
+}
+
+// startUDPRelay starts a BidiCopyUDP() relay between a UDP endpoint and a
+// buffered pipe which plays the role of the tunnel.
+func startUDPRelay(t *testing.T) *udpTestRelay {
+	t.Helper()
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("net.ListenUDP() failed: %v", err)
 	}
+	t.Cleanup(func() { udpConn.Close() })
 	remoteAddr, ok := udpConn.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatalf("udpConn.LocalAddr() = %v, want *net.UDPAddr", udpConn.LocalAddr())
@@ -146,65 +156,193 @@ func TestBidiCopyUDPRelaysDatagram(t *testing.T) {
 	if err != nil {
 		t.Fatalf("net.DialUDP() failed: %v", err)
 	}
-	defer clientConn.Close()
+	t.Cleanup(func() { clientConn.Close() })
 	if err := clientConn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("SetDeadline() failed: %v", err)
 	}
 
 	tunnelConn, tunnelPeer := testtool.BufPipe()
-	defer tunnelPeer.Close()
+	t.Cleanup(func() { tunnelPeer.Close() })
 	if err := tunnelPeer.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("SetDeadline() failed: %v", err)
 	}
 
-	done := make(chan error, 1)
+	r := &udpTestRelay{
+		t:          t,
+		clientConn: clientConn,
+		tunnelPeer: tunnelPeer,
+		done:       make(chan error, 1),
+	}
 	go func() {
-		done <- BidiCopyUDP(udpConn, apicommon.NewPacketOverStreamTunnel(tunnelConn))
+		r.done <- BidiCopyUDP(udpConn, apicommon.NewPacketOverStreamTunnel(tunnelConn))
 	}()
+	return r
+}
 
-	// user -> tunnel
-	toTunnel := bytes.Repeat([]byte("udp-payload-"), 100)
-	if _, err := clientConn.Write(toTunnel); err != nil {
+// readTunnelPacket reads the next packet of the tunnel and returns its content.
+func (r *udpTestRelay) readTunnelPacket() []byte {
+	r.t.Helper()
+	header := make([]byte, 3)
+	if _, err := io.ReadFull(r.tunnelPeer, header); err != nil {
+		r.t.Fatalf("read the tunnel packet header failed: %v", err)
+	}
+	if header[0] != 0x00 {
+		r.t.Fatalf("the tunnel packet prefix is 0x%x, want 0x00", header[0])
+	}
+	length := int(binary.BigEndian.Uint16(header[1:3]))
+	body := make([]byte, length+1)
+	if _, err := io.ReadFull(r.tunnelPeer, body); err != nil {
+		r.t.Fatalf("read the tunnel packet body failed: %v", err)
+	}
+	if body[length] != 0xff {
+		r.t.Fatalf("the tunnel packet suffix is 0x%x, want 0xff", body[length])
+	}
+	return body[:length]
+}
+
+// writeTunnelPacket writes one packet to the tunnel.
+func (r *udpTestRelay) writeTunnelPacket(payload []byte) {
+	r.t.Helper()
+	packet := make([]byte, 4+len(payload))
+	packet[0] = 0x00
+	binary.BigEndian.PutUint16(packet[1:3], uint16(len(payload)))
+	copy(packet[3:], payload)
+	packet[len(packet)-1] = 0xff
+	if _, err := r.tunnelPeer.Write(packet); err != nil {
+		r.t.Fatalf("write to the tunnel failed: %v", err)
+	}
+}
+
+// readUDPDatagram reads the next datagram of the user UDP endpoint.
+func (r *udpTestRelay) readUDPDatagram() []byte {
+	r.t.Helper()
+	buf := make([]byte, maxUDPDatagramSize)
+	n, err := r.clientConn.Read(buf)
+	if err != nil {
+		r.t.Fatalf("read from the UDP endpoint failed: %v", err)
+	}
+	return buf[:n]
+}
+
+// stop closes the tunnel and waits for the relay to stop.
+func (r *udpTestRelay) stop() {
+	r.t.Helper()
+	r.tunnelPeer.Close()
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		r.t.Fatalf("BidiCopyUDP() did not stop")
+	}
+}
+
+// TestBidiCopyUDPRelaysDatagram verifies that a datagram which fits the small
+// copy buffer of a UDP relay is relayed without any change in both directions.
+func TestBidiCopyUDPRelaysDatagram(t *testing.T) {
+	for _, size := range []int{1, 4, udpCopyBufferSize / 2, udpCopyBufferSize - 1} {
+		t.Run(fmt.Sprintf("%d bytes", size), func(t *testing.T) {
+			r := startUDPRelay(t)
+
+			// user -> tunnel
+			toTunnel := bytes.Repeat([]byte{'u'}, size)
+			if _, err := r.clientConn.Write(toTunnel); err != nil {
+				t.Fatalf("write to the UDP endpoint failed: %v", err)
+			}
+			if got := r.readTunnelPacket(); !bytes.Equal(got, toTunnel) {
+				t.Fatalf("the tunnel received %d bytes, want the %d bytes of the datagram", len(got), size)
+			}
+
+			// tunnel -> user
+			toUDP := bytes.Repeat([]byte{'d'}, size)
+			r.writeTunnelPacket(toUDP)
+			if got := r.readUDPDatagram(); !bytes.Equal(got, toUDP) {
+				t.Fatalf("the UDP endpoint received %d bytes, want the %d bytes of the tunnel packet", len(got), size)
+			}
+
+			r.stop()
+		})
+	}
+}
+
+// TestBidiCopyUDPGrowsCopyBuffer verifies that a datagram which is larger than
+// the initial copy buffer of the relay grows the buffer and is copied whole,
+// and that the datagram which triggered the growth is dropped rather than
+// copied truncated.
+func TestBidiCopyUDPGrowsCopyBuffer(t *testing.T) {
+	r := startUDPRelay(t)
+
+	// The first datagram fills the copy buffer of the relay: the relay can't
+	// tell whether it was truncated, so it drops the datagram and doubles the
+	// buffer.
+	size := udpCopyBufferSize + 512
+	first := bytes.Repeat([]byte{'a'}, size)
+	if _, err := r.clientConn.Write(first); err != nil {
+		t.Fatalf("write the first datagram failed: %v", err)
+	}
+	second := bytes.Repeat([]byte{'b'}, size)
+	if _, err := r.clientConn.Write(second); err != nil {
+		t.Fatalf("write the second datagram failed: %v", err)
+	}
+
+	// The first packet of the tunnel is the second datagram: it fits the grown
+	// buffer. The dropped datagram must not appear as a truncated packet.
+	if got := r.readTunnelPacket(); !bytes.Equal(got, second) {
+		t.Fatalf("the tunnel received %d bytes, want the %d bytes of the second datagram", len(got), size)
+	}
+
+	// The buffer stays large: the next datagram of that size is copied too.
+	third := bytes.Repeat([]byte{'c'}, size)
+	if _, err := r.clientConn.Write(third); err != nil {
+		t.Fatalf("write the third datagram failed: %v", err)
+	}
+	if got := r.readTunnelPacket(); !bytes.Equal(got, third) {
+		t.Fatalf("the tunnel received %d bytes, want the %d bytes of the third datagram", len(got), size)
+	}
+
+	r.stop()
+}
+
+// TestBidiCopyUDPRelaysLargeTunnelPacket verifies that a packet of the tunnel
+// which is larger than the initial copy buffer of the relay reaches the UDP
+// endpoint whole.
+func TestBidiCopyUDPRelaysLargeTunnelPacket(t *testing.T) {
+	r := startUDPRelay(t)
+
+	// The UDP endpoint of the relay is learned from the first datagram.
+	if _, err := r.clientConn.Write([]byte("connect")); err != nil {
 		t.Fatalf("write to the UDP endpoint failed: %v", err)
 	}
-	frame := make([]byte, 4+len(toTunnel))
-	if _, err := io.ReadFull(tunnelPeer, frame); err != nil {
-		t.Fatalf("read the tunnel packet failed: %v", err)
-	}
-	if frame[0] != 0x00 || frame[len(frame)-1] != 0xff {
-		t.Fatalf("the tunnel packet is not delimited by 0x00 and 0xff.")
-	}
-	if got := int(binary.BigEndian.Uint16(frame[1:3])); got != len(toTunnel) {
-		t.Fatalf("the tunnel packet length is %d, want %d.", got, len(toTunnel))
-	}
-	if !bytes.Equal(frame[3:3+len(toTunnel)], toTunnel) {
-		t.Fatalf("the tunnel received a different payload.")
+	_ = r.readTunnelPacket()
+
+	// The relay reads the packet with a small buffer, then with a buffer which
+	// is large enough to hold the whole packet.
+	size := udpCopyBufferSize * 3
+	toUDP := bytes.Repeat([]byte{'d'}, size)
+	r.writeTunnelPacket(toUDP)
+	if got := r.readUDPDatagram(); !bytes.Equal(got, toUDP) {
+		t.Fatalf("the UDP endpoint received %d bytes, want the %d bytes of the tunnel packet", len(got), size)
 	}
 
-	// tunnel -> user
-	toUDP := bytes.Repeat([]byte("reply-payload"), 100)
-	reply := make([]byte, 4+len(toUDP))
-	reply[0] = 0x00
-	binary.BigEndian.PutUint16(reply[1:3], uint16(len(toUDP)))
-	copy(reply[3:], toUDP)
-	reply[len(reply)-1] = 0xff
-	if _, err := tunnelPeer.Write(reply); err != nil {
-		t.Fatalf("write to the tunnel failed: %v", err)
-	}
-	got := make([]byte, copyBufferSize)
-	n, err := clientConn.Read(got)
-	if err != nil {
-		t.Fatalf("read from the UDP endpoint failed: %v", err)
-	}
-	if !bytes.Equal(got[:n], toUDP) {
-		t.Fatalf("the UDP endpoint received %d bytes, want %d bytes of the tunnel payload.", n, len(toUDP))
-	}
+	r.stop()
+}
 
-	// Closing the tunnel stops both copy directions.
-	tunnelPeer.Close()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("BidiCopyUDP() did not stop")
+// TestGrowUDPCopyBuffer verifies the size of the buffer returned by
+// growUDPCopyBuffer().
+func TestGrowUDPCopyBuffer(t *testing.T) {
+	tests := []struct {
+		name string
+		size int
+		want int
+	}{
+		{name: "initial buffer", size: udpCopyBufferSize, want: 2 * udpCopyBufferSize},
+		{name: "below the maximum", size: maxUDPDatagramSize / 2, want: maxUDPDatagramSize},
+		{name: "at the maximum", size: maxUDPDatagramSize, want: maxUDPDatagramSize},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := growUDPCopyBuffer(make([]byte, test.size))
+			if len(got) != test.want {
+				t.Errorf("growUDPCopyBuffer(%d) returns a buffer of %d bytes, want %d", test.size, len(got), test.want)
+			}
+		})
 	}
 }

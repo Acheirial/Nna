@@ -51,7 +51,9 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 	go func() {
 		defer wg.Done()
 		defer udpConn.Close()
-		buf := make([]byte, 1<<16)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		buf := *bufPtr
 		var n int
 		var err error
 		for {
@@ -91,7 +93,9 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 	// Packets from mieru proxy server -> socks5 proxy client.
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 1<<16)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		buf := *bufPtr
 		var n int
 		var addr *net.UDPAddr
 		var err error
@@ -159,7 +163,9 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 	go func() {
 		defer wg.Done()
 		defer udpConn.Close()
-		buf := make([]byte, 1<<16)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		buf := *bufPtr
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
@@ -176,7 +182,9 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 	// Packets from socks5 proxy server -> mieru proxy client.
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 1<<16)
+		bufPtr := getCopyBuffer()
+		defer putCopyBuffer(bufPtr)
+		buf := *bufPtr
 		for {
 			n, addr, err := udpConn.ReadFromUDP(buf)
 			if err != nil {
@@ -296,7 +304,9 @@ func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, req *m
 	// it is set, datagrams from other IP addresses are rejected.
 	clientIP := associateClientIP(req)
 	targetAddrs := newUDPAddrTable()
-	buf := make([]byte, 1<<16)
+	bufPtr := getCopyBuffer()
+	defer putCopyBuffer(bufPtr)
+	buf := *bufPtr
 	for {
 		n, addr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {

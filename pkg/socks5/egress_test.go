@@ -19,10 +19,12 @@ import (
 	"context"
 	crand "crypto/rand"
 	mrand "math/rand"
+	"net"
 	"testing"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
 	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/enfein/mieru/v3/apis/model"
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/egress"
 	"google.golang.org/protobuf/proto"
@@ -301,5 +303,170 @@ func TestMatchEgressRule(t *testing.T) {
 				t.Errorf("expected Proxy to be non-nil, but got nil")
 			}
 		})
+	}
+}
+
+// TestCheckDestinationIP checks the destination policy that is applied to the
+// IP address of a SOCKS5 request, including the address that a domain name
+// resolves to.
+func TestCheckDestinationIP(t *testing.T) {
+	users := map[string]*appctlpb.User{
+		"plain": {
+			Name: proto.String("plain"),
+		},
+		"private": {
+			Name:           proto.String("private"),
+			AllowPrivateIP: proto.Bool(true),
+		},
+		"loopback": {
+			Name:            proto.String("loopback"),
+			AllowLoopbackIP: proto.Bool(true),
+		},
+	}
+	tests := []struct {
+		name              string
+		user              string
+		ip                net.IP
+		allowLoopbackDest bool
+		wantErr           bool
+	}{
+		{
+			name: "public IP is allowed",
+			user: "plain",
+			ip:   net.ParseIP("8.8.8.8"),
+		},
+		{
+			// An unknown user is not allowed to access a non-public address.
+			name:    "private IP of an unknown user is rejected",
+			user:    "unknown",
+			ip:      net.ParseIP("10.0.0.5"),
+			wantErr: true,
+		},
+		{
+			name:    "private IP without allowPrivateIP is rejected",
+			user:    "plain",
+			ip:      net.ParseIP("10.0.0.5"),
+			wantErr: true,
+		},
+		{
+			name: "private IP with allowPrivateIP is allowed",
+			user: "private",
+			ip:   net.ParseIP("10.0.0.5"),
+		},
+		{
+			name:    "cloud metadata IP is rejected",
+			user:    "private",
+			ip:      net.ParseIP("169.254.169.254"),
+			wantErr: true,
+		},
+		{
+			name:    "CGNAT IP is rejected",
+			user:    "private",
+			ip:      net.ParseIP("100.64.0.1"),
+			wantErr: true,
+		},
+		{
+			name:    "loopback IP without allowLoopbackIP is rejected",
+			user:    "plain",
+			ip:      net.ParseIP("127.0.0.1"),
+			wantErr: true,
+		},
+		{
+			name: "loopback IP with allowLoopbackIP is allowed",
+			user: "loopback",
+			ip:   net.ParseIP("127.0.0.1"),
+		},
+		{
+			name:              "loopback IP with allowLoopbackDestination is allowed",
+			user:              "plain",
+			ip:                net.ParseIP("127.0.0.1"),
+			allowLoopbackDest: true,
+		},
+		{
+			name:    "unspecified IP is rejected",
+			user:    "plain",
+			ip:      net.IPv4(0, 0, 0, 0),
+			wantErr: true,
+		},
+		{
+			name:    "unknown IP is rejected",
+			user:    "plain",
+			ip:      nil,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{
+				config: &Config{
+					Users:                    users,
+					AllowLoopbackDestination: tt.allowLoopbackDest,
+				},
+			}
+			err := s.checkDestinationIP(tt.user, tt.ip)
+			if tt.wantErr && err == nil {
+				t.Fatalf("checkDestinationIP(%q, %v) = nil, want error", tt.user, tt.ip)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("checkDestinationIP(%q, %v) = %v, want nil", tt.user, tt.ip, err)
+			}
+		})
+	}
+}
+
+// TestUDPDestinationCheckerRejectsPrivateAndUnknownIP checks that the UDP
+// destination checker applies the same policy as the TCP destination check,
+// and that it rejects an unknown destination IP address.
+func TestUDPDestinationCheckerRejectsPrivateAndUnknownIP(t *testing.T) {
+	s := &Server{
+		config: &Config{
+			Users: map[string]*appctlpb.User{
+				"plain": {Name: proto.String("plain")},
+			},
+		},
+	}
+	check := s.newUDPDestinationChecker("plain")
+	if err := check(nil); err == nil {
+		t.Errorf("check(nil) = nil, want error")
+	}
+	if err := check(net.ParseIP("10.0.0.5")); err == nil {
+		t.Errorf("check(10.0.0.5) = nil, want error")
+	}
+	if err := check(net.ParseIP("8.8.8.8")); err != nil {
+		t.Errorf("check(8.8.8.8) = %v, want nil", err)
+	}
+}
+
+// TestEmptyAddressIsRejected checks that a destination address with neither an
+// IP address nor a domain name is rejected instead of being handled as a local
+// connection.
+func TestEmptyAddressIsRejected(t *testing.T) {
+	s := &Server{
+		config: &Config{
+			Egress: &appctlpb.Egress{},
+			Users: map[string]*appctlpb.User{
+				"test": {
+					Name:            proto.String("test"),
+					AllowPrivateIP:  proto.Bool(true),
+					AllowLoopbackIP: proto.Bool(true),
+				},
+			},
+		},
+	}
+	in := egress.Input{
+		Protocol: appctlpb.ProxyProtocol_SOCKS5_PROXY_PROTOCOL,
+		Env:      map[string]string{"user": "test"},
+	}
+	req := &model.Request{
+		Command: constant.Socks5ConnectCmd,
+		DstAddr: model.AddrSpec{Port: 80},
+	}
+
+	if action := s.rejectPrivateAndLoopbackIPAction(context.Background(), in, req); action.Action != appctlpb.EgressAction_REJECT {
+		t.Errorf("rejectPrivateAndLoopbackIPAction() = %v, want %v", action.Action, appctlpb.EgressAction_REJECT)
+	}
+	if action := s.forwardToProxyAction(context.Background(), req); action.Action != appctlpb.EgressAction_REJECT {
+		t.Errorf("forwardToProxyAction() = %v, want %v", action.Action, appctlpb.EgressAction_REJECT)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
@@ -81,6 +82,10 @@ type Config struct {
 	HandshakeNoWait bool
 }
 
+// connWaitTimeout bounds how long Serve() waits for the connection goroutines
+// it started to return after the server is closed.
+const connWaitTimeout = 30 * time.Second
+
 // Server is responsible for accepting connections and handling
 // the details of the SOCKS5 protocol
 type Server struct {
@@ -89,6 +94,16 @@ type Server struct {
 	chAccept    chan net.Conn
 	chAcceptErr chan error
 	die         chan struct{}
+
+	// closeOnce makes Close() idempotent.
+	closeOnce sync.Once
+	// connWG tracks the connection goroutines started by Serve().
+	connWG sync.WaitGroup
+
+	// udpAssocMu protects udpAssocCount.
+	udpAssocMu sync.Mutex
+	// udpAssocCount tracks the number of active UDP associations of each user.
+	udpAssocCount map[string]int
 }
 
 // New creates a new Server and potentially returns an error.
@@ -145,7 +160,9 @@ func (s *Server) Serve(l net.Listener) error {
 	for {
 		select {
 		case conn := <-s.chAccept:
+			s.connWG.Add(1)
 			go func() {
+				defer s.connWG.Done()
 				err := s.ServeConn(conn)
 				if err != nil && !stderror.IsEOF(err) && !stderror.IsClosed(err) {
 					log.Debugf("socks5 server listener %v ServeConn() failed: %v", s.listener.Addr(), err)
@@ -157,14 +174,31 @@ func (s *Server) Serve(l net.Listener) error {
 			if err := s.listener.Close(); err != nil {
 				log.Warnf("socks5 server listener %v Close() failed: %v", s.listener.Addr(), err)
 			}
+			s.waitForConnections()
 			return err // the err from chAcceptErr
 		case <-s.die:
 			log.Infof("closing socks5 server listener")
 			if err := s.listener.Close(); err != nil {
 				log.Warnf("socks5 server listener %v Close() failed: %v", s.listener.Addr(), err)
 			}
+			s.waitForConnections()
 			return nil
 		}
+	}
+}
+
+// waitForConnections waits for the connection goroutines started by Serve() to
+// return, up to connWaitTimeout.
+func (s *Server) waitForConnections() {
+	done := make(chan struct{})
+	go func() {
+		s.connWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(connWaitTimeout):
+		log.Warnf("socks5 server timed out after %v waiting for the active connections to close", connWaitTimeout)
 	}
 }
 
@@ -181,9 +215,41 @@ func (s *Server) ServeConn(conn net.Conn) error {
 }
 
 // Close closes the network listener used by the server.
+// It is safe to call Close() multiple times and from multiple goroutines, and
+// the calls after the first one have no effect.
 func (s *Server) Close() error {
-	close(s.die)
+	s.closeOnce.Do(func() {
+		close(s.die)
+	})
 	return nil
+}
+
+// acquireUDPAssociation registers a UDP association of the given user. It
+// returns false when the user already holds maxUDPAssociationsPerUser active
+// associations, in which case the association must not be created.
+func (s *Server) acquireUDPAssociation(userName string) bool {
+	s.udpAssocMu.Lock()
+	defer s.udpAssocMu.Unlock()
+	if s.udpAssocCount == nil {
+		s.udpAssocCount = make(map[string]int)
+	}
+	if s.udpAssocCount[userName] >= maxUDPAssociationsPerUser {
+		return false
+	}
+	s.udpAssocCount[userName]++
+	return true
+}
+
+// releaseUDPAssociation removes a UDP association registered by
+// acquireUDPAssociation.
+func (s *Server) releaseUDPAssociation(userName string) {
+	s.udpAssocMu.Lock()
+	defer s.udpAssocMu.Unlock()
+	if s.udpAssocCount[userName] <= 1 {
+		delete(s.udpAssocCount, userName)
+		return
+	}
+	s.udpAssocCount[userName]--
 }
 
 func (s *Server) acceptLoop() {

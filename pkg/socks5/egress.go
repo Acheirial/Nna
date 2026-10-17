@@ -118,8 +118,10 @@ func (s *Server) rejectPrivateAndLoopbackIPAction(_ context.Context, in egress.I
 			}
 		}
 	} else if len(ip) == 0 {
+		// An address with neither an IP address nor a domain name has no
+		// destination to connect to, so it is always rejected.
 		return egress.Action{
-			Action: appctlpb.EgressAction_DIRECT,
+			Action: appctlpb.EgressAction_REJECT,
 		}
 	}
 
@@ -249,33 +251,43 @@ type udpDestinationChecker func(ip net.IP) error
 // A UDP association is checked once when it is established, but every datagram
 // can be sent to a different destination, so each datagram must be checked
 // separately.
-// The user information is loaded once, so the returned checker is cheap to
-// call for every datagram.
 func (s *Server) newUDPDestinationChecker(userName string) udpDestinationChecker {
+	return func(ip net.IP) error {
+		return s.checkDestinationIP(userName, ip)
+	}
+}
+
+// checkDestinationIP checks whether the egress policy of the given user allows
+// a connection to the destination IP address. It is used to check the IP
+// addresses that are known before the connection is established, and to check
+// the address that a domain name resolves to.
+// An unknown user, an empty user name, or an address that is not classified as
+// public requires the user to enable the corresponding policy option.
+func (s *Server) checkDestinationIP(userName string, ip net.IP) error {
+	if ip == nil {
+		return fmt.Errorf("destination IP address is unknown")
+	}
 	allowPrivateIP := false
 	allowLoopbackIP := false
 	if user, ok := s.config.Users[userName]; ok {
 		allowPrivateIP = user.GetAllowPrivateIP()
 		allowLoopbackIP = user.GetAllowLoopbackIP()
 	}
-	allowLoopbackDestination := s.config.AllowLoopbackDestination
-	return func(ip net.IP) error {
-		if ip == nil {
-			return fmt.Errorf("destination IP address is unknown")
-		}
-		scope := classifyIP(ip)
-		if allowIPAccess(scope, allowPrivateIP, allowLoopbackIP, allowLoopbackDestination) {
-			return nil
-		}
-		return fmt.Errorf("destination %v is a %s address and it is rejected by egress policy", ip, scope)
+	scope := classifyIP(ip)
+	if allowIPAccess(scope, allowPrivateIP, allowLoopbackIP, s.config.AllowLoopbackDestination) {
+		return nil
 	}
+	return fmt.Errorf("destination %v is a %s address and it is rejected by egress policy", ip, scope)
 }
 
 func (s *Server) forwardToProxyAction(_ context.Context, req *model.Request) egress.Action {
 	addr := req.DstAddr.IP
 	domain := req.DstAddr.FQDN
 	if len(addr) == 0 && domain == "" {
-		return egress.Action{Action: appctlpb.EgressAction_DIRECT}
+		// An address with neither an IP address nor a domain name can't be
+		// matched against any egress rule, and it has no destination, so it is
+		// always rejected.
+		return egress.Action{Action: appctlpb.EgressAction_REJECT}
 	}
 
 	for _, rule := range s.config.Egress.GetRules() {

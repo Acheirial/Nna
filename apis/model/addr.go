@@ -94,6 +94,9 @@ func (a *AddrSpec) From(addr string) error {
 }
 
 // ReadFromSocks5 reads the AddrSpec from a socks5 request.
+// It returns ErrUnrecognizedAddrType when the address type is not supported or
+// when the domain name is empty, because an empty domain name leaves the
+// address without a destination.
 func (a *AddrSpec) ReadFromSocks5(r io.Reader) error {
 	// Get the address type.
 	addrType := []byte{0}
@@ -119,6 +122,12 @@ func (a *AddrSpec) ReadFromSocks5(r io.Reader) error {
 		addrLen := []byte{0}
 		if _, err := io.ReadFull(r, addrLen); err != nil {
 			return err
+		}
+		if addrLen[0] == 0 {
+			// A domain name of length 0 leaves the address without a
+			// destination, and it can't be matched against the address based
+			// rules of the egress policy, so it is not a valid address.
+			return ErrUnrecognizedAddrType
 		}
 		fqdn := make([]byte, int(addrLen[0]))
 		if _, err := io.ReadFull(r, fqdn); err != nil {
