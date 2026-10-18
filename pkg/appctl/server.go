@@ -66,6 +66,21 @@ type serverProxy struct {
 	socks5Server *socks5.Server
 }
 
+// resolveUserHintIsMandatory decides whether the server requires a user hint
+// during user discovery.
+//
+// Requiring the hint is the default, and also the only setting that keeps the
+// unauthenticated first packet cheap: without a hint the server must trial
+// decrypt it against every user and every cipher suite. An explicit false is
+// honored for compatibility, but it is never assumed when the field is absent
+// from the configuration.
+func resolveUserHintIsMandatory(adv *pb.ServerAdvancedSettings) bool {
+	if adv == nil || adv.UserHintIsMandatory == nil {
+		return true
+	}
+	return *adv.UserHintIsMandatory
+}
+
 func newServerProxy(config *pb.ServerConfig) (*serverProxy, error) {
 	trafficPattern, err := trafficpattern.NewConfig(config.TrafficPattern)
 	if err != nil {
@@ -75,10 +90,14 @@ func newServerProxy(config *pb.ServerConfig) (*serverProxy, error) {
 	if err != nil {
 		return nil, err
 	}
+	userHintIsMandatory := resolveUserHintIsMandatory(config.GetAdvancedSettings())
+	if !userHintIsMandatory {
+		log.Warnf("Server user hint is explicitly disabled. Every unauthenticated first packet is trial-decrypted against all users and cipher suites, which multiplies the cost of an unauthenticated request.")
+	}
 	mux := protocol.NewMux(false).
 		SetTrafficPattern(trafficPattern).
 		SetServerUsers(appctlcommon.UserListToMap(config.GetUsers())).
-		SetServerUserHintIsMandatory(config.GetAdvancedSettings().GetUserHintIsMandatory())
+		SetServerUserHintIsMandatory(userHintIsMandatory)
 	mux.SetAllowedCipherSuites(allowedCipherSuites)
 	mtu := common.DefaultMTU
 	if config.GetMtu() != 0 {
