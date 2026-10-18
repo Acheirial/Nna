@@ -41,8 +41,8 @@ source ./libtest.sh
 # logs the reasons of a rejection, also at DEBUG level. server_aes.json is set
 # to DEBUG as well so that a rejection is visible in the container output.
 CLIENT_LOG_DIR="$HOME/.cache/mieru"
-EXPECTED_AES_LINE="handshake completed with protocol version 2 and cipher suite AES_256_GCM"
-HANDSHAKE_LINE="handshake completed with protocol version 2 and cipher suite"
+EXPECTED_AES_LINE="handshake completed with protocol version 3 and cipher suite AES_256_GCM"
+HANDSHAKE_LINE="handshake completed with protocol version 3 and cipher suite"
 
 # count_client_log_matches <substring>
 # Prints how many lines of the mieru client log contain the given substring.
