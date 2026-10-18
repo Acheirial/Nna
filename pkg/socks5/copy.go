@@ -29,8 +29,26 @@ import (
 )
 
 // copyBufferSize is the size of the buffers used to move data between a user
-// connection and the proxy tunnel. It is large enough to hold one UDP datagram.
+// stream connection and the proxy tunnel.
 const copyBufferSize = 1 << 16
+
+// udpCopyBufferSize is the initial size of the buffer which each direction of a
+// UDP relay uses to copy one datagram.
+//
+// A UDP relay is a cheap and short lived object, but the server holds one for
+// every UDP association of every user, and the datagrams they carry are usually
+// a few hundred bytes. The buffer is therefore small on purpose: memory is
+// traded for throughput, 2 KiB per direction instead of the 64 KiB which is
+// needed to hold the largest possible datagram. A relay which receives a
+// datagram that doesn't fit the buffer doubles it, up to maxUDPDatagramSize, so
+// the memory is spent only by the relays which need it.
+const udpCopyBufferSize = 2 << 10
+
+// maxUDPDatagramSize is the size of the largest datagram a UDP relay copies, and
+// the largest buffer a UDP relay grows to. It is the limit of the packet
+// framing used by apis/common.PacketOverStreamTunnel, whose length field is 2
+// bytes long, and of a UDP payload.
+const maxUDPDatagramSize = 1 << 16
 
 // copyBufferPool reuses the copy buffers of the SOCKS5 proxy, so that a new
 // connection doesn't allocate 64 KiB per copy direction. A buffer is only used
@@ -63,17 +81,30 @@ func putCopyBuffer(p *[]byte) {
 	copyBufferPool.Put(p)
 }
 
+// growUDPCopyBuffer returns a buffer which is twice as large as buf, up to
+// maxUDPDatagramSize. The content of buf is not preserved.
+func growUDPCopyBuffer(buf []byte) []byte {
+	size := 2 * len(buf)
+	if size > maxUDPDatagramSize {
+		size = maxUDPDatagramSize
+	}
+	return make([]byte, size)
+}
+
 // BidiCopyUDP does bi-directional data copy between a proxy client UDP endpoint
 // and the proxy tunnel.
+//
+// Each direction copies one datagram at a time with a buffer of
+// udpCopyBufferSize bytes, and doubles its buffer up to maxUDPDatagramSize when
+// a datagram doesn't fit it, so that a relay which carries large datagrams
+// still copies them whole while the other relays stay small.
 func BidiCopyUDP(udpConn *net.UDPConn, tunnelConn *apicommon.PacketOverStreamTunnel) error {
 	var addr atomic.Value
 	errCh := make(chan error, 2)
 
 	go func() {
 		// udpConn -> tunnelConn
-		bufPtr := getCopyBuffer()
-		defer putCopyBuffer(bufPtr)
-		buf := *bufPtr
+		buf := make([]byte, udpCopyBufferSize)
 		for {
 			n, a, err := udpConn.ReadFrom(buf)
 			if err != nil {
@@ -88,6 +119,20 @@ func BidiCopyUDP(udpConn *net.UDPConn, tunnelConn *apicommon.PacketOverStreamTun
 				errCh <- fmt.Errorf("ReadFrom new UDP endpoint %s, first use is %s", a.String(), udpAddr.(net.Addr).String())
 				break
 			}
+			if n == len(buf) && len(buf) < maxUDPDatagramSize {
+				// The datagram may have been truncated: a UDP socket discards
+				// the bytes which don't fit the read buffer, and it doesn't
+				// report the original length of the datagram. The datagram is
+				// dropped rather than forwarded truncated, which would deliver
+				// a corrupted payload to the destination, and the buffer is
+				// doubled so that the next datagram of the same size is copied
+				// whole. The datagram of a relay which keeps sending datagrams
+				// of exactly the current buffer size also grows the buffer, so
+				// at most one datagram is dropped per buffer size.
+				log.Debugf("BidiCopyUDP() with endpoint %v drops a datagram of at least %d bytes and grows the copy buffer", udpConn.LocalAddr(), len(buf))
+				buf = growUDPCopyBuffer(buf)
+				continue
+			}
 			if _, err = tunnelConn.Write(buf[:n]); err != nil {
 				errCh <- fmt.Errorf("write tunnel failed: %w", err)
 				break
@@ -96,11 +141,17 @@ func BidiCopyUDP(udpConn *net.UDPConn, tunnelConn *apicommon.PacketOverStreamTun
 	}()
 	go func() {
 		// tunnelConn -> udpConn
-		bufPtr := getCopyBuffer()
-		defer putCopyBuffer(bufPtr)
-		buf := *bufPtr
+		buf := make([]byte, udpCopyBufferSize)
 		for {
 			n, err := tunnelConn.Read(buf)
+			if err == io.ErrShortBuffer && len(buf) < maxUDPDatagramSize {
+				// The datagram is larger than the buffer. The tunnel keeps the
+				// packet whose header it consumed, so reading it again with a
+				// larger buffer returns the whole datagram instead of the
+				// truncated content of the previous one.
+				buf = growUDPCopyBuffer(buf)
+				continue
+			}
 			if err != nil {
 				errCh <- fmt.Errorf("read tunnel failed: %w", err)
 				break

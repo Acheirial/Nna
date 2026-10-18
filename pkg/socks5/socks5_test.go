@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -248,6 +249,126 @@ func TestSocks5UDPAssociation(t *testing.T) {
 	}
 	if !bytes.Equal(out, want) {
 		t.Fatalf("got %v, want %v", out, want)
+	}
+}
+
+// TestServerCloseIsIdempotent checks that Close() can be called more than once
+// without panicking.
+func TestServerCloseIsIdempotent(t *testing.T) {
+	t.Run("sequential calls", func(t *testing.T) {
+		serv, err := New(&Config{AllowLoopbackDestination: true})
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		if err := serv.Close(); err != nil {
+			t.Fatalf("Close() failed: %v", err)
+		}
+		if err := serv.Close(); err != nil {
+			t.Fatalf("second Close() failed: %v", err)
+		}
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		serv, err := New(&Config{AllowLoopbackDestination: true})
+		if err != nil {
+			t.Fatalf("New() failed: %v", err)
+		}
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := serv.Close(); err != nil {
+					t.Errorf("Close() failed: %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+	})
+}
+
+// TestServeWaitsForActiveConnections checks that Serve() doesn't return before
+// the connection goroutines it started have stopped after the server is closed.
+func TestServeWaitsForActiveConnections(t *testing.T) {
+	// Create a local listener as the destination target. It keeps the
+	// connection open until the test is done.
+	dst, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	defer dst.Close()
+	go func() {
+		conn, err := dst.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		io.Copy(io.Discard, conn)
+	}()
+	dstAddr := dst.Addr().(*net.TCPAddr)
+
+	serv, err := New(&Config{AllowLoopbackDestination: true})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	defer l.Close()
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serv.Serve(l)
+	}()
+
+	clientConn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatalf("net.Dial() failed: %v", err)
+	}
+	defer clientConn.Close()
+	if err := clientConn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline() failed: %v", err)
+	}
+
+	// Create the proxied connection.
+	req := bytes.NewBuffer(nil)
+	req.Write([]byte{constant.Socks5Version, 1, constant.Socks5NoAuth})
+	req.Write([]byte{constant.Socks5Version, constant.Socks5ConnectCmd, 0, constant.Socks5IPv4Address, 127, 0, 0, 1})
+	port := []byte{0, 0}
+	binary.BigEndian.PutUint16(port, uint16(dstAddr.Port))
+	req.Write(port)
+	if _, err := clientConn.Write(req.Bytes()); err != nil {
+		t.Fatalf("Write() failed: %v", err)
+	}
+	resp := make([]byte, 12)
+	if _, err := io.ReadFull(clientConn, resp); err != nil {
+		t.Fatalf("io.ReadFull() failed: %v", err)
+	}
+	if resp[3] != constant.Socks5ReplySuccess {
+		t.Fatalf("connection reply = %d, want %d", resp[3], constant.Socks5ReplySuccess)
+	}
+
+	// The proxied connection is established, so the server has a connection
+	// goroutine that is still serving it.
+	if err := serv.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	select {
+	case err := <-serveDone:
+		t.Fatalf("Serve() returned %v while a connection was active, want it to wait", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Closing the connection lets the connection goroutine finish, and then
+	// Serve() returns.
+	clientConn.Close()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Errorf("Serve() error = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Serve() did not return after the connection was closed")
 	}
 }
 

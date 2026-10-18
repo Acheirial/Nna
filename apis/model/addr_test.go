@@ -17,6 +17,7 @@ package model
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"reflect"
 	"testing"
@@ -126,6 +127,34 @@ func TestAddrSpecReadWrite(t *testing.T) {
 		if !bytes.Equal(outputBytes, tc.input) {
 			t.Errorf("got %v, want %v", outputBytes, tc.input)
 		}
+	}
+}
+
+// TestAddrSpecReadFromSocks5RejectsEmptyDomainName checks that a socks5 address
+// with the domain name address type and a domain name of length 0 is rejected
+// instead of leaving the address without a destination.
+func TestAddrSpecReadFromSocks5RejectsEmptyDomainName(t *testing.T) {
+	testCases := []struct {
+		name  string
+		input []byte
+	}{
+		{
+			name:  "empty domain name",
+			input: []byte{constant.Socks5FQDNAddress, 0, 0, 80},
+		},
+		{
+			name:  "unrecognized address type",
+			input: []byte{0, 0, 0, 80},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := &AddrSpec{}
+			err := addr.ReadFromSocks5(bytes.NewBuffer(tc.input))
+			if !errors.Is(err, ErrUnrecognizedAddrType) {
+				t.Fatalf("ReadFromSocks5() error = %v, want %v", err, ErrUnrecognizedAddrType)
+			}
+		})
 	}
 }
 

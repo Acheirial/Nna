@@ -47,6 +47,19 @@ func (s *Server) handleRequest(ctx context.Context, req *model.Request, proxyCon
 		log.Debugf("Resolved domain name %s to IP addresses %v, selected IP address %v", dst.FQDN, ips, dst.IP)
 	}
 
+	// A domain name can resolve to a private or loopback address, so the
+	// destination policy has to be checked again on the resolved IP address.
+	// The egress policy check done before handleRequest() only sees the domain
+	// name, which doesn't reveal the address it resolves to.
+	if dst.IP != nil {
+		if err := s.checkDestinationIP(userFromConn(proxyConn), dst.IP); err != nil {
+			if replyErr := model.WriteSocks5Response(proxyConn, constant.Socks5ReplyNotAllowedByRuleSet, zeroBindAddr()); replyErr != nil {
+				return fmt.Errorf("failed to send reply: %w", replyErr)
+			}
+			return fmt.Errorf("destination %v is rejected: %w", dst, err)
+		}
+	}
+
 	switch req.Command {
 	case constant.Socks5ConnectCmd:
 		return s.handleConnect(ctx, req, proxyConn)
@@ -78,7 +91,11 @@ func (s *Server) readRequest(conn io.Reader) (*model.Request, error) {
 
 // handleConnect is used to handle a connect command.
 func (s *Server) handleConnect(ctx context.Context, req *model.Request, proxyConn net.Conn) error {
-	var d net.Dialer
+	// Bound the connection attempt. Without a timeout, dialing a destination
+	// that doesn't answer the TCP handshake, for example because the packets
+	// are dropped on the way, keeps this goroutine and the SOCKS5 connection
+	// busy until the operating system gives up.
+	d := net.Dialer{Timeout: s.config.HandshakeTimeout}
 	target, err := d.DialContext(ctx, "tcp", req.DstAddr.String())
 	if err != nil {
 		msg := err.Error()
@@ -115,24 +132,44 @@ func (s *Server) handleBind(_ context.Context, _ *model.Request, proxyConn net.C
 	return nil
 }
 
+// maxUDPAssociationsPerUser is the maximum number of UDP associations that a
+// single user can hold at the same time. Every association allocates a UDP
+// listener and the two copy buffers of its relay, which start at
+// udpCopyBufferSize bytes and grow up to maxUDPDatagramSize bytes when the
+// relay carries large datagrams, so without a limit an authenticated user can
+// exhaust the memory of the server with a few hundred requests.
+const maxUDPAssociationsPerUser = 32
+
 // handleAssociate is used to handle a UDP associate command.
 func (s *Server) handleAssociate(ctx context.Context, req *model.Request, proxyConn net.Conn) error {
+	userName := userFromConn(proxyConn)
+	if !s.acquireUDPAssociation(userName) {
+		if err := model.WriteSocks5Response(proxyConn, constant.Socks5ReplyNotAllowedByRuleSet, zeroBindAddr()); err != nil {
+			return fmt.Errorf("failed to send reply: %w", err)
+		}
+		return fmt.Errorf("user %q reached the limit of %d concurrent UDP associations", userName, maxUDPAssociationsPerUser)
+	}
+	defer s.releaseUDPAssociation(userName)
+
 	if s.config.UDPAssociateMode == UDPAssociateModeDatagram {
 		return s.handleAssociateDatagram(ctx, req, proxyConn)
 	}
 	return s.handleAssociatePacketOverStream(ctx, req, proxyConn)
 }
 
-// udpAssociateChecker returns the egress policy check applied to every
-// datagram of the UDP association created on the given connection. The user
-// information is resolved once, so the returned checker is cheap to call for
-// every datagram.
-func (s *Server) udpAssociateChecker(conn net.Conn) udpDestinationChecker {
-	userName := ""
+// userFromConn returns the name of the user that initiated the connection. It
+// returns an empty string when the connection doesn't carry user information.
+func userFromConn(conn net.Conn) string {
 	if userCtx, ok := conn.(apicommon.UserContext); ok {
-		userName = userCtx.UserName()
+		return userCtx.UserName()
 	}
-	return s.newUDPDestinationChecker(userName)
+	return ""
+}
+
+// udpAssociateChecker returns the egress policy check applied to every
+// datagram of the UDP association created on the given connection.
+func (s *Server) udpAssociateChecker(conn net.Conn) udpDestinationChecker {
+	return s.newUDPDestinationChecker(userFromConn(conn))
 }
 
 func (s *Server) handleAssociatePacketOverStream(_ context.Context, _ *model.Request, proxyConn net.Conn) error {
