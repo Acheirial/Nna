@@ -540,3 +540,241 @@ func benchmarkGenKeyAndData(b *testing.B, keyLen int) (key, data []byte) {
 	}
 	return
 }
+
+// legacyPayloadNonce is the payload nonce derivation as implemented before
+// payloadNonceInto() introduced the reusable scratch buffer: a copy of the
+// wire format nonce with the byte at index 16 XORed with 0x01. It is kept here
+// as an independent oracle for the current implementation.
+func legacyPayloadNonce(nonce []byte) []byte {
+	derived := make([]byte, len(nonce))
+	copy(derived, nonce)
+	derived[16] ^= 0x01
+	return derived
+}
+
+func TestPayloadNonceIntoMatchesLegacyImplementation(t *testing.T) {
+	key := randomBytes(t, DefaultKeyLen)
+	nonces := []struct {
+		name  string
+		nonce []byte
+	}{
+		{"randomWireNonce", randomBytes(t, DefaultNonceSize)},
+		{"allZero", make([]byte, DefaultNonceSize)},
+		{"allOnes", bytes.Repeat([]byte{0xff}, DefaultNonceSize)},
+		{"maskAlreadyApplied", bytes.Repeat([]byte{payloadNonceMask}, DefaultNonceSize)},
+		{"shortestNonce", bytes.Repeat([]byte{0xa5}, payloadNonceOffset+1)},
+	}
+
+	for _, suite := range AllSuites() {
+		block, err := newBlockCipher(suite, key)
+		if err != nil {
+			t.Fatalf("newBlockCipher(%s) failed: %v", suite, err)
+		}
+		for _, tc := range nonces {
+			// The caller nonce must never be modified by the derivation.
+			input := append([]byte(nil), tc.nonce...)
+
+			block.mu.Lock()
+			got := block.payloadNonceInto(input)
+			block.mu.Unlock()
+
+			want := legacyPayloadNonce(tc.nonce)
+			if len(got) != len(tc.nonce) {
+				t.Errorf("%s / %s: payloadNonceInto() returned %d bytes, want %d", suite, tc.name, len(got), len(tc.nonce))
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("%s / %s: payloadNonceInto() = %x, want %x", suite, tc.name, got, want)
+			}
+			if !bytes.Equal(input, tc.nonce) {
+				t.Errorf("%s / %s: payloadNonceInto() modified the input nonce: %x, want %x", suite, tc.name, input, tc.nonce)
+			}
+
+			// The derivation must reuse the scratch buffer instead of
+			// allocating a new one on every call.
+			block.mu.Lock()
+			again := block.payloadNonceInto(input)
+			block.mu.Unlock()
+			if &again[0] != &got[0] {
+				t.Errorf("%s / %s: payloadNonceInto() returned a new buffer, want the scratch buffer of the cipher", suite, tc.name)
+			}
+
+			// The package level compat entry point must return a fresh copy
+			// that doesn't alias the caller nonce.
+			copied := payloadNonce(input)
+			if !bytes.Equal(copied, want) {
+				t.Errorf("%s / %s: payloadNonce() = %x, want %x", suite, tc.name, copied, want)
+			}
+			for i := range copied {
+				copied[i] ^= 0xff
+			}
+			if !bytes.Equal(input, tc.nonce) {
+				t.Errorf("%s / %s: payloadNonce() returned a slice aliasing the input nonce", suite, tc.name)
+			}
+		}
+	}
+}
+
+func TestEncryptDecryptPayloadWithNonce(t *testing.T) {
+	key := randomBytes(t, DefaultKeyLen)
+	data := randomBytes(t, 1500)
+	nonce := randomBytes(t, DefaultNonceSize)
+
+	for _, suite := range AllSuites() {
+		block, err := newBlockCipher(suite, key)
+		if err != nil {
+			t.Fatalf("newBlockCipher(%s) failed: %v", suite, err)
+		}
+
+		ciphertext := make([]byte, 0, len(data)+block.Overhead())
+		if err := block.EncryptPayloadWithNonce(ciphertext, nonce, data); err != nil {
+			t.Fatalf("%s: EncryptPayloadWithNonce() failed: %v", suite, err)
+		}
+		ciphertext = ciphertext[:len(data)+block.Overhead()]
+
+		plaintext, err := block.DecryptPayloadWithNonce(ciphertext, nonce)
+		if err != nil {
+			t.Fatalf("%s: DecryptPayloadWithNonce() failed: %v", suite, err)
+		}
+		if !bytes.Equal(plaintext, data) {
+			t.Errorf("%s: plaintext after DecryptPayloadWithNonce() is different", suite)
+		}
+
+		// The ciphertext must be byte identical to the ciphertext produced by
+		// the legacy implementation, which derived the nonce with a fresh
+		// allocation, and DecryptPayloadWithNonce() must decrypt it.
+		block.mu.Lock()
+		legacyCiphertext := make([]byte, 0, len(data)+block.Overhead())
+		block.aead.Seal(legacyCiphertext, block.aeadNonce(legacyPayloadNonce(nonce)), data, nil)
+		block.mu.Unlock()
+		legacyCiphertext = legacyCiphertext[:len(data)+block.Overhead()]
+		if !bytes.Equal(ciphertext, legacyCiphertext) {
+			t.Errorf("%s: ciphertext = %x, want the legacy ciphertext %x", suite, ciphertext, legacyCiphertext)
+		}
+		legacyPlaintext, err := block.DecryptPayloadWithNonce(legacyCiphertext, nonce)
+		if err != nil {
+			t.Fatalf("%s: DecryptPayloadWithNonce() of the legacy ciphertext failed: %v", suite, err)
+		}
+		if !bytes.Equal(legacyPlaintext, data) {
+			t.Errorf("%s: plaintext after decrypting the legacy ciphertext is different", suite)
+		}
+
+		// The payload must not be decryptable with the metadata nonce of the
+		// same message.
+		block.mu.Lock()
+		sameNonceCiphertext := make([]byte, 0, len(data)+block.Overhead())
+		block.aead.Seal(sameNonceCiphertext, block.aeadNonce(nonce), data, nil)
+		block.mu.Unlock()
+		if _, err := block.DecryptPayloadWithNonce(sameNonceCiphertext[:len(data)+block.Overhead()], nonce); err == nil {
+			t.Errorf("%s: payload encrypted with the message nonce was decrypted with the payload nonce", suite)
+		}
+	}
+}
+
+func TestPayloadEncryptionDecryptionAllocs(t *testing.T) {
+	const runs = 1000
+	key := randomBytes(t, DefaultKeyLen)
+	data := randomBytes(t, 1500)
+
+	for _, suite := range AllSuites() {
+		block, err := newBlockCipher(suite, key)
+		if err != nil {
+			t.Fatalf("newBlockCipher(%s) failed: %v", suite, err)
+		}
+		nonce := randomBytes(t, block.NonceSize())
+
+		// Deriving the payload nonce must not allocate: it writes into the
+		// scratch buffer owned by the cipher. The derived slice is only valid
+		// while block.mu is held.
+		allocs := testing.AllocsPerRun(runs, func() {
+			block.mu.Lock()
+			defer block.mu.Unlock()
+			derived := block.payloadNonceInto(nonce)
+			if len(block.aeadNonce(derived)) == 0 {
+				t.Fatalf("%s: aeadNonce() returned an empty nonce", suite)
+			}
+		})
+		if allocs != 0 {
+			t.Errorf("%s: payloadNonceInto() allocated %v times per run, want 0", suite, allocs)
+		}
+
+		// Encrypting with a preallocated destination must not allocate either.
+		dst := make([]byte, len(data)+block.Overhead())
+		allocs = testing.AllocsPerRun(runs, func() {
+			if err := block.EncryptPayloadWithNonce(dst[:0], nonce, data); err != nil {
+				t.Fatalf("%s: EncryptPayloadWithNonce() failed: %v", suite, err)
+			}
+		})
+		if allocs != 0 {
+			t.Errorf("%s: EncryptPayloadWithNonce() allocated %v times per run, want 0", suite, allocs)
+		}
+
+		// DecryptPayloadWithNonce() returns the slice produced by
+		// AEAD.Open(nil, ...), so the whole call allocates the returned
+		// plaintext by design and cannot be asserted as allocation free
+		// without changing its signature. The assertion is therefore limited
+		// to the nonce derivation step above, which is the code changed to
+		// remove the per call 24 bytes allocation. AEAD.Open() itself is
+		// allocation free when it appends to a destination with enough
+		// capacity, as shown by DecryptStatelessTo().
+		ciphertext := make([]byte, 0, len(data)+block.Overhead())
+		if err := block.EncryptPayloadWithNonce(ciphertext, nonce, data); err != nil {
+			t.Fatalf("%s: EncryptPayloadWithNonce() failed: %v", suite, err)
+		}
+		ciphertext = ciphertext[:len(data)+block.Overhead()]
+		withNonce := make([]byte, 0, len(nonce)+len(ciphertext))
+		withNonce = append(withNonce, nonce...)
+		withNonce = append(withNonce, ciphertext...)
+		allocs = testing.AllocsPerRun(runs, func() {
+			if _, err := block.DecryptStatelessTo(withNonce, dst[:0]); err != nil {
+				t.Fatalf("%s: DecryptStatelessTo() failed: %v", suite, err)
+			}
+		})
+		if allocs != 0 {
+			t.Errorf("%s: DecryptStatelessTo() with a preallocated dst allocated %v times per run, want 0", suite, allocs)
+		}
+	}
+}
+
+func BenchmarkEncryptPayloadWithNonce(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b, DefaultKeyLen)
+	block, err := newXChaCha20Poly1305BlockCipher(key)
+	if err != nil {
+		b.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	nonce := make([]byte, block.NonceSize())
+	if _, err := crand.Read(nonce); err != nil {
+		b.Fatalf("fail to generate nonce: %v", err)
+	}
+	dst := make([]byte, len(data)+block.Overhead())
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for b.Loop() {
+		if err := block.EncryptPayloadWithNonce(dst[:0], nonce, data); err != nil {
+			b.Fatalf("EncryptPayloadWithNonce() failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkDecryptPayloadWithNonce(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b, DefaultKeyLen)
+	block, err := newXChaCha20Poly1305BlockCipher(key)
+	if err != nil {
+		b.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	nonce := make([]byte, block.NonceSize())
+	if _, err := crand.Read(nonce); err != nil {
+		b.Fatalf("fail to generate nonce: %v", err)
+	}
+	ciphertext := make([]byte, 0, len(data)+block.Overhead())
+	if err := block.EncryptPayloadWithNonce(ciphertext, nonce, data); err != nil {
+		b.Fatalf("EncryptPayloadWithNonce() failed: %v", err)
+	}
+	ciphertext = ciphertext[:len(data)+block.Overhead()]
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for b.Loop() {
+		if _, err := block.DecryptPayloadWithNonce(ciphertext, nonce); err != nil {
+			b.Fatalf("DecryptPayloadWithNonce() failed: %v", err)
+		}
+	}
+}

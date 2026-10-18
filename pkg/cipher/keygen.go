@@ -25,11 +25,29 @@ import (
 )
 
 const (
-	// KeyIter is the number of iterations to generate a key.
+	// KeyIter is the legacy number of PBKDF2 iterations used to generate a
+	// key from a password. It is the value protocol v3 used before the
+	// envelope hardening of KeyIterV3, and it is kept so that a server can
+	// still decrypt the handshake request of a client that predates it.
+	//
 	// This is part of mieru protocol. This value should not be changed.
 	//
-	// In mieru v2, the value was 4096.
+	// New code must use KeyIterV3.
 	KeyIter = 64
+
+	// KeyIterV3 is the number of PBKDF2 iterations used to generate a key from
+	// a password in protocol v3. It is the value protocol v2 used, which
+	// hardens the envelope against an offline search of the password by an
+	// attacker who observes the first packet of a session: the envelope key is
+	// derived from the password only, so a low iteration count makes that
+	// search cheap.
+	//
+	// This is part of mieru protocol. This value should not be changed.
+	//
+	// A server must accept both KeyIterV3 and KeyIter, because it has to
+	// decrypt the handshake request of an old client; see
+	// NewCompatStatelessDecryptor. A client only uses KeyIterV3.
+	KeyIterV3 = 4096
 
 	// KeyRefreshInterval is the amount of time when the salt used to generate cipher block is changed.
 	// This is part of mieru protocol. This value should not be changed.
@@ -52,7 +70,16 @@ func (g *pbkdf2Gen) NewKey(password []byte, keyLen int) ([]byte, error) {
 	return pbkdf2.Key(password, g.Salt, g.Iter, keyLen, sha256.New), nil
 }
 
-// saltFromTime generate three salts (each 32 bytes) based on the time.
+// saltFromTime generates the three salts (each 32 bytes) of the previous, the
+// current and the next key refresh interval for the given time. The three
+// salts cover a peer key slot offset of at most one refresh interval
+// (KeyRefreshInterval, 2 minutes) in either direction: a peer whose clock
+// rounds to a neighboring slot still derives the same key as one of them.
+//
+// This bounds the key derivation layer only. The metadata of every data
+// segment carries a timestamp in minutes that is accepted only within ±1
+// minute of the local clock, so the end-to-end clock tolerance of the protocol
+// is that stricter ±1 minute.
 func saltFromTime(t time.Time) [][]byte {
 	var times []time.Time
 	rounded := t.Round(KeyRefreshInterval)

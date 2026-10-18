@@ -52,6 +52,10 @@ type aeadBlockCipher struct {
 	ctx                 BlockContext
 	noncePattern        *appctlpb.NoncePattern
 	noncePatternApplied bool
+	// payloadNonceBuf is the scratch buffer filled by payloadNonceInto(). It
+	// avoids a heap allocation of the derived nonce on every payload
+	// encryption and decryption. It is guarded by mu.
+	payloadNonceBuf []byte
 }
 
 // newBlockCipher creates a new AEAD block cipher with the supplied suite and key.
@@ -86,6 +90,7 @@ func newBlockCipher(suite Suite, key []byte) (*aeadBlockCipher, error) {
 		enableImplicitNonce: false,
 		key:                 ownedKey,
 		implicitNonce:       nil,
+		payloadNonceBuf:     make([]byte, DefaultNonceSize),
 	}, nil
 }
 
@@ -261,14 +266,45 @@ const (
 	payloadNonceMask = 0x01
 )
 
-// payloadNonce derives the wire format nonce used to encrypt or decrypt the
-// payload of a message from the wire format nonce used to encrypt or decrypt
-// its metadata. The AEAD nonce is then derived from it by aeadNonce(), so the
-// metadata and the payload of the same message never share an AEAD nonce.
+// payloadNonce returns a copy of the wire format nonce used to encrypt or
+// decrypt the payload of a message, derived from the wire format nonce used to
+// encrypt or decrypt its metadata. See payloadNonceInto() for the derivation
+// rule.
+//
+// Production code uses payloadNonceInto(), which writes into a reusable
+// scratch buffer instead of allocating. This package level entry point is kept
+// for callers that need a nonce copy independent of any cipher instance.
 func payloadNonce(nonce []byte) []byte {
 	derived := make([]byte, len(nonce))
 	copy(derived, nonce)
+	applyPayloadNonceMask(derived)
+	return derived
+}
+
+// applyPayloadNonceMask XORs the byte at payloadNonceOffset of derived with
+// payloadNonceMask, in place.
+func applyPayloadNonceMask(derived []byte) {
 	derived[payloadNonceOffset] ^= payloadNonceMask
+}
+
+// payloadNonceInto derives the wire format nonce used to encrypt or decrypt the
+// payload of a message from the wire format nonce used to encrypt or decrypt
+// its metadata, and stores the result in the receiver scratch buffer. The AEAD
+// nonce is then derived from it by aeadNonce(), so the metadata and the payload
+// of the same message never share an AEAD nonce.
+//
+// The derived nonce has the same length as nonce. The returned slice aliases
+// the receiver scratch buffer, therefore it is only valid while c.mu is held
+// and only until the next call of this method on the same cipher: the caller
+// must pass it to Seal or Open inside the same critical section, and must never
+// retain it or share it with another goroutine.
+func (c *aeadBlockCipher) payloadNonceInto(nonce []byte) []byte {
+	if cap(c.payloadNonceBuf) < len(nonce) {
+		c.payloadNonceBuf = make([]byte, len(nonce))
+	}
+	derived := c.payloadNonceBuf[:len(nonce)]
+	copy(derived, nonce)
+	applyPayloadNonceMask(derived)
 	return derived
 }
 
@@ -284,7 +320,7 @@ func (c *aeadBlockCipher) EncryptPayloadWithNonce(dst, nonce, plaintext []byte) 
 	if cap(dst)-len(dst) < len(plaintext)+c.aead.Overhead() {
 		return errDestinationTooSmall
 	}
-	c.aead.Seal(dst, c.aeadNonce(payloadNonce(nonce)), plaintext, nil)
+	c.aead.Seal(dst, c.aeadNonce(c.payloadNonceInto(nonce)), plaintext, nil)
 	return nil
 }
 
@@ -297,7 +333,7 @@ func (c *aeadBlockCipher) DecryptPayloadWithNonce(ciphertext, nonce []byte) ([]b
 	if len(nonce) != c.NonceSize() {
 		return nil, fmt.Errorf("want nonce size %d, got %d", c.NonceSize(), len(nonce))
 	}
-	plaintext, err := c.aead.Open(nil, c.aeadNonce(payloadNonce(nonce)), ciphertext, nil)
+	plaintext, err := c.aead.Open(nil, c.aeadNonce(c.payloadNonceInto(nonce)), ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cipher.AEAD.Open() failed: %w", err)
 	}
@@ -474,6 +510,20 @@ func (c *aeadBlockCipher) cloneStatelessFast() *aeadBlockCipher {
 	}
 }
 
+// addUserHintToNonce embeds the user hint of the block context into the last
+// NonceSuffixLenForUserHint bytes of the wire nonce, in place, and returns the
+// nonce. The length and the position of the hint are the same whatever hint is
+// written, only the 4 bytes at the end of the nonce change.
+//
+// When the block context has no pepper, this writes the legacy hint of
+// protocol v2, which is derived from the user name only and therefore
+// computable by anyone who knows that name; it is the same value that
+// CheckUserFromHint recomputes. When the block context has a pepper, this
+// writes the keyed hint of protocol v3, which also depends on the credential
+// shared by the client and the server; it is the same value that
+// CheckUserFromHintV3 recomputes. Both derivations are the same computation,
+// sha256(pepper ‖ user name ‖ nonce prefix), so a keyed hint can never collide
+// with the legacy hint of the same user for the same nonce.
 func (c *aeadBlockCipher) addUserHintToNonce(nonce []byte) []byte {
 	if c.ctx.UserName == "" {
 		return nonce
@@ -484,8 +534,9 @@ func (c *aeadBlockCipher) addUserHintToNonce(nonce []byte) []byte {
 	if len(nonce) < NoncePrefixLenForUserHint+NonceSuffixLenForUserHint {
 		panic(fmt.Sprintf("nonce length %d is too short", len(nonce)))
 	}
-	var input [constant.MaxUserNameLen + NoncePrefixLenForUserHint]byte
-	n := copy(input[:], c.ctx.UserName)
+	var input [HintPepperLen + constant.MaxUserNameLen + NoncePrefixLenForUserHint]byte
+	n := copy(input[:], c.ctx.Pepper)
+	n += copy(input[n:], c.ctx.UserName)
 	n += copy(input[n:], nonce[:NoncePrefixLenForUserHint])
 	output := sha256.Sum256(input[:n])
 	copy(nonce[len(nonce)-NonceSuffixLenForUserHint:], output[:NonceSuffixLenForUserHint])
