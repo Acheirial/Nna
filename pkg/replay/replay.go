@@ -16,17 +16,39 @@
 package replay
 
 import (
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+// Tag identifies the source of a packet. It is used to tell an exact
+// retransmission of a packet apart from a replay of that packet by a different
+// source. The zero value means that the packet has no tag at all, which
+// disables the retransmission exception for that packet.
+type Tag = netip.AddrPort
+
+// Domain separates the replay detection of independent traffic classes, so
+// that the same decrypted content observed in two domains is never mistaken for
+// a replay of itself.
+type Domain uint8
+
 const (
-	EmptyTag = ""
+	// DomainStream is the domain of the byte stream traffic (TCP).
+	DomainStream Domain = iota + 1
+
+	// DomainPacketClientToServer is the domain of the client to server packet
+	// traffic (UDP).
+	DomainPacketClientToServer
+
+	// DomainPacketServerToClient is the domain of the server to client packet
+	// traffic (UDP).
+	DomainPacketServerToClient
 )
 
 // FNV-1a 64 bit parameters. computeSignature() computes the exact hash of
-// hash/fnv's New64a(), without allocating a hash.Hash object per call.
+// hash/fnv's New64a() over the byte sequence it hashes, without allocating a
+// hash.Hash object per call.
 const (
 	offset64 uint64 = 0xcbf29ce484222325
 	prime64  uint64 = 0x100000001b3
@@ -62,31 +84,35 @@ type shard struct {
 	// mu is required to access the current and previous map of this shard.
 	mu sync.Mutex
 
-	// current stores the current set of packet signatures.
-	current map[uint64]string
+	// current stores the current set of packet signatures. The value is the
+	// tag of the authenticated packet that recorded the signature.
+	current map[uint64]Tag
 
 	// previous stores the previous set of packet signatures.
-	previous map[uint64]string
+	previous map[uint64]Tag
 }
 
 // ReplayCache stores the signature of recent decrypted packets to avoid
-// a replay attack.
+// a replay attack. Seen() may be called on unauthenticated data; Record() is
+// the only entry point that changes the cache and it must be called after the
+// data was authenticated.
 type ReplayCache struct {
 	// shards partition the signature space, so that sessions carried by the
 	// same underlay don't contend on a single lock.
 	shards [shardCount]shard
 
 	// rotateMu serializes the rotation and the expiry of the whole cache. The
-	// common path of IsDuplicate() doesn't take it.
+	// read only path of Seen() doesn't take it, because Seen() never rotates;
+	// the rotation is triggered by Record().
 	rotateMu sync.Mutex
 
 	// capacity is the soft upper bound of the number of entries in the whole
 	// replay cache. Once the number of entries in the current maps of all
-	// shards reaches capacity (i.e. count >= capacity), the current maps
-	// replace the previous maps. The check is done before the lock of a shard
-	// is taken, so concurrent calls can overshoot the capacity by at most the
-	// number of calls in flight. The cache keeps the entries of the current
-	// and previous generation, so overshooting only adds entries to the
+	// shards reaches capacity (i.e. count >= capacity), Record() replaces the
+	// current maps with the previous maps. The check is done before the lock of
+	// a shard is taken, so concurrent calls can overshoot the capacity by at
+	// most the number of calls in flight. The cache keeps the entries of the
+	// current and previous generation, so overshooting only adds entries to the
 	// deduplication window, it never removes any.
 	capacity int
 
@@ -99,6 +125,8 @@ type ReplayCache struct {
 
 	// expireAt is the time (read by monotonicNow()) when the current maps
 	// should replace the previous maps, regardless of the number of entries.
+	// Like the capacity, the expiry is only enforced by Record(), because
+	// Seen() must not change the state of the cache.
 	expireAt atomic.Int64
 
 	// expireInterval is the interval to reset expireAt.
@@ -118,23 +146,75 @@ func NewCache(capacity int, expireInterval time.Duration) *ReplayCache {
 		expireInterval: expireInterval,
 	}
 	for i := range c.shards {
-		c.shards[i].current = make(map[uint64]string)
-		c.shards[i].previous = make(map[uint64]string)
+		c.shards[i].current = make(map[uint64]Tag)
+		c.shards[i].previous = make(map[uint64]Tag)
 	}
 	c.expireAt.Store(monotonicNow() + expireInterval.Nanoseconds())
 	return c
 }
 
-// IsDuplicate checks if the given data is present in the replay cache.
-// If a non-empty tag is provided, it is not considered as a duplicate
-// when the same tag is used. This can allow retransmit exact content
-// from the same network address. Use an empty tag disables this feature.
-func (c *ReplayCache) IsDuplicate(data []byte, tag string) bool {
+// A replay cache is used in two steps. Seen() is a read only lookup, which is
+// safe to call on data that is not authenticated yet, and it never changes the
+// state of the cache. Record() is the only writer, and it must be called after
+// the data was authenticated.
+//
+// The lookup used to write to the cache, which had two consequences. First, an
+// attacker could fill the cache with unauthenticated data. Second, a lookup
+// that found the signature of a packet in the previous generation while
+// carrying a different tag still promoted that signature into the current
+// generation, storing the tag of the attacker. The first call was reported as a
+// replay, but the second call of the attacker with the same tag found the
+// signature in the current generation and was let through. Because Seen() is
+// free of side effects and the tag of a signature can only be replaced by an
+// authenticated Record(), promotion can no longer hand the retransmission
+// exemption to another source: every call of that attacker is a replay.
+
+// Seen checks if the given data is a replay of the data recorded in the replay
+// cache. It returns true when the data is a duplicate.
+//
+// Data that was recorded with the same non-zero tag is exempt from the replay
+// detection, so that a lost packet can be retransmitted from the same source.
+// A zero tag disables this exception, and a lookup never claims it for another
+// source: the tag of a recorded signature is only changed by Record().
+//
+// Seen() doesn't write to the cache. It can't add an entry, can't refresh the
+// tag of an entry, and can't rotate the cache.
+func (c *ReplayCache) Seen(domain Domain, data []byte, tag Tag) bool {
 	if c == nil || c.capacity == 0 {
 		// The replay cache is disabled.
 		return false
 	}
-	signature := computeSignature(data)
+	signature := computeSignature(domain, data)
+	s := &c.shards[(signature>>shardShift)&shardMask]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Both generations are checked, so a signature is still detected for one
+	// whole generation after it left the current maps.
+	if recordedTag, ok := s.current[signature]; ok {
+		return !canRetransmit(recordedTag, tag)
+	}
+	if recordedTag, ok := s.previous[signature]; ok {
+		return !canRetransmit(recordedTag, tag)
+	}
+	return false
+}
+
+// Record adds the given data to the replay cache. It is the only function that
+// writes to the cache, and it must be called after the data was authenticated.
+//
+// Recording a signature that is already in the current map of a shard replaces
+// its tag with tag. Recording a signature that is stored in the previous map
+// promotes it into the current map with tag, so that a retransmission extends
+// the deduplication window of its signature. The number of entries of the
+// current maps decides when the cache rotates, and it is kept consistent with
+// the maps while the lock of the shard is held.
+func (c *ReplayCache) Record(domain Domain, data []byte, tag Tag) {
+	if c == nil || c.capacity == 0 {
+		// The replay cache is disabled.
+		return
+	}
+	signature := computeSignature(domain, data)
 	if c.count.Load() >= int64(c.capacity) || monotonicNow() > c.expireAt.Load() {
 		c.rotate()
 	}
@@ -145,33 +225,25 @@ func (c *ReplayCache) IsDuplicate(data []byte, tag string) bool {
 	// A signature is only stored in the `current` map of a shard, and only
 	// while the lock of that shard is held, so that `count` can never drift
 	// away from the number of entries of the current maps.
-	if existingTag, ok := s.current[signature]; ok {
-		if existingTag == EmptyTag || tag == EmptyTag {
-			return true
-		}
-		return existingTag != tag
-	} else {
-		s.current[signature] = tag
+	if _, ok := s.current[signature]; !ok {
 		c.count.Add(1)
 	}
-	// The signature was missing from `current`, so it was stored into `current`
-	// above. If it is also found in `previous` and this call reports a duplicate,
-	// the signature is still promoted (re-inserted into `current` with the tag of
-	// this call) as a side effect of that store.
-	if existingTag, ok := s.previous[signature]; ok {
-		if existingTag == EmptyTag || tag == EmptyTag {
-			return true
-		}
-		return existingTag != tag
-	}
-	return false
+	s.current[signature] = tag
+}
+
+// canRetransmit reports whether a lookup that carries tag is a retransmission
+// of the data that was recorded with recordedTag. A retransmission is exempt
+// from the replay detection. A zero tag never grants the exemption, otherwise
+// data that carries no tag at all could be replayed.
+func canRetransmit(recordedTag, tag Tag) bool {
+	return tag.IsValid() && recordedTag == tag
 }
 
 // rotate moves the current maps to the previous maps of every shard, or drops
 // both maps if they are expired. It is a no-op if another goroutine already did
-// the work, so it is safe to call it whenever IsDuplicate() suspects that the
-// cache needs to rotate. Shard locks are always taken one at a time, which
-// keeps the lock order rotateMu -> shard.mu consistent.
+// the work, so it is safe to call it whenever Record() suspects that the cache
+// needs to rotate. Shard locks are always taken one at a time, which keeps the
+// lock order rotateMu -> shard.mu consistent.
 func (c *ReplayCache) rotate() {
 	c.rotateMu.Lock()
 	defer c.rotateMu.Unlock()
@@ -183,8 +255,8 @@ func (c *ReplayCache) rotate() {
 			s := &c.shards[i]
 			s.mu.Lock()
 			n := len(s.current)
-			s.current = make(map[uint64]string)
-			s.previous = make(map[uint64]string)
+			s.current = make(map[uint64]Tag)
+			s.previous = make(map[uint64]Tag)
 			c.count.Add(-int64(n))
 			s.mu.Unlock()
 		}
@@ -202,7 +274,7 @@ func (c *ReplayCache) rotate() {
 		s.mu.Lock()
 		n := len(s.current)
 		s.previous = s.current
-		s.current = make(map[uint64]string)
+		s.current = make(map[uint64]Tag)
 		c.count.Add(-int64(n))
 		s.mu.Unlock()
 	}
@@ -231,16 +303,29 @@ func (c *ReplayCache) Clear() {
 		s := &c.shards[i]
 		s.mu.Lock()
 		n := len(s.current)
-		s.current = make(map[uint64]string)
-		s.previous = make(map[uint64]string)
+		s.current = make(map[uint64]Tag)
+		s.previous = make(map[uint64]Tag)
 		c.count.Add(-int64(n))
 		s.mu.Unlock()
 	}
 }
 
-// computeSignature returns the FNV-1a 64 bit hash of data. It doesn't allocate.
-func computeSignature(data []byte) uint64 {
+// computeSignature returns the FNV-1a 64 bit hash of the length of data, the
+// domain, and the content of data, in that order. It doesn't allocate.
+//
+// The length is hashed first, so that two inputs of a different length can't
+// produce the same byte sequence for the hash. The domain is hashed as well, so
+// that the same content observed in two traffic classes gets two different
+// signatures.
+func computeSignature(domain Domain, data []byte) uint64 {
 	hash := uint64(offset64)
+	length := uint64(len(data))
+	for i := 7; i >= 0; i-- {
+		hash ^= (length >> (8 * uint(i))) & 0xff
+		hash *= prime64
+	}
+	hash ^= uint64(domain)
+	hash *= prime64
 	for _, b := range data {
 		hash ^= uint64(b)
 		hash *= prime64

@@ -868,9 +868,9 @@ func TestPacketUnderlayCloseReleasesEventLoopRead(t *testing.T) {
 // TestUnderlayCloseIsNotSlowedDownBySessionCount verifies that closing an
 // underlay doesn't wait for the sessions one after another.
 func TestUnderlayCloseIsNotSlowedDownBySessionCount(t *testing.T) {
-	// Each session of this underlay can't flush its close session request, so
-	// closing one session waits for the graceful close timeout before it gives
-	// up. That makes the cost of closing a single session observable.
+	// A session doesn't wait for its close session request to be written
+	// anymore, so closing one session is cheap. This measurement only guards
+	// against a regression that makes a single session close slow again.
 	single := newTestStalledSessions(t, 1)
 	start := time.Now()
 	if err := single.Close(); err != nil {
@@ -906,9 +906,9 @@ func TestUnderlayCloseIsNotSlowedDownBySessionCount(t *testing.T) {
 	})
 }
 
-// newTestStalledSessions returns a server stream underlay with n sessions whose
-// output can't flush the close session request, so that closing each session
-// waits for the graceful close timeout before it gives up.
+// newTestStalledSessions returns a server stream underlay with n attached
+// sessions whose underlay connection is never drained by the peer. That is the
+// worst case for the close path of the sessions.
 func newTestStalledSessions(t *testing.T, n int) *StreamUnderlay {
 	t.Helper()
 	local, remote := net.Pipe()
@@ -928,16 +928,17 @@ func newTestStalledSessions(t *testing.T, n int) *StreamUnderlay {
 		if err := underlay.AddSession(session, nil); err != nil {
 			t.Fatalf("AddSession(%d) failed: %v", i, err)
 		}
-		// The session sent a segment before, so the close session request has
-		// a sequence number the peer can't have received yet.
+		// The session sent a segment before, so it is closed from the data
+		// plane state that a real session reaches.
 		session.nextSend.Store(1)
 	}
 	return underlay
 }
 
 // TestStalledStreamSessionDoesNotBlockOtherSessions verifies that a session
-// whose application stopped reading only blocks its own delivery. The other
-// sessions of the same underlay keep receiving and sending.
+// whose application stopped reading only affects itself: it is closed once its
+// unread buffer reaches maxUnreadSegments, and the other sessions of the same
+// underlay keep receiving and sending.
 func TestStalledStreamSessionDoesNotBlockOtherSessions(t *testing.T) {
 	// The underlay writes to a pipe that is drained in the background, like a
 	// peer that keeps reading.
@@ -970,37 +971,25 @@ func TestStalledStreamSessionDoesNotBlockOtherSessions(t *testing.T) {
 		}
 	}
 
-	// The application of the stalled session never reads, so its receive queue
-	// stays full.
-	for i := 0; i < segmentTreeCapacity; i++ {
-		if !stalled.recvQueue.Insert(testServerToClientDataSegment(stalled.id, uint32(i), nil, common.StreamTransport)) {
-			t.Fatalf("failed to fill the receive queue of the stalled session at %d", i)
-		}
-	}
-
-	// Fill the receive buffer of the stalled session. The input loop holds one
-	// segment while it waits for room in the full receive queue, the delivery
-	// loop holds one while it waits for room in the input channel, and the rest
-	// fills the receive channel and the input channel. The receive buffer is
-	// therefore full after 2 + 2*segmentChanCapacity segments, and the next
-	// segment must wait for room instead of being queued.
-	seg := testServerToClientDataSegment(stalled.id, segmentTreeCapacity, []byte("stalled"), common.StreamTransport)
-	for i := 0; i < 2+2*segmentChanCapacity; i++ {
+	// The application of the stalled session never reads, so the segments
+	// delivered to it pile up in its receive queue until the session reaches
+	// its unread buffer limit and closes itself instead of buffering more.
+	for seq := uint32(0); ; seq++ {
+		seg := testServerToClientDataSegment(stalled.id, seq, []byte("stalled"), common.StreamTransport)
 		if !deliverSegmentWithin(t, &underlay.baseUnderlay, stalled, seg, 5*time.Second) {
-			t.Fatalf("segment %d of the stalled session was dropped, want it to be queued", i)
+			t.Fatal("the segment of the stalled session was dropped before it reached the unread buffer limit")
+		}
+		if stalled.closeRequested.Load() {
+			break
 		}
 	}
-
-	// The next segment waits for room instead of being dropped, because the
-	// stream transport is reliable.
-	blocked := make(chan bool, 1)
-	go func() {
-		blocked <- underlay.deliverSegmentToSession(stalled, seg)
-	}()
 	select {
-	case delivered := <-blocked:
-		t.Fatalf("deliverSegmentToSession() = %v for the stalled session, want it to wait for room", delivered)
-	case <-time.After(100 * time.Millisecond):
+	case <-stalled.closedChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled session was not closed after it reached the unread buffer limit")
+	}
+	if got := stalled.unreadSegments(); got > maxUnreadSegments {
+		t.Errorf("the stalled session buffered %d unread segments, limit is %d", got, maxUnreadSegments)
 	}
 
 	// Another session of the same underlay still receives data.
@@ -1050,21 +1039,6 @@ func TestStalledStreamSessionDoesNotBlockOtherSessions(t *testing.T) {
 	}
 	if healthy.closeRequested.Load() {
 		t.Fatal("the healthy session was closed while another session was stalled")
-	}
-	if got := len(stalled.recvChan); got != segmentChanCapacity {
-		t.Fatalf("the receive buffer of the stalled session holds %d segments, want %d", got, segmentChanCapacity)
-	}
-
-	// Closing the stalled session releases the blocked delivery. The segment is
-	// either queued before the delivery loop stops or dropped, so only the
-	// prompt return is checked here.
-	if err := stalled.Close(); err != nil {
-		t.Fatalf("stalled.Close() failed: %v", err)
-	}
-	select {
-	case <-blocked:
-	case <-time.After(5 * time.Second):
-		t.Fatal("deliverSegmentToSession() didn't return after the stalled session was closed")
 	}
 }
 
@@ -1170,50 +1144,321 @@ func TestDeliverSegmentToSessionReturnsFalseAfterUnderlayClose(t *testing.T) {
 	}
 }
 
-// TestExpiredReadDeadlineDoesNotFailRead verifies that a read deadline which is
-// already in the past, as it is left by a previous write, is not turned into an
-// immediate timeout.
-func TestExpiredReadDeadlineDoesNotFailRead(t *testing.T) {
+// TestExpiredReadDeadlineFailsRead verifies that a read deadline which is
+// already in the past fails the read immediately, as net.Conn requires.
+func TestExpiredReadDeadlineFailsRead(t *testing.T) {
 	s := NewSession(1, true, 1400, nil, nil)
 	s.transportProtocol = common.StreamTransport
-	if err := s.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+	if err := s.SetReadDeadline(time.Now()); err != nil {
 		t.Fatalf("SetReadDeadline() failed: %v", err)
 	}
 
-	// Data that arrived before the deadline expired is still readable.
-	if !s.recvQueue.Insert(testServerToClientDataSegment(s.id, 0, []byte("payload"), common.StreamTransport)) {
-		t.Fatal("failed to queue a segment")
-	}
 	buf := make([]byte, 16)
-	n, err := s.Read(buf)
-	if err != nil || n != len("payload") || string(buf[:n]) != "payload" {
-		t.Fatalf("Read() = (%d, %v), want (%d, nil)", n, err, len("payload"))
+	start := time.Now()
+	n, err, returned := readWithin(t, s, buf, time.Second)
+	if !returned {
+		t.Fatal("Read() with an expired deadline didn't return")
 	}
+	if n != 0 || !stderror.IsTimeout(err) {
+		t.Fatalf("Read() = (%d, %v), want (0, a timeout)", n, err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("Read() with an expired deadline returned after %v, want an immediate timeout", elapsed)
+	}
+}
 
-	// An expired deadline doesn't fail a read that has nothing to return yet.
-	if err := s.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+// TestReadDeadlinePersistsAcrossReads verifies that a read deadline set by the
+// application stays armed for every following Read. Clearing it after the first
+// Read, as the session used to do, leaves the second Read blocked forever.
+func TestReadDeadlinePersistsAcrossReads(t *testing.T) {
+	s := NewSession(1, true, 1400, nil, nil)
+	s.transportProtocol = common.StreamTransport
+	if err := s.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
 		t.Fatalf("SetReadDeadline() failed: %v", err)
 	}
-	readDone := make(chan error, 1)
+
+	buf := make([]byte, 16)
+	for i := 1; i <= 2; i++ {
+		start := time.Now()
+		n, err, returned := readWithin(t, s, buf, 5*time.Second)
+		if !returned {
+			t.Fatalf("Read() call %d didn't return with a read deadline that was already set", i)
+		}
+		if n != 0 || !stderror.IsTimeout(err) {
+			t.Fatalf("Read() call %d = (%d, %v), want (0, a timeout)", i, n, err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Read() call %d returned after %v, want it bounded by the read deadline", i, elapsed)
+		}
+		if got := s.readDeadline.Load(); got == 0 {
+			t.Fatalf("read deadline was cleared by Read() call %d", i)
+		}
+	}
+}
+
+// TestExpiredWriteDeadlineFailsWrite verifies that an expired write deadline
+// fails the write instead of being silently ignored.
+func TestExpiredWriteDeadlineFailsWrite(t *testing.T) {
+	s := NewSession(1, true, 1400, nil, nil)
+	s.transportProtocol = common.StreamTransport
+	s.forwardStateTo(sessionEstablished)
+	if err := s.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("SetWriteDeadline() failed: %v", err)
+	}
+
+	start := time.Now()
+	n, err := s.Write([]byte("payload"))
+	if n != 0 || !stderror.IsTimeout(err) {
+		t.Fatalf("Write() = (%d, %v), want (0, a timeout)", n, err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Write() with an expired deadline returned after %v, want an immediate timeout", elapsed)
+	}
+}
+
+// TestWriteKeepsApplicationDeadlines verifies that a data plane write doesn't
+// overwrite or clear the deadlines that the application set, and doesn't arm an
+// internal deadline once the handshake is not pending anymore.
+func TestWriteKeepsApplicationDeadlines(t *testing.T) {
+	s := NewSession(1, true, 1400, nil, nil)
+	s.transportProtocol = common.PacketTransport
+	s.forwardStateTo(sessionEstablished)
+	readDeadline := time.Now().Add(time.Minute)
+	writeDeadline := time.Now().Add(2 * time.Minute)
+	if err := s.SetReadDeadline(readDeadline); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	if err := s.SetWriteDeadline(writeDeadline); err != nil {
+		t.Fatalf("SetWriteDeadline() failed: %v", err)
+	}
+
+	payload := []byte("data plane payload")
+	_, n, err := collectSessionSegments(t, s, 1, func() (int, error) {
+		return s.Write(payload)
+	})
+	if err != nil || n != len(payload) {
+		t.Fatalf("Write() = (%d, %v), want (%d, nil)", n, err, len(payload))
+	}
+
+	if got := s.readDeadline.Load(); got != readDeadline.UnixMicro() {
+		t.Errorf("read deadline = %d after Write(), want the application deadline %d", got, readDeadline.UnixMicro())
+	}
+	if got := s.writeDeadline.Load(); got != writeDeadline.UnixMicro() {
+		t.Errorf("write deadline = %d after Write(), want the application deadline %d", got, writeDeadline.UnixMicro())
+	}
+	if got := s.internalDeadline.Load(); got != 0 {
+		t.Errorf("internal deadline = %d after a data plane Write(), want 0", got)
+	}
+}
+
+// TestHandshakeDeadlineIsSeparateFromApplicationDeadline verifies that the
+// internal deadline which bounds the handshake of a client lives in its own
+// field: it never overwrites an application deadline, the earlier of the two is
+// used, and it is ignored once the handshake is done.
+func TestHandshakeDeadlineIsSeparateFromApplicationDeadline(t *testing.T) {
+	s := NewSession(1, true, 1400, nil, nil)
+	s.transportProtocol = common.PacketTransport
+	s.forwardStateTo(sessionAttached)
+	s.handshakeStarted.Store(true)
+
+	appRead := time.Now().Add(time.Minute)
+	appWrite := time.Now().Add(2 * time.Minute)
+	if err := s.SetReadDeadline(appRead); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	if err := s.SetWriteDeadline(appWrite); err != nil {
+		t.Fatalf("SetWriteDeadline() failed: %v", err)
+	}
+
+	payload := []byte("handshake data")
+	if _, _, err := collectSessionSegments(t, s, 1, func() (int, error) {
+		return s.writeChunk(payload)
+	}); err != nil {
+		t.Fatalf("writeChunk() failed: %v", err)
+	}
+
+	if got := s.readDeadline.Load(); got != appRead.UnixMicro() {
+		t.Errorf("read deadline = %d, want the application deadline %d", got, appRead.UnixMicro())
+	}
+	if got := s.writeDeadline.Load(); got != appWrite.UnixMicro() {
+		t.Errorf("write deadline = %d, want the application deadline %d", got, appWrite.UnixMicro())
+	}
+	internal := s.internalDeadline.Load()
+	if internal == 0 {
+		t.Fatal("writeChunk() didn't arm the internal handshake deadline")
+	}
+
+	// While the handshake is pending the internal deadline, which is nearer
+	// than the application deadline, is the one that applies.
+	if got := s.effectiveReadDeadline(); got != internal {
+		t.Fatalf("effectiveReadDeadline() = %d, want the internal deadline %d", got, internal)
+	}
+	if got := s.effectiveWriteDeadline(); got != internal {
+		t.Fatalf("effectiveWriteDeadline() = %d, want the internal deadline %d", got, internal)
+	}
+
+	// A nearer application deadline wins over the internal one.
+	near := time.Now().Add(time.Second)
+	if err := s.SetReadDeadline(near); err != nil {
+		t.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	if got := s.effectiveReadDeadline(); got != near.UnixMicro() {
+		t.Fatalf("effectiveReadDeadline() = %d, want the application deadline %d", got, near.UnixMicro())
+	}
+
+	// A completed handshake makes the internal deadline irrelevant.
+	s.handshakeDone.Store(true)
+	if got := s.effectiveReadDeadline(); got != near.UnixMicro() {
+		t.Fatalf("effectiveReadDeadline() after the handshake = %d, want the application deadline %d", got, near.UnixMicro())
+	}
+	if got := s.effectiveWriteDeadline(); got != appWrite.UnixMicro() {
+		t.Fatalf("effectiveWriteDeadline() after the handshake = %d, want the application deadline %d", got, appWrite.UnixMicro())
+	}
+}
+
+// TestCloseReturnsWhenPeerDoesNotRead verifies that Close() marks the session
+// closed and returns promptly even when the underlay connection can't drain,
+// and that the close session request is still delivered once the peer reads.
+func TestCloseReturnsWhenPeerDoesNotRead(t *testing.T) {
+	password := cipher.HashPassword([]byte(t.Name()), []byte("user"))
+	block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, password, false)
+	if err != nil {
+		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
+	}
+	local, remote := net.Pipe()
+	underlay := &StreamUnderlay{
+		baseUnderlay:       *newBaseUnderlay(true, 1400, nil),
+		conn:               local,
+		block:              block.Clone(),
+		sessionCleanTicker: time.NewTicker(sessionCleanInterval),
+	}
+	underlay.baseUnderlay.rawConn = local
+	defer underlay.Close()
+	defer remote.Close()
+
+	// The session reaches the data plane, so Close() tries to tell the peer.
+	session := NewSession(1, true, 1400, nil, nil)
+	if err := underlay.AddSession(session, nil); err != nil {
+		t.Fatalf("AddSession() failed: %v", err)
+	}
+	session.forwardStateTo(sessionEstablished)
+
+	closeDone := make(chan error, 1)
 	go func() {
-		_, err := s.Read(buf)
-		readDone <- err
+		closeDone <- session.Close()
 	}()
 	select {
-	case err := <-readDone:
-		t.Fatalf("Read() = %v with an expired deadline and no data, want it to wait", err)
-	case <-time.After(200 * time.Millisecond):
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() didn't return within 1s while the peer wasn't reading")
 	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close() failed: %v", err)
-	}
+
 	select {
-	case err := <-readDone:
-		if err != io.EOF {
-			t.Fatalf("Read() after Close() = %v, want %v", err, io.EOF)
+	case <-session.closedChan:
+	default:
+		t.Fatal("closedChan is not closed after Close() returned")
+	}
+
+	// A second Close() reports the close of the session, which is already done.
+	if err := session.Close(); err != nil {
+		t.Fatalf("second Close() = %v, want nil", err)
+	}
+
+	// The close session request is best effort: Close() doesn't wait for it,
+	// but it is still written to the peer.
+	buf := make([]byte, 4096)
+	readDone := make(chan int, 1)
+	go func() {
+		n, _ := remote.Read(buf)
+		readDone <- n
+	}()
+	select {
+	case n := <-readDone:
+		if n == 0 {
+			t.Fatal("no close session request was written to the peer")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Read() didn't return after the session was closed")
+		t.Fatal("the close session request wasn't written to the peer")
+	}
+}
+
+// TestRemoteWindowSizeIgnoresStaleUpdate verifies that a window update carried
+// by a reordered or duplicated segment can't shrink the send window.
+func TestRemoteWindowSizeIgnoresStaleUpdate(t *testing.T) {
+	tests := []struct {
+		name     string
+		unAckSeq uint32
+		window   uint16
+		want     uint32
+	}{
+		{"first update", 10, 100, 100},
+		{"stale update", 5, 1, 100},
+		{"same unAckSeq with a larger window", 10, 50, 50},
+		{"newer update", 11, 20, 20},
+		{"newer update with a larger unAckSeq", 12, 4096, 4096},
+	}
+	s := NewSession(1, true, 1400, nil, nil)
+	s.transportProtocol = common.PacketTransport
+	for _, test := range tests {
+		seg := testDataSegment(1, 0, []byte("a"), common.PacketTransport)
+		das := seg.metadata.(*dataAckStruct)
+		das.baseStruct.protocol = uint8(ackServerToClient)
+		das.unAckSeq = test.unAckSeq
+		das.windowSize = test.window
+		if err := s.input(seg); err != nil {
+			t.Fatalf("%s: input() failed: %v", test.name, err)
+		}
+		if got := s.remoteWindowSize.Load(); got != test.want {
+			t.Fatalf("%s: remoteWindowSize = %d, want %d", test.name, got, test.want)
+		}
+	}
+}
+
+// TestReadRefreshesReceiveWindow verifies that the application side asks for a
+// window update after it consumed enough of the receive window.
+func TestReadRefreshesReceiveWindow(t *testing.T) {
+	s := NewSession(1, true, 1400, nil, nil)
+	s.transportProtocol = common.PacketTransport
+	for i := range ackWindowUpdateThreshold {
+		if !s.recvQueue.Insert(testServerToClientDataSegment(s.id, uint32(i), []byte("d"), common.PacketTransport)) {
+			t.Fatalf("failed to queue segment %d", i)
+		}
+	}
+	if s.ackOnDataRecv.Load() {
+		t.Fatal("an ACK is pending before the application read the segments")
+	}
+
+	buf := make([]byte, ackWindowUpdateThreshold)
+	if n, err := s.Read(buf); err != nil || n != len(buf) {
+		t.Fatalf("Read() = (%d, %v), want (%d, nil)", n, err, len(buf))
+	}
+	if !s.ackOnDataRecv.Load() {
+		t.Fatal("Read() didn't request a receive window update")
+	}
+}
+
+// readWithin runs Read in a separate goroutine and reports whether it returned
+// within the given limit. A regression that makes Read block forever fails the
+// test instead of hanging the test binary.
+func readWithin(t *testing.T, s *Session, b []byte, limit time.Duration) (n int, err error, returned bool) {
+	t.Helper()
+	type readResult struct {
+		n   int
+		err error
+	}
+	resultCh := make(chan readResult, 1)
+	go func() {
+		n, err := s.Read(b)
+		resultCh <- readResult{n: n, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.n, result.err, true
+	case <-time.After(limit):
+		return 0, nil, false
 	}
 }
 

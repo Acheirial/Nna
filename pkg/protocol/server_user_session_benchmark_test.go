@@ -42,7 +42,7 @@ func newUDPSessionBench(b *testing.B, sessionCount int, sameSource bool) *udpSes
 	encryptedMetadata := encryptDiscoveryMetadata(b, correctCredential, "correct-user", users, true, newDummyMetadata())
 
 	underlay := &PacketUnderlay{baseUnderlay: *newBaseUnderlay(false, 1400, nil)}
-	for i := 0; i < sessionCount; i++ {
+	for i := range sessionCount {
 		sessionAddr := net.Addr(remoteAddr)
 		if !sameSource {
 			sessionAddr = &net.UDPAddr{
@@ -50,10 +50,15 @@ func newUDPSessionBench(b *testing.B, sessionCount int, sameSource bool) *udpSes
 				Port: 30000 + i,
 			}
 		}
-		session := &Session{remoteAddr: sessionAddr}
+		// The sessions are attached through AddSession(), so that the address
+		// index of the underlay holds them: the benchmark has to measure the
+		// lookup path of the underlay, which uses the index.
+		session := &Session{id: uint32(i + 1), remoteAddr: sessionAddr}
 		block := wrongBlock
 		session.block.Store(&block)
-		underlay.sessionMap.Store(uint32(i+1), session)
+		if err := underlay.baseUnderlay.AddSession(session, sessionAddr); err != nil {
+			b.Fatalf("AddSession(%d) failed: %v", i, err)
+		}
 	}
 	return &udpSessionBench{underlay: underlay, remoteAddr: remoteAddr, encryptedMetadata: encryptedMetadata}
 }

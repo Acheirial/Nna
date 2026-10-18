@@ -19,9 +19,12 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math"
 	mrand "math/rand"
 	"net"
+	"net/netip"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +34,7 @@ import (
 	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/common"
 	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/stderror"
 	"github.com/enfein/mieru/v3/pkg/testtool"
 	"google.golang.org/protobuf/proto"
 )
@@ -167,14 +171,15 @@ func TestIPv4TCPUnderlay(t *testing.T) {
 	if err := serverMux.Start(); err != nil {
 		t.Fatalf("[%s] Start() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Every listener is bound when Start() returns and the underlay accept
+	// loops are running, so the client can dial right away. The test helper
+	// server consumes the sessions as soon as it is scheduled.
 	go func() {
 		if err := testServer.Serve(serverMux); err != nil {
 			t.Errorf("[%s] Serve() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 		}
 	}()
 	defer testServer.Close()
-	time.Sleep(100 * time.Millisecond)
 
 	clientProperties := NewUnderlayProperties(1400, common.StreamTransport, nil, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
 	runClient(t, clientProperties, []byte("xiaochitang"), []byte("kuiranbudong"), 4)
@@ -199,14 +204,15 @@ func TestIPv6TCPUnderlay(t *testing.T) {
 	if err := serverMux.Start(); err != nil {
 		t.Fatalf("[%s] Start() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Every listener is bound when Start() returns and the underlay accept
+	// loops are running, so the client can dial right away. The test helper
+	// server consumes the sessions as soon as it is scheduled.
 	go func() {
 		if err := testServer.Serve(serverMux); err != nil {
 			t.Errorf("[%s] Serve() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 		}
 	}()
 	defer testServer.Close()
-	time.Sleep(100 * time.Millisecond)
 
 	clientProperties := NewUnderlayProperties(1400, common.StreamTransport, nil, &net.TCPAddr{IP: net.ParseIP("::1"), Port: port})
 	runClient(t, clientProperties, []byte("xiaochitang"), []byte("kuiranbudong"), 4)
@@ -231,14 +237,15 @@ func TestIPv4UDPUnderlay(t *testing.T) {
 	if err := serverMux.Start(); err != nil {
 		t.Fatalf("[%s] Start() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Every listener is bound when Start() returns and the underlay accept
+	// loops are running, so the client can dial right away. The test helper
+	// server consumes the sessions as soon as it is scheduled.
 	go func() {
 		if err := testServer.Serve(serverMux); err != nil {
 			t.Errorf("[%s] Serve() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 		}
 	}()
 	defer testServer.Close()
-	time.Sleep(100 * time.Millisecond)
 
 	clientProperties := NewUnderlayProperties(1400, common.PacketTransport, nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
 	runClient(t, clientProperties, []byte("xiaochitang"), []byte("kuiranbudong"), 4)
@@ -263,14 +270,15 @@ func TestIPv6UDPUnderlay(t *testing.T) {
 	if err := serverMux.Start(); err != nil {
 		t.Fatalf("[%s] Start() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Every listener is bound when Start() returns and the underlay accept
+	// loops are running, so the client can dial right away. The test helper
+	// server consumes the sessions as soon as it is scheduled.
 	go func() {
 		if err := testServer.Serve(serverMux); err != nil {
 			t.Errorf("[%s] Serve() failed: %v", time.Now().Format(testtool.TimeLayout), err)
 		}
 	}()
 	defer testServer.Close()
-	time.Sleep(100 * time.Millisecond)
 
 	clientProperties := NewUnderlayProperties(1400, common.PacketTransport, nil, &net.UDPAddr{IP: net.ParseIP("::1"), Port: port})
 	runClient(t, clientProperties, []byte("xiaochitang"), []byte("kuiranbudong"), 4)
@@ -392,21 +400,15 @@ func TestMuxCloseIsIdempotentUnderConcurrency(t *testing.T) {
 
 	// Wait until both endpoints have a running underlay.
 	var underlays []Underlay
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitForCondition(t, 5*time.Second, "the mux to start an underlay for both endpoints", func() bool {
 		mux.mu.Lock()
-		if len(mux.underlays) >= 2 {
-			underlays = append([]Underlay(nil), mux.underlays...)
+		defer mux.mu.Unlock()
+		if len(mux.underlays) < 2 {
+			return false
 		}
-		mux.mu.Unlock()
-		if len(underlays) >= 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the mux didn't start an underlay for both endpoints")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		underlays = append([]Underlay(nil), mux.underlays...)
+		return true
+	})
 
 	const goroutines = 8
 	errs := make(chan error, goroutines)
@@ -446,5 +448,361 @@ func TestMuxCloseIsIdempotentUnderConcurrency(t *testing.T) {
 	}
 	if _, err := mux.Accept(); err == nil {
 		t.Error("Accept() succeeded after the mux was closed")
+	}
+}
+
+// waitForCondition polls cond until it returns true, or fails the test when the
+// deadline expires. Between two attempts the loop yields the processor instead
+// of sleeping, so the outcome doesn't depend on a fixed sleep that may be too
+// short on a slow machine.
+func waitForCondition(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for %s", timeout, what)
+		}
+		runtime.Gosched()
+	}
+}
+
+// exchangePayload writes one payload through conn and verifies the rotate-13
+// response of the test helper server.
+func exchangePayload(t *testing.T, conn net.Conn) {
+	t.Helper()
+	payload := testRot13Payload(t, testtool.TestHelperGenRot13Input(64))
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("Write() failed: %v", err)
+	}
+	reply := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("io.ReadFull() failed: %v", err)
+	}
+	rot13, err := testtool.TestHelperRot13(reply)
+	if err != nil {
+		t.Fatalf("TestHelperRot13() failed: %v", err)
+	}
+	if !bytes.Equal(payload, rot13) {
+		t.Fatal("received an unexpected response")
+	}
+}
+
+// TestSourceRateLimiter verifies the token bucket that limits how fast a single
+// source IP address can open TCP underlays.
+func TestSourceRateLimiter(t *testing.T) {
+	const burst = 2
+	limiter := newSourceRateLimiter(burst, 0)
+	source := netip.MustParseAddr("192.0.2.10")
+	other := netip.MustParseAddr("192.0.2.11")
+
+	for i := range burst {
+		if !limiter.allow(source) {
+			t.Fatalf("allow() %d = false, want true", i)
+		}
+	}
+	if limiter.allow(source) {
+		t.Error("allow() = true after the bucket of the source is empty")
+	}
+	if !limiter.allow(other) {
+		t.Error("allow() = false for another source address, want true")
+	}
+	if !limiter.allow(netip.Addr{}) {
+		t.Error("allow() = false for an address without an IP address, want true")
+	}
+
+	// The bucket of a source that stopped opening underlays is dropped.
+	limiter.clean(time.Now().Add(acceptBucketIdleTimeout))
+	if !limiter.allow(source) {
+		t.Error("allow() = false after the idle bucket of the source was dropped, want true")
+	}
+
+	// Tokens are refilled at the configured rate, up to the bucket size.
+	refilling := newSourceRateLimiter(burst, 5)
+	refilling.mu.Lock()
+	refilling.buckets[source] = &sourceBucket{lastSeen: time.Now().Add(-time.Second)}
+	refilling.mu.Unlock()
+	for i := range burst {
+		if !refilling.allow(source) {
+			t.Fatalf("allow() %d = false after one second of refill, want true", i)
+		}
+	}
+	if refilling.allow(source) {
+		t.Error("allow() = true with more tokens than the bucket size")
+	}
+
+	// The number of buckets stays bounded even when every source address is new.
+	counted := newSourceRateLimiter(1, 1)
+	for i := range acceptMaxSourceBuckets + 16 {
+		counted.allow(netip.AddrFrom4([4]byte{10, byte(i >> 8), byte(i), 1}))
+	}
+	if n := len(counted.buckets); n > acceptMaxSourceBuckets {
+		t.Errorf("the limiter keeps %d buckets, want at most %d", n, acceptMaxSourceBuckets)
+	}
+}
+
+// TestServerRejectsUnderlayOverSourceRate verifies that a source IP address
+// that opens TCP underlays faster than the accept rate limit gets its new
+// connections closed, while the accepted connections are kept.
+func TestServerRejectsUnderlayOverSourceRate(t *testing.T) {
+	log.SetOutputToTest(t)
+	port, err := common.UnusedTCPPort()
+	if err != nil {
+		t.Fatalf("common.UnusedTCPPort() failed: %v", err)
+	}
+	serverProperties := NewUnderlayProperties(1400, common.StreamTransport, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}, nil)
+	serverMux := NewMux(false).
+		SetServerUsers(users).
+		SetEndpoints([]UnderlayProperties{serverProperties})
+	// A bucket of 2 tokens without refill makes the number of accepted
+	// connections independent of the speed of the test.
+	const acceptLimit = 2
+	serverMux.acceptLimiter = newSourceRateLimiter(acceptLimit, 0)
+	t.Cleanup(func() { serverMux.Close() })
+	if err := serverMux.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	rawConns := make([]net.Conn, 0, acceptLimit+1)
+	for i := range acceptLimit + 1 {
+		conn, err := net.Dial("tcp", serverProperties.LocalAddr().String())
+		if err != nil {
+			t.Fatalf("net.Dial() %d failed: %v", i, err)
+		}
+		rawConns = append(rawConns, conn)
+	}
+	t.Cleanup(func() {
+		for _, conn := range rawConns {
+			conn.Close()
+		}
+	})
+
+	// The server keeps the accepted connections, which wait for a handshake,
+	// and closes the connection that the rate limiter rejected.
+	closed := make(chan net.Conn, len(rawConns))
+	for _, conn := range rawConns {
+		go func(conn net.Conn) {
+			buf := make([]byte, 1)
+			for {
+				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				n, err := conn.Read(buf)
+				if err == nil || n > 0 {
+					return
+				}
+				if stderror.IsTimeout(err) {
+					continue
+				}
+				closed <- conn
+				return
+			}
+		}(conn)
+	}
+	waitForCondition(t, 5*time.Second, "the server to close the rejected connection", func() bool {
+		return len(closed) >= 1
+	})
+	serverMux.mu.Lock()
+	registered := len(serverMux.underlays)
+	serverMux.mu.Unlock()
+	if registered != acceptLimit {
+		t.Fatalf("server mux has %d underlays, want %d", registered, acceptLimit)
+	}
+	if n := len(closed); n != 1 {
+		t.Errorf("the server closed %d connections, want 1", n)
+	}
+}
+
+// TestServerUnderlayLimitKeepsExistingSessions verifies that the concurrent
+// underlay limit refuses new connections while a session that is already
+// established keeps working.
+func TestServerUnderlayLimitKeepsExistingSessions(t *testing.T) {
+	log.SetOutputToTest(t)
+	port, err := common.UnusedTCPPort()
+	if err != nil {
+		t.Fatalf("common.UnusedTCPPort() failed: %v", err)
+	}
+	serverProperties := NewUnderlayProperties(1400, common.StreamTransport, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}, nil)
+	serverMux := NewMux(false).
+		SetServerUsers(users).
+		SetEndpoints([]UnderlayProperties{serverProperties})
+	// Room for the underlay of the session and for two connections that never
+	// establish a session.
+	const underlayLimit = 3
+	serverMux.maxUnderlayCount = underlayLimit
+	// Keep the accept rate limiter out of the way; this test exercises the
+	// underlay limit only.
+	serverMux.acceptLimiter = newSourceRateLimiter(acceptBurst, acceptRefillPerSecond)
+	testServer := testtool.NewTestHelperServer()
+	defer testServer.Close()
+	t.Cleanup(func() { serverMux.Close() })
+	if err := serverMux.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	go func() {
+		if err := testServer.Serve(serverMux); err != nil {
+			t.Errorf("Serve() failed: %v", err)
+		}
+	}()
+
+	clientProperties := NewUnderlayProperties(1400, common.StreamTransport, nil, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+	clientMux := NewMux(true).
+		SetClientUserNamePassword("xiaochitang", cipher.HashPassword([]byte("kuiranbudong"), []byte("xiaochitang"))).
+		SetEndpoints([]UnderlayProperties{clientProperties})
+	t.Cleanup(func() { clientMux.Close() })
+	dialCtx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+	conn, err := clientMux.DialContext(dialCtx)
+	if err != nil {
+		t.Fatalf("DialContext() failed: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	exchangePayload(t, conn)
+
+	// Fill the remaining underlay slots with connections that never start a
+	// session.
+	blockers := make([]net.Conn, 0, underlayLimit-1)
+	for i := range underlayLimit - 1 {
+		blocker, err := net.Dial("tcp", serverProperties.LocalAddr().String())
+		if err != nil {
+			t.Fatalf("net.Dial() %d failed: %v", i, err)
+		}
+		blockers = append(blockers, blocker)
+	}
+	t.Cleanup(func() {
+		for _, blocker := range blockers {
+			blocker.Close()
+		}
+	})
+	waitForCondition(t, 5*time.Second, "the server to reach the underlay limit", func() bool {
+		serverMux.mu.Lock()
+		defer serverMux.mu.Unlock()
+		return len(serverMux.underlays) >= underlayLimit
+	})
+
+	// A connection over the limit is refused.
+	overLimit, err := net.Dial("tcp", serverProperties.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("net.Dial() failed: %v", err)
+	}
+	t.Cleanup(func() { overLimit.Close() })
+	overLimit.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := overLimit.Read(make([]byte, 1)); err == nil || stderror.IsTimeout(err) {
+		t.Fatalf("the server didn't close the connection over the underlay limit: %v", err)
+	}
+	serverMux.mu.Lock()
+	registered := len(serverMux.underlays)
+	serverMux.mu.Unlock()
+	if registered != underlayLimit {
+		t.Fatalf("server mux has %d underlays, want %d", registered, underlayLimit)
+	}
+
+	// The session that was established before the limit was reached still works.
+	exchangePayload(t, conn)
+
+	// Closing the server before the test returns stops the test helper server
+	// while the test is still running.
+	if err := serverMux.Close(); err != nil {
+		t.Errorf("Server mux close failed: %v", err)
+	}
+}
+
+// TestMultiplexFactorIsClamped verifies that the multiplexing factor stays in
+// the supported range, so that the traffic volume limit of a client underlay
+// can't overflow to a zero limit that never disables scheduling.
+func TestMultiplexFactorIsClamped(t *testing.T) {
+	log.SetOutputToTest(t)
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"negative", -1, 0},
+		{"off", 0, 0},
+		{"low", 1, 1},
+		{"middle", 2, 2},
+		{"high", 3, 3},
+		{"above high", 4, maxMultiplexFactor},
+		{"shift overflow", 64, maxMultiplexFactor},
+		{"max int", math.MaxInt, maxMultiplexFactor},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := NewMux(true).SetClientMultiplexFactor(tc.in)
+			if mux.multiplexFactor != tc.want {
+				t.Errorf("multiplexing factor = %d, want %d", mux.multiplexFactor, tc.want)
+			}
+			want := baseUnderlayTrafficVolumeLimit << uint(tc.want)
+			if limit := mux.trafficVolumeLimit(); limit != want || limit <= 0 {
+				t.Errorf("traffic volume limit = %d, want %d and a positive number of bytes", limit, want)
+			}
+			if err := mux.Close(); err != nil {
+				t.Errorf("Close() failed: %v", err)
+			}
+		})
+	}
+}
+
+// TestServerStreamUnderlaySilentTTL verifies that a server stream underlay
+// without any session is reclaimed after its TTL, so a connection that never
+// establishes a session can't be held open forever.
+func TestServerStreamUnderlaySilentTTL(t *testing.T) {
+	log.SetOutputToTest(t)
+	port, err := common.UnusedTCPPort()
+	if err != nil {
+		t.Fatalf("common.UnusedTCPPort() failed: %v", err)
+	}
+	serverProperties := NewUnderlayProperties(1400, common.StreamTransport, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}, nil)
+	serverMux := NewMux(false).
+		SetServerUsers(users).
+		SetEndpoints([]UnderlayProperties{serverProperties})
+	serverMux.silentUnderlayTTL = 20 * time.Millisecond
+	t.Cleanup(func() { serverMux.Close() })
+	if err := serverMux.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	rawConn, err := net.Dial("tcp", serverProperties.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("net.Dial() failed: %v", err)
+	}
+	t.Cleanup(func() { rawConn.Close() })
+
+	var underlay Underlay
+	waitForCondition(t, 5*time.Second, "the server to accept the connection", func() bool {
+		serverMux.mu.Lock()
+		defer serverMux.mu.Unlock()
+		if len(serverMux.underlays) != 1 {
+			return false
+		}
+		underlay = serverMux.underlays[0]
+		return true
+	})
+
+	// The TTL of the underlay disables its scheduler, which makes the idle
+	// underlay cleanup reachable for a server underlay.
+	waitForCondition(t, 5*time.Second, "the silent connection TTL to pass", func() bool {
+		return underlay.Scheduler().IsDisabled()
+	})
+
+	// cleanUnderlay() is what the mux maintenance loop runs to reclaim the
+	// underlays that are finished.
+	serverMux.mu.Lock()
+	serverMux.cleanUnderlay(false)
+	remaining := len(serverMux.underlays)
+	serverMux.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("server mux has %d underlays after the silent connection TTL, want 0", remaining)
+	}
+	select {
+	case <-underlay.Done():
+	default:
+		t.Fatal("the silent underlay is not closed")
+	}
+
+	// The peer observes the connection that was closed by the server.
+	rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := rawConn.Read(make([]byte, 1)); err == nil || stderror.IsTimeout(err) {
+		t.Fatalf("the silent connection is still open: %v", err)
 	}
 }

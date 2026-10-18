@@ -28,11 +28,18 @@ import (
 
 const (
 	// minSupportedProtocolVersion and maxSupportedProtocolVersion are the
-	// protocol version range of this build. The version is negotiated with the
-	// peer, but currently only version 2 is supported, so a peer that doesn't
-	// speak version 2 is rejected.
+	// protocol version range of this build. Version 2 peers are still
+	// supported, so an old client keeps working; the version is negotiated
+	// with the peer and a peer that doesn't speak a version in this range is
+	// rejected.
+	//
+	// Version 3 changes the key derivation only and doesn't change the wire
+	// format: from version 3 on the session keys are derived from the
+	// negotiated cipher suite instead of the cipher that protected the
+	// handshake envelope, so a negotiated suite is no longer bounded by the key
+	// length of the envelope. The handshake status codes are unchanged.
 	minSupportedProtocolVersion uint8 = 2
-	maxSupportedProtocolVersion uint8 = 2
+	maxSupportedProtocolVersion uint8 = 3
 
 	// maxHandshakeSuites is the maximum number of cipher suites a client may
 	// offer in one handshake request.
@@ -100,9 +107,9 @@ func (h *handshakeRequest) Marshal() []byte {
 // can find the application data that may follow the handshake request in the
 // payload of an openSessionRequest.
 //
-// A request that is truncated, that carries an unknown cipher suite or an
-// invalid version range is rejected with an error. parseHandshakeRequest never
-// panics.
+// A request that is truncated, that carries an unknown or a duplicate cipher
+// suite or an invalid version range is rejected with an error.
+// parseHandshakeRequest never panics.
 func parseHandshakeRequest(b []byte) (*handshakeRequest, int, error) {
 	if len(b) < handshakeRequestHeaderLen {
 		return nil, 0, fmt.Errorf("handshake request is %d bytes, want at least %d bytes", len(b), handshakeRequestHeaderLen)
@@ -145,9 +152,15 @@ func (h *handshakeRequest) validate() error {
 	if len(h.suites) < 1 || len(h.suites) > maxHandshakeSuites {
 		return fmt.Errorf("handshake request carries %d cipher suites, want between 1 and %d", len(h.suites), maxHandshakeSuites)
 	}
-	for _, suite := range h.suites {
+	for i, suite := range h.suites {
 		if !suite.IsValid() {
 			return fmt.Errorf("handshake request carries unknown cipher suite %d", uint8(suite))
+		}
+		// A duplicate entry makes the preference list ambiguous, so it is
+		// rejected instead of being collapsed here: a peer that parses an
+		// untrusted request must not silently rewrite it.
+		if slices.Contains(h.suites[:i], suite) {
+			return fmt.Errorf("handshake request carries duplicate cipher suite %d", uint8(suite))
 		}
 	}
 	if h.versionMin > h.versionMax {
@@ -226,10 +239,47 @@ func negotiateVersion(clientMin, clientMax uint8) (uint8, bool) {
 	return version, true
 }
 
-// negotiateSuite returns the cipher suite used by both peers. A suite is
-// selected only when it is allowed by the server and offered by the client,
-// and the server preference order decides among multiple common suites. The
-// second return value is false when the intersection is empty.
+// negotiateSuiteForEnvelope returns the cipher suite used by both peers under
+// protocol version 2. A suite is selected only when it is allowed by the
+// server, offered by the client, and needs no more key material than envelope
+// provides; the server preference order decides among multiple remaining
+// suites. The second return value is false when no candidate satisfies both the
+// intersection and the envelope key length bound.
+//
+// Under version 2 the session keys are derived from the cipher that protected
+// the handshake envelope, which only returns envelope.KeyLen() bytes of key
+// material, so a candidate with a longer key could not protect the data plane.
+// Such a candidate is skipped here instead of being negotiated and rejected
+// later, so that a client whose preferred suite is shorter than the one the
+// server prefers still completes the handshake. Version 3 peers use
+// negotiateSuite() instead, which has no key length bound.
+func negotiateSuiteForEnvelope(clientSuites []cipher.Suite, allowed []cipher.Suite, envelope cipher.Suite) (cipher.Suite, bool) {
+	if len(allowed) == 0 {
+		allowed = cipher.AllSuites()
+	}
+	for _, serverSuite := range allowed {
+		if !serverSuite.IsValid() || serverSuite.KeyLen() > envelope.KeyLen() {
+			continue
+		}
+		for _, clientSuite := range clientSuites {
+			if clientSuite == serverSuite {
+				return serverSuite, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// negotiateSuite returns the cipher suite used by both peers under protocol
+// version 3 and later. A suite is selected only when it is allowed by the
+// server and offered by the client, and the server preference order decides
+// among multiple candidates. The second return value is false when the
+// intersection is empty.
+//
+// Unlike negotiateSuiteForEnvelope(), the selection is not bounded by the key
+// length of the handshake envelope: from version 3 on the session keys are
+// derived from the negotiated suite instead of the envelope cipher, so a
+// negotiated suite may need more key material than the envelope provides.
 func negotiateSuite(clientSuites []cipher.Suite, allowed []cipher.Suite) (cipher.Suite, bool) {
 	if len(allowed) == 0 {
 		allowed = cipher.AllSuites()
@@ -274,16 +324,22 @@ func handshakeFailureResponse(status uint8) *handshakeResponse {
 }
 
 // sessionSuite returns the cipher suite that protects the data plane of a
-// handshake, or an error when the negotiated suite can't be used.
+// version 2 handshake, or an error when the negotiated suite can't be used.
 //
-// The session keys are derived from the cipher that protected the handshake
-// envelope, because it is the only static key both peers can mix into the
-// derivation with the same time slot: a peer whose clock is offset may be
-// using a different time slot than the local clock, and only the envelope
+// Under version 2 the session keys are derived from the cipher that protected
+// the handshake envelope, because it is the only static key both peers can mix
+// into the derivation with the same time slot: a peer whose clock is offset may
+// be using a different time slot than the local clock, and only the envelope
 // cipher records the slot of the peer. The derivation therefore returns
 // envelope.KeyLen() bytes of key material, so a negotiated suite with a longer
 // key can't be used and the handshake must fail instead of silently using a
 // suite the server doesn't allow.
+//
+// This function is a defensive check for version 2: negotiateSuiteForEnvelope()
+// already skips every candidate whose key is longer than the key of the
+// envelope, so it only rejects a caller that derived the session keys without
+// passing the negotiated suite through that filter. Version 3 peers don't use
+// it, because their session keys are derived from the negotiated suite.
 func sessionSuite(negotiated, envelope cipher.Suite) (cipher.Suite, error) {
 	if !negotiated.IsValid() {
 		return 0, fmt.Errorf("negotiated cipher suite is invalid")
@@ -298,7 +354,15 @@ func sessionSuite(negotiated, envelope cipher.Suite) (cipher.Suite, error) {
 // plane ciphers of a handshake. c must be the cipher that decrypted the
 // handshake envelope, so that both peers mix the same static key and the same
 // time slot into the key derivation. suite is the negotiated cipher suite of
-// the data plane.
+// the data plane, and version selects the derivation:
+//
+//   - from version 3 on, the session keys are derived from the negotiated suite,
+//     so the negotiated suite may need more key material than the envelope
+//     provides;
+//   - under version 2 they are derived from the cipher that protected the
+//     handshake envelope, which keeps the keys of an old peer bit for bit
+//     identical, and the negotiated suite must not need more key material than
+//     the envelope provides.
 func deriveSessionKeys(c cipher.BlockCipher, suite cipher.Suite, privateKey *ecdh.PrivateKey, peerPub, clientSalt, serverSalt []byte, version uint8, stateless bool) (c2s, s2c cipher.BlockCipher, err error) {
 	if c == nil {
 		return nil, nil, fmt.Errorf("handshake cipher is nil")
@@ -306,9 +370,17 @@ func deriveSessionKeys(c cipher.BlockCipher, suite cipher.Suite, privateKey *ecd
 	if privateKey == nil {
 		return nil, nil, fmt.Errorf("handshake private key is nil")
 	}
-	dataSuite, err := sessionSuite(suite, c.Suite())
-	if err != nil {
-		return nil, nil, err
+	// keySuite selects the HKDF info and the key length. dataSuite protects the
+	// data plane. They are the negotiated suite from version 3 on; under
+	// version 2 the keys are derived from the envelope cipher, and only their
+	// first dataSuite.KeyLen() bytes are used.
+	dataSuite := suite
+	keySuite := suite
+	if version < 3 {
+		if dataSuite, err = sessionSuite(suite, c.Suite()); err != nil {
+			return nil, nil, err
+		}
+		keySuite = c.Suite()
 	}
 	shared, err := cipher.SharedSecret(privateKey, peerPub)
 	if err != nil {
@@ -316,7 +388,7 @@ func deriveSessionKeys(c cipher.BlockCipher, suite cipher.Suite, privateKey *ecd
 	}
 	ctx := c.BlockContext()
 	pattern := c.NoncePattern()
-	c2sKey, s2cKey, err := cipher.DeriveSessionKeys(c, shared, clientSalt, serverSalt, version)
+	c2sKey, s2cKey, err := cipher.DeriveSessionKeys(c, keySuite, shared, clientSalt, serverSalt, version)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cipher.DeriveSessionKeys() failed: %w", err)
 	}

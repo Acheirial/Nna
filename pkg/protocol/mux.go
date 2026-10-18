@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	mrand "math/rand"
 	"net"
+	"net/netip"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -42,6 +44,83 @@ import (
 const (
 	underlayCleanInterval      = 5 * time.Second
 	minUnderlayCapacityReclaim = 16
+)
+
+// Backoff of the rebuild of the listener of a packet endpoint.
+//
+// The socket of a packet endpoint is the listener of the endpoint itself, so an
+// endpoint whose socket died serves nobody: the listener is rebuilt instead of
+// letting the endpoint stay offline until the process restarts. The rebuild
+// runs after a growing delay, because the reason a rebuild fails is usually a
+// condition that lasts (a port that another process holds, a network interface
+// that is down), and a tight retry loop would burn the CPU of the server.
+const (
+	// packetUnderlayRebuildBackoffInitial is the delay before the second
+	// listener of a packet endpoint.
+	packetUnderlayRebuildBackoffInitial = 1 * time.Second
+
+	// packetUnderlayRebuildBackoffMax caps the delay between two rebuild
+	// attempts. It also serves as the time that a rebuilt endpoint has to
+	// serve for the backoff of a previous failure to be forgiven.
+	packetUnderlayRebuildBackoffMax = 30 * time.Second
+)
+
+// Limits of the mux underlay list and of the server accept path.
+const (
+	// maxUnderlays is the maximum number of underlays a single mux keeps at the
+	// same time. The underlays of a server are established by peers that are not
+	// authenticated yet, so this bounds how many sockets, goroutines and buffers
+	// such peers can make the server allocate. Reaching the limit rejects new
+	// underlays only: it never touches an existing underlay or the sessions
+	// running on it.
+	maxUnderlays = 4096
+
+	// serverUnderlayTTL is how long a server stream underlay without any session
+	// stays open. It is well above the largest single read timeout of a stream
+	// underlay (readOneSegmentTimeout is at most 121s), so a peer that is
+	// temporarily quiet during the handshake is not dropped, while a connection
+	// that never establishes a session is reclaimed in a bounded time.
+	serverUnderlayTTL = 3 * time.Minute
+
+	// acceptBurst is the size of the token bucket of one source IP address in
+	// the server TCP accept path: how many underlays a source IP address can
+	// open back to back. It covers a client that starts many sessions at once,
+	// and it covers several clients that share the same NAT address. The
+	// integration test opens more than a thousand underlays from 127.0.0.1 in a
+	// few seconds with multiplexing enabled, so the burst is well above that:
+	// the bound of the number of underlays is maxUnderlays, and this limiter
+	// only keeps a single source address from draining that bound instantly.
+	acceptBurst = 2048
+
+	// acceptRefillPerSecond is the token refill rate of one source IP address.
+	// It bounds the sustained rate at which an unauthenticated peer can make the
+	// server allocate and handshake new TCP underlays. It is calibrated the same
+	// way as acceptBurst: it has to stay above the churn of a legitimate client,
+	// or a busy client is disconnected.
+	acceptRefillPerSecond = 512
+
+	// acceptBucketIdleTimeout is how long a source IP address keeps its token
+	// bucket after its last new underlay.
+	acceptBucketIdleTimeout = 10 * time.Minute
+
+	// acceptMaxSourceBuckets is the hard upper bound of the number of source IP
+	// buckets tracked at the same time, so that a flood from many source
+	// addresses can't grow the token bucket map without bound.
+	acceptMaxSourceBuckets = 4096
+
+	// maxMultiplexFactor is the largest client multiplexing factor. The
+	// configuration layer maps MULTIPLEXING_OFF to 0, MULTIPLEXING_LOW to 1,
+	// MULTIPLEXING_MIDDLE to 2 and MULTIPLEXING_HIGH to 3, so no valid
+	// configuration is clamped. Larger factors are refused because
+	// baseUnderlayTrafficVolumeLimit is shifted left by the factor to compute
+	// the underlay traffic volume limit, and a shift of 64 or more overflows to
+	// a zero limit that never disables scheduling.
+	maxMultiplexFactor = 3
+
+	// baseUnderlayTrafficVolumeLimit is the number of bytes that disables
+	// scheduling new sessions to a client underlay, for a multiplexing factor
+	// of 0. It is 512 MiB, so the limit is 1 GiB for a multiplexing factor of 1.
+	baseUnderlayTrafficVolumeLimit int64 = 512 * 1024 * 1024
 )
 
 // Mux manages the sessions and underlays.
@@ -68,6 +147,22 @@ type Mux struct {
 	mu                    sync.Mutex
 	serverUnderlayLoopWG  sync.WaitGroup
 	cleaner               *time.Ticker
+
+	// maxUnderlayCount and silentUnderlayTTL are the runtime values of the
+	// maxUnderlays and serverUnderlayTTL constants. They are struct fields so
+	// that a test can lower them before the mux is used.
+	maxUnderlayCount  int
+	silentUnderlayTTL time.Duration
+
+	// packetRebuildBackoffInitial and packetRebuildBackoffMax are the runtime
+	// values of the packetUnderlayRebuildBackoff* constants. They are struct
+	// fields so that a test can lower them before the mux is used.
+	packetRebuildBackoffInitial time.Duration
+	packetRebuildBackoffMax     time.Duration
+
+	// acceptLimiter limits how fast a single source IP address can make the
+	// server establish new TCP underlays. Only the server accept path uses it.
+	acceptLimiter *sourceRateLimiter
 
 	// ---- client only fields ----
 	username        string
@@ -106,6 +201,12 @@ func NewMux(isClinet bool) *Mux {
 		closeDone:             make(chan struct{}),
 		maintenanceDone:       make(chan struct{}),
 		cleaner:               time.NewTicker(underlayCleanInterval),
+		maxUnderlayCount:      maxUnderlays,
+		silentUnderlayTTL:     serverUnderlayTTL,
+
+		packetRebuildBackoffInitial: packetUnderlayRebuildBackoffInitial,
+		packetRebuildBackoffMax:     packetUnderlayRebuildBackoffMax,
+		acceptLimiter:               newSourceRateLimiter(acceptBurst, acceptRefillPerSecond),
 	}
 	mux.ctx, mux.ctxCancelFunc = context.WithCancel(context.Background())
 
@@ -122,6 +223,9 @@ func NewMux(isClinet bool) *Mux {
 					mux.cleanUnderlay(false)
 				}
 				mux.mu.Unlock()
+				// Drop the token buckets of source addresses that stopped
+				// opening new underlays, so the limiter memory stays bounded.
+				mux.acceptLimiter.clean(time.Now())
 			case <-mux.done:
 				mux.cleaner.Stop()
 				return
@@ -258,7 +362,13 @@ func (m *Mux) SetClientUserNamePassword(username string, password []byte) *Mux {
 	return m
 }
 
-// SetClientMultiplexFactor panics if the mux is already started.
+// SetClientMultiplexFactor sets how aggressively the client reuses an existing
+// underlay instead of creating a new one. The supported range is
+// [0, maxMultiplexFactor]: 0 disables multiplexing and larger values make reuse
+// more likely. A value outside the range is clamped, because a larger factor
+// would overflow the traffic volume limit computed by cleanUnderlay.
+//
+// This method panics if the mux is already started.
 func (m *Mux) SetClientMultiplexFactor(n int) *Mux {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -268,7 +378,11 @@ func (m *Mux) SetClientMultiplexFactor(n int) *Mux {
 	if m.used {
 		panic("Can't set multiplex factor after mux is used")
 	}
-	m.multiplexFactor = mathext.Max(n, 0)
+	factor := mathext.Min(mathext.Max(n, 0), maxMultiplexFactor)
+	if factor != n {
+		log.Warnf("Multiplexing factor %d is out of the supported range [0, %d], using %d", n, maxMultiplexFactor, factor)
+	}
+	m.multiplexFactor = factor
 	log.Infof("Mux multiplexing factor is set to %d", m.multiplexFactor)
 	return m
 }
@@ -285,7 +399,9 @@ func (m *Mux) SetServerUsers(users map[string]*appctlpb.User) *Mux {
 // SetCipherSuites sets the cipher suite preference order of the client.
 // The first entry of the list protects the handshake request, and the server
 // picks the final suite from the intersection of this list and the suites it
-// allows.
+// allows. A candidate also has to fit the handshake envelope: a suite whose
+// key is longer than the key of the first entry can't be derived from the
+// envelope and is skipped.
 //
 // Duplicates and unknown suites are dropped, the order is preserved, and an
 // empty list selects SuiteXChaCha20Poly1305. This method panics if the mux is
@@ -557,8 +673,19 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 				return
 			default:
 			}
-			m.underlays = append(m.underlays, underlay)
 			m.cleanUnderlay(false)
+			if len(m.underlays) >= m.maxUnderlayCount {
+				limit := m.maxUnderlayCount
+				m.mu.Unlock()
+				log.Debugf("Mux has reached the limit of %d underlays, rejecting new server underlay from %v", limit, underlay.RemoteAddr())
+				underlay.Close()
+				continue
+			}
+			// A server stream underlay serves a single session. Disable
+			// scheduling after silentUnderlayTTL, so a connection that never
+			// establishes a session becomes idle and cleanUnderlay closes it.
+			underlay.Scheduler().SetRemainingTime(m.silentUnderlayTTL)
+			m.underlays = append(m.underlays, underlay)
 			m.startServerUnderlayEventLoop(ctx, underlay)
 			m.mu.Unlock()
 
@@ -589,59 +716,140 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 			wg.Done()
 			return
 		}
-		conn, err := m.packetListenerFactory.ListenPacket(ctx, udpAddr.Network(), udpAddr.String())
-		if err != nil {
-			err = fmt.Errorf("listen %s %s failed: %w", udpAddr.Network(), udpAddr.String(), err)
-			log.Errorf("%v", err)
-			acceptErr.set(err)
-			wg.Done()
-			return
-		}
-		wg.Done()
-		log.Infof("Mux is listening to endpoint %s %s", network, laddr)
-
-		var trafficPattern *appctlpb.TrafficPattern
-		if m.trafficPattern != nil {
-			trafficPattern = m.trafficPattern.Effective()
-		}
-		underlay := &PacketUnderlay{
-			baseUnderlay:       *newBaseUnderlay(false, properties.MTU(), trafficPattern),
-			conn:               conn,
-			sessionCleanTicker: time.NewTicker(sessionCleanInterval),
-			serverUsers:        &m.serverUsers,
-		}
-		setUnderlayRawConn(underlay)
-		log.Infof("Created new server underlay %v", underlay)
-		m.mu.Lock()
-		select {
-		case <-m.done:
-			m.mu.Unlock()
-			underlay.Close()
-			return
-		default:
-		}
-		m.underlays = append(m.underlays, underlay)
-		m.cleanUnderlay(false)
-		m.startServerUnderlayEventLoop(ctx, underlay)
-		m.mu.Unlock()
-
-		// Accept sessions from the underlay.
-		go func(ctx context.Context, underlay Underlay) {
-			for {
-				conn, err := underlay.Accept()
-				if err != nil {
-					if !stderror.IsEOF(err) && !stderror.IsClosed(err) {
-						log.Debugf("%v Accept(): %v", underlay, err)
-					}
-					break
-				}
-				select {
-				case m.chAccept <- conn:
-				case <-ctx.Done():
+		// The listener of a packet endpoint is the endpoint itself, so this
+		// loop never gives the endpoint up. When the event loop of the
+		// underlay returns, which only a failure of the listener socket does,
+		// the dead underlay leaves the mux and the listener is rebuilt after a
+		// growing backoff. A failed rebuild keeps the loop running as well,
+		// because the condition that prevented the rebuild (a port that
+		// another process holds, the underlay limit of the mux) can go away
+		// while the server runs, and an endpoint that stays offline until the
+		// process restarts serves nobody.
+		//
+		// Only the first listen reports a failure to the caller: Start() and
+		// UpdateEndpoints() have to know whether the endpoint was usable at
+		// all, while a rebuild failure of an endpoint that already served is a
+		// temporary condition that the endpoint retries on its own.
+		bound := false
+		attempt := 0
+		for {
+			conn, err := m.packetListenerFactory.ListenPacket(ctx, udpAddr.Network(), udpAddr.String())
+			if err != nil {
+				err = fmt.Errorf("listen %s %s failed: %w", udpAddr.Network(), udpAddr.String(), err)
+				if !bound {
+					log.Errorf("%v", err)
+					acceptErr.set(err)
+					wg.Done()
 					return
 				}
+				log.Errorf("Failed to rebuild the packet endpoint %s %s: %v", network, laddr, err)
+				if !m.waitPacketUnderlayRebuild(ctx, attempt) {
+					return
+				}
+				attempt++
+				continue
 			}
-		}(ctx, underlay)
+			if !bound {
+				bound = true
+				wg.Done()
+				log.Infof("Mux is listening to endpoint %s %s", network, laddr)
+			}
+
+			var trafficPattern *appctlpb.TrafficPattern
+			if m.trafficPattern != nil {
+				trafficPattern = m.trafficPattern.Effective()
+			}
+			underlay := &PacketUnderlay{
+				// The MTU of the endpoint is the MTU of layer 3, so the IP and
+				// UDP headers are deducted once, here: every budget below
+				// (fragment size, padding) is a payload budget.
+				baseUnderlay:       *newBaseUnderlay(false, packetUnderlayMTU(properties.MTU()), trafficPattern),
+				conn:               conn,
+				sessionCleanTicker: time.NewTicker(sessionCleanInterval),
+				serverUsers:        &m.serverUsers,
+			}
+			setUnderlayRawConn(underlay)
+			log.Infof("Created new server underlay %v", underlay)
+
+			m.mu.Lock()
+			select {
+			case <-m.done:
+				m.mu.Unlock()
+				underlay.Close()
+				return
+			default:
+			}
+			m.cleanUnderlay(false)
+			if len(m.underlays) >= m.maxUnderlayCount {
+				limit := m.maxUnderlayCount
+				m.mu.Unlock()
+				log.Errorf("Mux has reached the limit of %d underlays, can't start the server underlay on %s", limit, laddr)
+				underlay.Close()
+				if !m.waitPacketUnderlayRebuild(ctx, attempt) {
+					return
+				}
+				attempt++
+				continue
+			}
+			// Unlike a stream underlay, a packet underlay is the listener of the
+			// endpoint itself, not a connection of a single peer. It is registered
+			// without a TTL and must not be reclaimed while the mux is running.
+			m.underlays = append(m.underlays, underlay)
+			// The event loop runs in its own goroutine and this loop observes
+			// its end, which is what makes the endpoint rebuild itself.
+			eventLoopDone := m.startServerUnderlayEventLoop(ctx, underlay)
+			m.mu.Unlock()
+			started := time.Now()
+
+			// Accept sessions from the underlay.
+			go func(ctx context.Context, underlay Underlay) {
+				for {
+					conn, err := underlay.Accept()
+					if err != nil {
+						if !stderror.IsEOF(err) && !stderror.IsClosed(err) {
+							log.Debugf("%v Accept(): %v", underlay, err)
+						}
+						break
+					}
+					select {
+					case m.chAccept <- conn:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}(ctx, underlay)
+
+			// Wait for the event loop to return. It returns when the endpoint
+			// is closed, which ends this loop below, or when the socket of the
+			// underlay failed, which is the case that rebuilds the endpoint.
+			<-eventLoopDone
+
+			// The event loop closed the dead underlay. Drop it from the mux
+			// now, so that the rebuild can't run into the underlay limit on
+			// behalf of an underlay that serves no session anymore.
+			m.mu.Lock()
+			m.cleanUnderlay(false)
+			m.mu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-m.done:
+				return
+			default:
+			}
+
+			// The endpoint served for long enough: forgive its backoff and
+			// rebuild the listener right away.
+			if time.Since(started) >= m.packetRebuildBackoffMax {
+				attempt = 0
+			}
+			log.Infof("Rebuilding the packet endpoint %s %s after the socket of its underlay failed", network, laddr)
+			if !m.waitPacketUnderlayRebuild(ctx, attempt) {
+				return
+			}
+			attempt++
+		}
 	default:
 		err := fmt.Errorf("unsupported underlay network type %q", network)
 		log.Errorf("%v", err)
@@ -650,16 +858,30 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 	}
 }
 
+// acceptTCPUnderlay accepts one TCP connection and turns it into a server
+// underlay. Connections of a source IP address that opens underlays faster than
+// the accept rate limit are closed without being wrapped, so that an
+// unauthenticated peer can't make the server run handshakes at an arbitrary
+// rate.
 func (m *Mux) acceptTCPUnderlay(rawListener net.Listener, properties UnderlayProperties) (Underlay, error) {
-	rawConn, err := rawListener.Accept()
-	if err != nil {
-		return nil, fmt.Errorf("Accept() underlay failed: %w", err)
+	for {
+		rawConn, err := rawListener.Accept()
+		if err != nil {
+			return nil, fmt.Errorf("Accept() underlay failed: %w", err)
+		}
+		if !m.acceptLimiter.allow(underlaySourceAddr(rawConn.RemoteAddr())) {
+			if m.acceptLimiter.shouldLogRefusal(time.Now()) {
+				log.Warnf("Rejecting new server underlays: a source address exceeded the accept rate limit of %d underlays per second (last refused peer %v)", acceptRefillPerSecond, rawConn.RemoteAddr())
+			}
+			rawConn.Close()
+			continue
+		}
+		var trafficPattern *appctlpb.TrafficPattern
+		if m.trafficPattern != nil {
+			trafficPattern = m.trafficPattern.Effective()
+		}
+		return m.serverWrapTCPConn(rawConn, properties.MTU(), trafficPattern), nil
 	}
-	var trafficPattern *appctlpb.TrafficPattern
-	if m.trafficPattern != nil {
-		trafficPattern = m.trafficPattern.Effective()
-	}
-	return m.serverWrapTCPConn(rawConn, properties.MTU(), trafficPattern), nil
 }
 
 func (m *Mux) serverWrapTCPConn(rawConn net.Conn, mtu int, trafficPattern *appctlpb.TrafficPattern) Underlay {
@@ -707,6 +929,11 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 	cipherSuites := m.clientCipherSuites()
 
 	m.mu.Lock()
+	if len(m.underlays) >= m.maxUnderlayCount {
+		limit := m.maxUnderlayCount
+		m.mu.Unlock()
+		return nil, fmt.Errorf("mux has reached the limit of %d underlays", limit)
+	}
 	i := mrand.Intn(len(m.endpoints))
 	p := m.endpoints[i]
 	if m.trafficPattern != nil {
@@ -722,6 +949,10 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 		}
 		block.SetBlockContext(cipher.BlockContext{
 			UserName: m.username,
+			// The client writes the keyed user hint of protocol v3, so that
+			// the server can filter candidate users without leaking which user
+			// names are registered to an observer of the first packet.
+			Pepper: cipher.HintPepper(m.username, string(m.password)),
 		})
 		if trafficPattern != nil {
 			block.SetNoncePattern(trafficPattern.GetNonce())
@@ -739,6 +970,10 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 		}
 		block.SetBlockContext(cipher.BlockContext{
 			UserName: m.username,
+			// The client writes the keyed user hint of protocol v3, so that
+			// the server can filter candidate users without leaking which user
+			// names are registered to an observer of the first packet.
+			Pepper: cipher.HintPepper(m.username, string(m.password)),
 		})
 		if trafficPattern != nil {
 			block.SetNoncePattern(trafficPattern.GetNonce())
@@ -771,7 +1006,13 @@ func (m *Mux) newUnderlay(ctx context.Context) (Underlay, error) {
 // startServerUnderlayEventLoop registers and starts a server underlay event
 // loop. The caller must hold m.mu and must verify that m.done is still open
 // first. This keeps WaitGroup.Add ordered before the shutdown Wait.
-func (m *Mux) startServerUnderlayEventLoop(ctx context.Context, underlay Underlay) {
+//
+// The returned channel is closed when the event loop has returned and the
+// underlay is closed, which lets a caller that has to reconstruct the underlay
+// observe the death of this one. A caller that doesn't need that can ignore the
+// channel.
+func (m *Mux) startServerUnderlayEventLoop(ctx context.Context, underlay Underlay) <-chan struct{} {
+	eventLoopDone := make(chan struct{})
 	m.serverUnderlayLoopWG.Add(1)
 	go func() {
 		defer m.serverUnderlayLoopWG.Done()
@@ -780,7 +1021,53 @@ func (m *Mux) startServerUnderlayEventLoop(ctx context.Context, underlay Underla
 			log.Debugf("%v RunEventLoop(): %v", underlay, err)
 		}
 		underlay.Close()
+		close(eventLoopDone)
 	}()
+	return eventLoopDone
+}
+
+// packetUnderlayRebuildBackoff returns the delay before the next attempt to
+// rebuild the listener of a packet endpoint. attempt is the number of
+// consecutive attempts that the endpoint already made, initial is the delay of
+// the first attempt and max caps the delay of the later ones.
+//
+// The delay doubles with every attempt up to max, and it is randomized in
+// [d/2, d]. The jitter keeps the endpoints of a server that lost a network
+// interface from rebuilding their listeners in lockstep, in the same way the
+// retransmission timers of the sessions are jittered.
+func packetUnderlayRebuildBackoff(attempt int, initial, max time.Duration) time.Duration {
+	delay := initial
+	for i := 0; i < attempt && delay < max; i++ {
+		delay *= 2
+	}
+	if delay > max || delay <= 0 {
+		delay = max
+	}
+	if delay <= 0 {
+		return 0
+	}
+	return delay/2 + time.Duration(mrand.Int63n(int64(delay/2)+1))
+}
+
+// waitPacketUnderlayRebuild waits for the rebuild backoff of the given attempt
+// and reports whether the mux should continue. It reports false when the mux or
+// the caller context is done, so that the endpoint gives up instead of
+// rebuilding a listener of a mux that is shutting down.
+func (m *Mux) waitPacketUnderlayRebuild(ctx context.Context, attempt int) bool {
+	delay := packetUnderlayRebuildBackoff(attempt, m.packetRebuildBackoffInitial, m.packetRebuildBackoffMax)
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-m.done:
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // maybePickExistingUnderlay returns either an existing underlay that
@@ -828,8 +1115,11 @@ func (m *Mux) cleanUnderlay(alsoDisableIdleOrOverloadUnderlay bool) {
 		select {
 		case <-underlay.Done():
 		default:
-			// Close idle underlay.
-			if underlay.SessionCount() == 0 && underlay.Scheduler().Idle() {
+			// Close an underlay that has no session and that is done for good:
+			// either its scheduling has been disabled for the idle interval, or
+			// it is a server underlay that outlived serverUnderlayTTL without
+			// establishing any session.
+			if underlay.SessionCount() == 0 && m.underlayFinished(underlay) {
 				underlay.Close()
 				close++
 			} else {
@@ -846,8 +1136,7 @@ func (m *Mux) cleanUnderlay(alsoDisableIdleOrOverloadUnderlay bool) {
 				}
 
 				// Disable scheduling in overloaded underlay.
-				// If multiplexFactor is 1, the limit is 1 GiB.
-				var trafficVolumeLimit int64 = 512 * 1024 * 1024 << m.multiplexFactor
+				trafficVolumeLimit := m.trafficVolumeLimit()
 				if underlay.Scheduler().DisableTime().IsZero() && (underlay.InBytes() > trafficVolumeLimit || underlay.OutBytes() > trafficVolumeLimit) {
 					underlay.Scheduler().SetRemainingTime(0)
 					disable++
@@ -876,6 +1165,29 @@ func (m *Mux) cleanUnderlay(alsoDisableIdleOrOverloadUnderlay bool) {
 	}
 }
 
+// underlayFinished reports whether an underlay without any session is done for
+// good, and can therefore be closed by the maintenance loop.
+//
+// A client underlay is only closed after its scheduling has been disabled for
+// the idle interval. A server stream underlay is accepted with a limited
+// lifetime: its scheduler is disabled after serverUnderlayTTL, so a connection
+// that never established a session, or whose session already ended, is
+// reclaimed instead of being held open forever.
+func (m *Mux) underlayFinished(underlay Underlay) bool {
+	if underlay.Scheduler().Idle() {
+		return true
+	}
+	return !m.isClient && underlay.Scheduler().IsDisabled()
+}
+
+// trafficVolumeLimit returns the number of bytes after which scheduling new
+// sessions to a client underlay is disabled. SetClientMultiplexFactor clamps
+// the multiplexing factor to [0, maxMultiplexFactor], so the shifted limit is
+// always a positive number of bytes and is never zero.
+func (m *Mux) trafficVolumeLimit() int64 {
+	return baseUnderlayTrafficVolumeLimit << uint(m.multiplexFactor)
+}
+
 type muxAcceptErr struct {
 	done chan struct{}
 	once sync.Once
@@ -902,4 +1214,146 @@ func (e *muxAcceptErr) get() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.err
+}
+
+// sourceBucket is the token bucket of a single source IP address.
+type sourceBucket struct {
+	tokens   float64
+	lastSeen time.Time
+}
+
+// sourceRateLimiter limits how fast a single source IP address can make the
+// server establish new TCP underlays. It keeps one token bucket per source IP
+// address: burst is how many underlays a source can open back to back, and
+// perSecond is the sustained rate. A rate limit is the cheapest way to bound
+// this: every accepted connection makes the server allocate an underlay and run
+// a handshake for a peer that is not authenticated yet.
+//
+// The map size is bounded by acceptMaxSourceBuckets and the buckets of idle
+// sources are dropped, so a flood from many source addresses can't grow the
+// limiter without bound either.
+type sourceRateLimiter struct {
+	burst     float64
+	perSecond float64
+	mu        sync.Mutex
+	buckets   map[netip.Addr]*sourceBucket
+	// lastRefusalLog is the time of the last refusal that was logged. The
+	// limiter refuses every connection of a flooding source, so the refusal is
+	// logged at most once per second instead of once per connection.
+	lastRefusalLog time.Time
+}
+
+// shouldLogRefusal reports whether a refused connection should be logged now.
+// It bounds the log rate of a flood to one line per second.
+func (l *sourceRateLimiter) shouldLogRefusal(now time.Time) bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.lastRefusalLog.IsZero() && now.Sub(l.lastRefusalLog) < time.Second {
+		return false
+	}
+	l.lastRefusalLog = now
+	return true
+}
+
+// newSourceRateLimiter creates a limiter with the given bucket size and refill
+// rate. A refill rate of 0 disables refilling.
+func newSourceRateLimiter(burst, perSecond float64) *sourceRateLimiter {
+	return &sourceRateLimiter{
+		burst:     burst,
+		perSecond: perSecond,
+		buckets:   make(map[netip.Addr]*sourceBucket),
+	}
+}
+
+// allow takes one token of the given source address and reports whether the
+// token was available. An address that carries no IP address is always allowed,
+// because it can't be attributed to a source.
+func (l *sourceRateLimiter) allow(addr netip.Addr) bool {
+	if l == nil || !addr.IsValid() {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	b, ok := l.buckets[addr]
+	if !ok {
+		if len(l.buckets) >= acceptMaxSourceBuckets {
+			l.evictLocked(now)
+		}
+		b = &sourceBucket{tokens: l.burst, lastSeen: now}
+		l.buckets[addr] = b
+	} else {
+		if elapsed := now.Sub(b.lastSeen).Seconds(); elapsed > 0 {
+			b.tokens = math.Min(l.burst, b.tokens+elapsed*l.perSecond)
+		}
+		b.lastSeen = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// clean drops the token buckets of the source addresses that are idle for at
+// least acceptBucketIdleTimeout.
+func (l *sourceRateLimiter) clean(now time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.evictLocked(now)
+}
+
+// evictLocked drops the buckets of the idle source addresses. If the map is
+// still full afterwards, the least recently seen bucket is dropped as well, so
+// the number of buckets never exceeds acceptMaxSourceBuckets.
+func (l *sourceRateLimiter) evictLocked(now time.Time) {
+	for addr, b := range l.buckets {
+		if now.Sub(b.lastSeen) >= acceptBucketIdleTimeout {
+			delete(l.buckets, addr)
+		}
+	}
+	if len(l.buckets) < acceptMaxSourceBuckets {
+		return
+	}
+	var oldestAddr netip.Addr
+	var oldestSeen time.Time
+	for addr, b := range l.buckets {
+		if !oldestSeen.IsZero() && !b.lastSeen.Before(oldestSeen) {
+			continue
+		}
+		oldestAddr, oldestSeen = addr, b.lastSeen
+	}
+	delete(l.buckets, oldestAddr)
+}
+
+// underlaySourceAddr returns the source IP address of addr without the port and
+// without an IPv4-mapped IPv6 prefix. It returns an invalid address when addr
+// carries no IP address.
+func underlaySourceAddr(addr net.Addr) netip.Addr {
+	var ip net.IP
+	switch addr := addr.(type) {
+	case *net.TCPAddr:
+		if addr == nil {
+			return netip.Addr{}
+		}
+		ip = addr.IP
+	case *net.UDPAddr:
+		if addr == nil {
+			return netip.Addr{}
+		}
+		ip = addr.IP
+	default:
+		return netip.Addr{}
+	}
+	parsed, ok := netip.AddrFromSlice(ip)
+	if !ok || !parsed.IsValid() {
+		return netip.Addr{}
+	}
+	return parsed.Unmap()
 }

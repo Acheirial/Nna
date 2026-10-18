@@ -116,14 +116,27 @@ func newTestHandshakeClient(tb testing.TB, envelope cipher.BlockCipher, stateles
 }
 
 // newTestHandshakeClientWithSuites creates a raw client that offers the given
-// cipher suites in its handshake request. The envelope cipher of the request
-// is independent of the offered suites.
+// cipher suites in its handshake request, with the protocol version range of
+// this build. The envelope cipher of the request is independent of the offered
+// suites.
 func newTestHandshakeClientWithSuites(tb testing.TB, envelope cipher.BlockCipher, stateless bool, suites []cipher.Suite) (*testHandshakeClient, []byte) {
+	tb.Helper()
+	return newTestHandshakeClientWithVersion(tb, envelope, stateless, suites, minSupportedProtocolVersion, maxSupportedProtocolVersion)
+}
+
+// newTestHandshakeClientWithVersion creates a raw client that offers the given
+// cipher suites with the given protocol version range, so that a test can act
+// as a version 2 peer, which derives its session keys from the handshake
+// envelope. The envelope cipher of the request is independent of the offered
+// suites.
+func newTestHandshakeClientWithVersion(tb testing.TB, envelope cipher.BlockCipher, stateless bool, suites []cipher.Suite, versionMin, versionMax uint8) (*testHandshakeClient, []byte) {
 	tb.Helper()
 	request, privateKey, err := newHandshakeRequest(suites)
 	if err != nil {
 		tb.Fatalf("newHandshakeRequest() failed: %v", err)
 	}
+	request.versionMin = versionMin
+	request.versionMax = versionMax
 	c := &testHandshakeClient{
 		envelope:  envelope,
 		priv:      privateKey,
@@ -389,13 +402,13 @@ func testServerSession(tb testing.TB, underlay any, sessionID uint32) *Session {
 // keys instead of the static key.
 func TestHandshakeEndToEnd(t *testing.T) {
 	testCases := []struct {
-		name            string
-		network         string
-		transport       common.TransportProtocol
-		clientSuites    []cipher.Suite
-		allowedSuites   []cipher.Suite
-		wantDataSuite   cipher.Suite
-		wantEnvelopeLen int
+		name          string
+		network       string
+		transport     common.TransportProtocol
+		clientSuites  []cipher.Suite
+		allowedSuites []cipher.Suite
+		wantDataSuite cipher.Suite
+		envelopeLen   int
 	}{
 		{
 			name:          "tcp default suites",
@@ -416,6 +429,32 @@ func TestHandshakeEndToEnd(t *testing.T) {
 			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES256GCM},
 			allowedSuites: []cipher.Suite{cipher.SuiteAES256GCM},
 			wantDataSuite: cipher.SuiteAES256GCM,
+		},
+		{
+			// The first suite of the client protects the handshake envelope, so
+			// this case negotiates a 32 bytes key suite out of a 16 bytes
+			// envelope. From protocol version 3 on the session keys are derived
+			// from the negotiated suite, so the server preference order selects
+			// XChaCha20-Poly1305 even though the client prefers the shorter key
+			// of AES-128-GCM. The version 2 expectation of the same lists is
+			// covered by TestAcceptHandshakeVersionSelectsSuite: there the
+			// envelope filter selects AES-128-GCM.
+			name:          "tcp client prefers a suite with a short key",
+			network:       "tcp",
+			transport:     common.StreamTransport,
+			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305},
+			wantDataSuite: cipher.SuiteXChaCha20Poly1305,
+			envelopeLen:   cipher.SuiteAES128GCM.KeyLen(),
+		},
+		{
+			// Without a candidate that the envelope key length rules out, the
+			// server preference order still selects the suite it selected
+			// before the envelope filter was introduced.
+			name:          "tcp server preference is unchanged when every candidate fits",
+			network:       "tcp",
+			transport:     common.StreamTransport,
+			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES128GCM},
+			wantDataSuite: cipher.SuiteXChaCha20Poly1305,
 		},
 	}
 	for _, tc := range testCases {
@@ -545,6 +584,15 @@ func TestHandshakeEndToEnd(t *testing.T) {
 			if got := (*s2c).Suite(); got != tc.wantDataSuite {
 				t.Fatalf("server to client cipher suite = %v, want %v", got, tc.wantDataSuite)
 			}
+			// The data plane may negotiate a suite with a longer key than the
+			// cipher that protected the handshake envelope, which is why the
+			// session keys are derived from the negotiated suite from version 3
+			// on. The envelope cipher is the first suite the client offers.
+			if tc.envelopeLen > 0 {
+				if got := clientStaticCipher(t, session).Suite().KeyLen(); got != tc.envelopeLen {
+					t.Fatalf("client handshake envelope key length = %d, want %d", got, tc.envelopeLen)
+				}
+			}
 
 			// The server side of the session installed the mirror image keys.
 			serverSession := testServerSession(t, findServerUnderlay(t, serverMux), session.id)
@@ -651,7 +699,7 @@ func TestHandshakeRejectsIncompatibleRequests(t *testing.T) {
 		},
 		{
 			name:       "no common protocol version",
-			payload:    testHandshakeRequestPayloadWithVersion(t, 3, 3, nil),
+			payload:    testHandshakeRequestPayloadWithVersion(t, maxSupportedProtocolVersion+1, maxSupportedProtocolVersion+1, nil),
 			wantStatus: handshakeStatusNoVersion,
 		},
 		{
@@ -952,6 +1000,6 @@ func TestHandshakeStreamEndToEndRejectsWrongKey(t *testing.T) {
 		t.Fatal("the stream underlay didn't switch its cipher chain to the session keys")
 	}
 	if got := (*serverC2S).Suite(); got != cipher.SuiteXChaCha20Poly1305 {
-		t.Fatalf("server receive cipher suite = %v, want the client preferred suite", got)
+		t.Fatalf("server receive cipher suite = %v, want %v", got, cipher.SuiteXChaCha20Poly1305)
 	}
 }

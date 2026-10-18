@@ -168,8 +168,8 @@ func e2eBenchmarkRoundTrip(b *testing.B, session *Session, payload, reply []byte
 	if _, err := session.Write(payload); err != nil {
 		b.Fatalf("Session.Write() failed: %v", err)
 	}
-	// The read deadline is cleared by every completed read, so it is set again
-	// for each echo.
+	// The deadline applies to every read until it is changed, so it is
+	// refreshed for each echo.
 	if err := session.SetReadDeadline(time.Now().Add(e2eBenchmarkReadTimeout)); err != nil {
 		b.Fatalf("Session.SetReadDeadline() failed: %v", err)
 	}

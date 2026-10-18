@@ -58,6 +58,16 @@ func TestBuildStateRawAndHashedCredential(t *testing.T) {
 	if rawState.users[0].credential != hashedState.users[0].credential {
 		t.Fatal("raw and hashed credentials compiled to different prepared values")
 	}
+	// A user configured with the raw password and a user configured with the
+	// equivalent hashed password must produce the same hint pepper, because the
+	// pepper is derived from the shared credential and the client derives the
+	// same credential from either configuration.
+	if want := cipher.HintPepper(name, string(prepared)); !bytes.Equal(rawState.users[0].pepper, want) {
+		t.Errorf("raw credential pepper = %x, want %x", rawState.users[0].pepper, want)
+	}
+	if !bytes.Equal(hashedState.users[0].pepper, rawState.users[0].pepper) {
+		t.Errorf("hashed credential pepper = %x, want %x", hashedState.users[0].pepper, rawState.users[0].pepper)
+	}
 }
 
 func TestBuildStateRejectsMalformedCredentials(t *testing.T) {
