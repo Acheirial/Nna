@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/apis/model"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/model"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 const forwardingWriteTimeout = time.Minute
@@ -260,10 +260,11 @@ func (s *Server) handleForwarding(req *model.Request, proxyConn net.Conn, proxy 
 }
 
 func (s *Server) handleForwardingUDP(req *model.Request, proxyConn, egressConn net.Conn) error {
-	// Mita creates a new UDP socket for the downstream proxy, so the client's
-	// requested endpoint does not describe the source of those datagrams. Ask
-	// the downstream proxy to learn Mita's UDP endpoint from the association
-	// instead. Each UDP datagram still carries its actual destination address.
+	// The shadowlemon server creates a new UDP socket for the downstream proxy,
+	// so the client's requested endpoint does not describe the source of those
+	// datagrams. Ask the downstream proxy to learn the server's UDP endpoint
+	// from the association instead. Each UDP datagram still carries its actual
+	// destination address.
 	downstreamReq := &model.Request{
 		Command: constant.Socks5UDPAssociateCmd,
 		DstAddr: model.AddrSpec{IP: net.IPv4zero, Port: 0},

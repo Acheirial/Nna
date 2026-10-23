@@ -50,7 +50,7 @@
             },
             "servers": [
                 {
-                    "domainName": "mieru.org",
+                    "domainName": "shadowlemon.org",
                     "portBindings": [
                         {
                             "port": 6000,

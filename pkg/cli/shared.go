@@ -16,8 +16,8 @@
 package cli
 
 import (
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/version"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/version"
 )
 
 // versionFunc is the callback of the "version" command,

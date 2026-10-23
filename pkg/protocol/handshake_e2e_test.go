@@ -25,10 +25,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/testtool"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/testtool"
 )
 
 // ---------------------------------------------------------------------------

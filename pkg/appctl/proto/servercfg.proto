@@ -15,11 +15,11 @@
 
 syntax = "proto3";
 
-package mieru.appctl;
+package shadowlemon.appctl;
 
 import "appctl/proto/base.proto";
 
-option go_package = "github.com/enfein/mieru/v3/pkg/appctl/appctlpb";
+option go_package = "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb";
 
 // Proxy server configuration. The next field number is 11.
 message ServerConfig {

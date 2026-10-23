@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/mathext"
+	"github.com/Acheirial/shadowlemon/v3/pkg/mathext"
 )
 
 // The estimator of RFC 6298, Section 2.3: the smoothed RTT is updated with the

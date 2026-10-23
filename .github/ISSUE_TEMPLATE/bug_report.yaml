@@ -25,20 +25,20 @@ body:
       label: 安装类型
       description: 安装类型
       options:
-        - 原始 mita & mieru 可执行文件
-        - 第三方 mieru 客户端
+        - 从源码编译
+        - 使用已编译的二进制
         - 其他
     validations:
       required: true
   - type: textarea
     attributes:
       label: 服务器版本
-      description: 如果您使用原始 mita 可执行文件，请提供 `shadowlemon server version` 命令的输出。
+      description: 请提供 `shadowlemon server version` 命令的输出。
       render: shell
   - type: textarea
     attributes:
       label: 客户端版本
-      description: 如果您使用原始 mieru 可执行文件，请提供 `shadowlemon client version` 命令的输出。
+      description: 请提供 `shadowlemon client version` 命令的输出。
       render: shell
   - type: textarea
     attributes:

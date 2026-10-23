@@ -23,10 +23,10 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/mathext"
-	"github.com/enfein/mieru/v3/pkg/rng"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/mathext"
+	"github.com/Acheirial/shadowlemon/v3/pkg/rng"
 	"google.golang.org/protobuf/proto"
 )
 

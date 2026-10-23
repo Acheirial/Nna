@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/replay"
+	"github.com/Acheirial/shadowlemon/v3/pkg/replay"
 )
 
 // Every test uses a fixed capacity and a one minute expire interval, so that

@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# Assume this file is executed with `docker build -f` from the root dir of mieru project.
+# Assume this file is executed with `docker build -f` from the root dir of shadowlemon project.
 
 FROM ubuntu:24.04
 
@@ -32,13 +32,13 @@ COPY bin/shadowlemon bin/httpserver bin/sockshttpclient bin/socksudpclient bin/u
     test/deploy/basic/test_aes_udp.sh test/deploy/basic/test_suite_mismatch.sh \
     test/deploy/basic/test.sh /test/
 
-# Create mita user and server config directory.
-RUN /usr/sbin/useradd --no-create-home --user-group mita && \
-    mkdir -p /etc/mita && \
-    chown -R mita:mita /etc/mita && \
-    chmod 775 /etc/mita && \
-    mkdir -p /var/run/mita && \
-    chown -R mita:mita /var/run/mita && \
-    chmod 777 /var/run/mita
+# Create shadowlemon user and server config directory.
+RUN /usr/sbin/useradd --no-create-home --user-group shadowlemon && \
+    mkdir -p /etc/shadowlemon && \
+    chown -R shadowlemon:shadowlemon /etc/shadowlemon && \
+    chmod 775 /etc/shadowlemon && \
+    mkdir -p /var/run/shadowlemon && \
+    chown -R shadowlemon:shadowlemon /var/run/shadowlemon && \
+    chmod 777 /var/run/shadowlemon
 
 CMD ["/test/test.sh"]

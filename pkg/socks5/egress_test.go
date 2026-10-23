@@ -22,11 +22,11 @@ import (
 	"net"
 	"testing"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/apis/model"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/egress"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/model"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/egress"
 	"google.golang.org/protobuf/proto"
 )
 

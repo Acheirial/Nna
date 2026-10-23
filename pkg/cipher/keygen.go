@@ -31,11 +31,11 @@ const (
 	// envelope key is derived from the password only, so a low iteration count
 	// makes that search cheap.
 	//
-	// This is part of mieru protocol. This value should not be changed.
+	// This is part of the ShadowLemon protocol. This value should not be changed.
 	KeyIterV3 = 4096
 
 	// KeyRefreshInterval is the amount of time when the salt used to generate cipher block is changed.
-	// This is part of mieru protocol. This value should not be changed.
+	// This is part of the ShadowLemon protocol. This value should not be changed.
 	KeyRefreshInterval = 2 * time.Minute
 )
 

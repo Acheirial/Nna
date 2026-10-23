@@ -22,8 +22,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 )
 
 // Auth provide authentication settings to socks5 server.

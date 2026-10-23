@@ -18,7 +18,7 @@ package appctl
 import (
 	"testing"
 
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
 	"google.golang.org/protobuf/proto"
 )
 

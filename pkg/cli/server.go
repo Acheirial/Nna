@@ -21,11 +21,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/enfein/mieru/v3/pkg/appctl"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 // RegisterServerCommands registers all the server side CLI commands.
@@ -153,7 +153,7 @@ var serverHelpFunc = func(s []string) error {
 				cmd: "server run",
 				help: []string{
 					"Run shadowlemon server in foreground.",
-					"Use environment variable MITA_CONFIG_JSON_FILE to load configuration.",
+					"Use environment variable SHADOWLEMON_SERVER_CONFIG_JSON_FILE to load configuration.",
 				},
 			},
 		},
@@ -190,7 +190,7 @@ var serverStartFunc = func(s []string) error {
 }
 
 var serverRunFunc = func(s []string) error {
-	if _, found := os.LookupEnv("MITA_LOG_NO_TIMESTAMP"); found {
+	if _, found := os.LookupEnv("SHADOWLEMON_LOG_NO_TIMESTAMP"); found {
 		log.SetFormatter(&log.DaemonFormatter{NoTimestamp: true})
 	} else {
 		log.SetFormatter(&log.DaemonFormatter{})

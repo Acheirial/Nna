@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -314,10 +314,10 @@ func TestClientLoadConfigFromJSON(t *testing.T) {
 	}
 	cachedClientConfigFilePath = ""
 
-	if err := os.Setenv("MIERU_CONFIG_JSON_FILE", configFilePath); err != nil {
+	if err := os.Setenv("SHADOWLEMON_CLIENT_CONFIG_JSON_FILE", configFilePath); err != nil {
 		t.Fatalf("os.Setenv() failed: %v", err)
 	}
-	defer os.Unsetenv("MIERU_CONFIG_JSON_FILE")
+	defer os.Unsetenv("SHADOWLEMON_CLIENT_CONFIG_JSON_FILE")
 
 	// Load JSON configuration file.
 	config, err := LoadClientConfig()
@@ -337,10 +337,10 @@ func TestClientStoreConfigToJSON(t *testing.T) {
 	configFilePath := cachedClientConfigDir + string(os.PathSeparator) + "client_store.json"
 	cachedClientConfigFilePath = ""
 
-	if err := os.Setenv("MIERU_CONFIG_JSON_FILE", configFilePath); err != nil {
+	if err := os.Setenv("SHADOWLEMON_CLIENT_CONFIG_JSON_FILE", configFilePath); err != nil {
 		t.Fatalf("os.Setenv() failed: %v", err)
 	}
-	defer os.Unsetenv("MIERU_CONFIG_JSON_FILE")
+	defer os.Unsetenv("SHADOWLEMON_CLIENT_CONFIG_JSON_FILE")
 
 	// Store JSON configuration file.
 	if err := StoreClientConfig(&pb.ClientConfig{}); err != nil {

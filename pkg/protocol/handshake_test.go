@@ -20,8 +20,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 )
 
 func TestHandshakeRequestRoundTrip(t *testing.T) {

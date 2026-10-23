@@ -4,13 +4,13 @@ START=99
 STOP=01
 
 SHADOWLEMON_BIN="/usr/bin/shadowlemon"
-MIERU_CONFIG="/etc/mieru_client_config.json"
+SHADOWLEMON_CONFIG="/etc/shadowlemon_client_config.json"
 
 start() {
     echo "Starting shadowlemon client..."
-    # The pid file is maintained by shadowlemon itself (<config dir>/mieru.pid),
+    # The pid file is maintained by shadowlemon itself (<config dir>/shadowlemon.pid),
     # so this script must not create or delete a pid file of its own.
-    export MIERU_CONFIG_JSON_FILE=$MIERU_CONFIG
+    export SHADOWLEMON_CLIENT_CONFIG_JSON_FILE=$SHADOWLEMON_CONFIG
     "$SHADOWLEMON_BIN" client start
     RC=$?
     if [ $RC -eq 0 ]; then

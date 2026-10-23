@@ -20,7 +20,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 )
 
 // fuzzRequestSeed returns the wire format of a handshake request that carries

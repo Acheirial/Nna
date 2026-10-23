@@ -28,8 +28,9 @@ import (
 // This file covers Linux, Android, macOS, iOS, and the BSDs, where
 // golang.org/x/sys/unix exposes SO_REUSEPORT. Android satisfies the linux build
 // tag and iOS satisfies the darwin build tag. AIX and z/OS expose the constant
-// too, but mieru is not built or released for them, so their implementation and
-// behavior are not verified, and they are handled in reuse.go.
+// too, but shadowlemon is not built or released for them, so their
+// implementation and behavior are not verified, and they are handled in
+// reuse.go.
 func setReuseSockopts(fd uintptr, reusePort bool) error {
 	if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
 		return fmt.Errorf("setsockopt SO_REUSEADDR failed: %w", err)

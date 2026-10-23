@@ -22,10 +22,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/model"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/model"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 // copyBufferSize is the size of the buffers used to move data between a user

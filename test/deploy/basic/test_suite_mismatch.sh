@@ -43,9 +43,9 @@ source ./libtest.sh
 # The reason of the rejection is only written to the client log at DEBUG level
 # (pkg/protocol/mux.go logs the error of the underlay event loop), so
 # client_suite_mismatch.json sets "loggingLevel": "DEBUG". The client writes its
-# log to $HOME/.cache/mieru/<timestamp>_<pid>.log
-# (pkg/log/mieru_client_logging.go, log.NewClientLogFile()).
-CLIENT_LOG_DIR="$HOME/.cache/mieru"
+# log to $HOME/.cache/shadowlemon/<timestamp>_<pid>.log
+# (pkg/log/client_logging.go, log.NewClientLogFile()).
+CLIENT_LOG_DIR="$HOME/.cache/shadowlemon"
 NO_COMMON_SUITE_LINE="no common cipher suite with the server, the client offered"
 HANDSHAKE_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite"
 # A mismatch must be rejected per session, right after the client sent its

@@ -24,7 +24,7 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 
-	"github.com/enfein/mieru/v3/pkg/version"
+	"github.com/Acheirial/shadowlemon/v3/pkg/version"
 )
 
 const (

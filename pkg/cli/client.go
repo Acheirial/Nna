@@ -26,15 +26,15 @@ import (
 	"syscall"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/pkg/appctl"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlcommon"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/sockopts"
-	"github.com/enfein/mieru/v3/pkg/socks5"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlcommon"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/sockopts"
+	"github.com/Acheirial/shadowlemon/v3/pkg/socks5"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 // RegisterClientCommands registers all the client side CLI commands.
@@ -182,7 +182,7 @@ var clientHelpFunc = func(s []string) error {
 				cmd: "client import config <URL>",
 				help: []string{
 					"Import client configuration from a URL.",
-					"The URL can be standard format mieru:// or simple format mierus://.",
+					"The URL can be standard format shadowlemon:// or simple format shadowlemons://.",
 					"Please use quotation marks to wrap the URL, so it can be parsed correctly.",
 				},
 			},
@@ -204,7 +204,7 @@ var clientHelpFunc = func(s []string) error {
 				cmd: "client run",
 				help: []string{
 					"Run shadowlemon client in foreground.",
-					"Use environment variable MIERU_CONFIG_JSON_FILE to load configuration.",
+					"Use environment variable SHADOWLEMON_CLIENT_CONFIG_JSON_FILE to load configuration.",
 				},
 			},
 		},
@@ -245,10 +245,10 @@ var clientStartFunc = func(s []string) error {
 var clientRunFunc = func(s []string) error {
 	log.SetFormatter(&log.DaemonFormatter{})
 
-	if _, found := os.LookupEnv(appctl.EnvMieruConfigFile); found {
-		log.Debugf("log to stdout because environment variable %s is set", appctl.EnvMieruConfigFile)
-	} else if _, found := os.LookupEnv(appctl.EnvMieruConfigJSONFile); found {
-		log.Debugf("log to stdout because environment variable %s is set", appctl.EnvMieruConfigJSONFile)
+	if _, found := os.LookupEnv(appctl.EnvClientConfigFile); found {
+		log.Debugf("log to stdout because environment variable %s is set", appctl.EnvClientConfigFile)
+	} else if _, found := os.LookupEnv(appctl.EnvClientConfigJSONFile); found {
+		log.Debugf("log to stdout because environment variable %s is set", appctl.EnvClientConfigJSONFile)
 	} else {
 		logFile, err := log.NewClientLogFile()
 		if err == nil {

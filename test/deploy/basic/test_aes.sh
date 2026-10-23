@@ -33,14 +33,14 @@ source ./libtest.sh
 # "<session> handshake completed with protocol ShadowLemon V0.1 and cipher suite <suite>").
 # client_aes.json therefore sets "loggingLevel": "DEBUG"; with the "INFO" level
 # used by client_tcp.json the line is never emitted. The client writes its log
-# to $HOME/.cache/mieru/<timestamp>_<pid>.log
-# (pkg/log/mieru_client_logging.go, log.NewClientLogFile()).
+# to $HOME/.cache/shadowlemon/<timestamp>_<pid>.log
+# (pkg/log/client_logging.go, log.NewClientLogFile()).
 #
 # NOTE: only the client logs the negotiated suite. The server side
 # (Session.acceptHandshake) logs nothing when the handshake succeeds; it only
 # logs the reasons of a rejection, also at DEBUG level. server_aes.json is set
 # to DEBUG as well so that a rejection is visible in the container output.
-CLIENT_LOG_DIR="$HOME/.cache/mieru"
+CLIENT_LOG_DIR="$HOME/.cache/shadowlemon"
 EXPECTED_AES_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite AES_256_GCM"
 HANDSHAKE_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite"
 

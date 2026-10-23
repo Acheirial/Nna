@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 )
 
 type userDiscoveryBench struct {

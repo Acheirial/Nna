@@ -27,10 +27,10 @@ package sockopts
 // does not set SO_REUSEADDR for listeners (see sockopt_windows.go in the net
 // package).
 //
-// The options are also not needed by mieru: Windows reuses a recently used
-// address by default, so a listener can be restarted after the previous process
-// exited without setting any socket option, and dialer sockets use an ephemeral
-// local port instead of a fixed one.
+// The options are also not needed by shadowlemon: Windows reuses a recently
+// used address by default, so a listener can be restarted after the previous
+// process exited without setting any socket option, and dialer sockets use an
+// ephemeral local port instead of a fixed one.
 func setReuseSockopts(_ uintptr, _ bool) error {
 	return nil
 }

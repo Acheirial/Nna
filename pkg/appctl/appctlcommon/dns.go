@@ -20,8 +20,8 @@ import (
 	"net"
 	"strings"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
 )
 
 // TransformDNSHosts validates and normalizes static DNS host entries from protobuf.

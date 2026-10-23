@@ -23,9 +23,9 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/protocol"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/protocol"
 	"google.golang.org/protobuf/proto"
 )
 

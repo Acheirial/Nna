@@ -21,15 +21,15 @@ import (
 	"net"
 	"strconv"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/model"
-	"github.com/enfein/mieru/v3/apis/trafficpattern"
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/protocol"
-	"github.com/enfein/mieru/v3/pkg/socks5"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/model"
+	"github.com/Acheirial/shadowlemon/v3/apis/trafficpattern"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/protocol"
+	"github.com/Acheirial/shadowlemon/v3/pkg/socks5"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 // ValidateClientConfigSingleProfile validates a single client config profile.

@@ -26,21 +26,26 @@ import (
 	"sync/atomic"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/trafficpattern"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlcommon"
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/protocol"
-	"github.com/enfein/mieru/v3/pkg/socks5"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/trafficpattern"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlcommon"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/protocol"
+	"github.com/Acheirial/shadowlemon/v3/pkg/socks5"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	EnvServerConfigFile     = "SHADOWLEMON_SERVER_CONFIG_FILE"
+	EnvServerConfigJSONFile = "SHADOWLEMON_SERVER_CONFIG_JSON_FILE"
+)
+
 var (
-	cachedServerConfigDir      string = "/etc/mita"
-	cachedServerConfigFilePath string = "/etc/mita/server.conf.pb"
+	cachedServerConfigDir      string = "/etc/shadowlemon"
+	cachedServerConfigFilePath string = "/etc/shadowlemon/server.conf.pb"
 
 	// serverIOLock is required to load server config and store server config.
 	serverIOLock sync.Mutex
@@ -152,7 +157,7 @@ func cleanupFailedServerProxy(proxy *serverProxy) {
 	}
 }
 
-// StartServerProxy starts the mita proxy service.
+// StartServerProxy starts the shadowlemon proxy service in the server role.
 func StartServerProxy(config *pb.ServerConfig) error {
 	if socks5ServerRef.Load() != nil {
 		log.Infof("socks5 server already exist")
@@ -175,13 +180,13 @@ func StartServerProxy(config *pb.ServerConfig) error {
 		SetSocks5Server(proxy.socks5Server)
 		startErr <- nil
 
-		log.Infof("mita server daemon socks5 server is running")
+		log.Infof("shadowlemon server daemon socks5 server is running")
 		if err := proxy.socks5Server.Serve(proxy.mux); err != nil {
 			log.Errorf("Run socks5 server failed: %v", err)
 			cleanupFailedServerProxy(proxy)
 			return
 		}
-		log.Infof("mita server daemon socks5 server is stopped")
+		log.Infof("shadowlemon server daemon socks5 server is stopped")
 	}()
 
 	if err := <-startErr; err != nil {
@@ -192,7 +197,7 @@ func StartServerProxy(config *pb.ServerConfig) error {
 	return nil
 }
 
-// StopServerProxy stops the mita proxy service.
+// StopServerProxy stops the shadowlemon proxy service in the server role.
 func StopServerProxy() error {
 	if socks5ServerRef.Load() != nil {
 		log.Infof("stopping socks5 server")
@@ -514,7 +519,8 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 // In addition to ValidateServerConfigPatch, it also validates:
 // 1. there is at least 1 port binding
 //
-// It is not an error if no user is configured. However mita won't be functional.
+// It is not an error if no user is configured. However shadowlemon won't be
+// functional in the server role.
 func ValidateFullServerConfig(config *pb.ServerConfig) error {
 	if err := ValidateServerConfigPatch(config); err != nil {
 		return err
@@ -536,15 +542,15 @@ func checkServerConfigDir() error {
 }
 
 // serverConfigFilePath returns the server config file path.
-// If environment variable MITA_CONFIG_FILE or MITA_CONFIG_JSON_FILE is specified,
-// those values are returned.
+// If environment variable SHADOWLEMON_SERVER_CONFIG_FILE or
+// SHADOWLEMON_SERVER_CONFIG_JSON_FILE is specified, those values are returned.
 func serverConfigFilePath() (string, ConfigFileType, error) {
-	if v, found := os.LookupEnv("MITA_CONFIG_FILE"); found {
+	if v, found := os.LookupEnv(EnvServerConfigFile); found {
 		cachedServerConfigFilePath = v
 		cachedServerConfigDir = filepath.Dir(v)
 		return cachedServerConfigFilePath, PROTOBUF_CONFIG_FILE_TYPE, nil
 	}
-	if v, found := os.LookupEnv("MITA_CONFIG_JSON_FILE"); found {
+	if v, found := os.LookupEnv(EnvServerConfigJSONFile); found {
 		cachedServerConfigFilePath = v
 		cachedServerConfigDir = filepath.Dir(v)
 		return cachedServerConfigFilePath, JSON_CONFIG_FILE_TYPE, nil

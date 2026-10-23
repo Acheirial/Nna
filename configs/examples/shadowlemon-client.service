@@ -1,5 +1,5 @@
 [Unit]
-Description=Mieru proxy client
+Description=shadowlemon client daemon
 After=network-online.target network.service networking.service NetworkManager.service systemd-networkd.service
 Wants=network-online.target
 StartLimitBurst=5
@@ -7,7 +7,7 @@ StartLimitIntervalSec=60
 
 [Service]
 Type=exec
-Environment="MIERU_CONFIG_JSON_FILE=/etc/mieru_client_config.json"
+Environment="SHADOWLEMON_CLIENT_CONFIG_JSON_FILE=/etc/shadowlemon_client_config.json"
 ExecStart=/usr/bin/shadowlemon client run
 Restart=on-failure
 RestartSec=1

@@ -28,8 +28,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 func TestStreamUnderlayEventLoopTerminalTimeout(t *testing.T) {

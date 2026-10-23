@@ -21,7 +21,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
 )
 
 func TestSocks5RequestHelpers(t *testing.T) {

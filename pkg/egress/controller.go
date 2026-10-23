@@ -18,7 +18,7 @@ package egress
 import (
 	"context"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
 )
 
 type Input struct {

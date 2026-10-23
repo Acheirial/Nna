@@ -1,21 +1,21 @@
 # 客户端安装与配置 - OpenWrt
 
-OpenWrt 是一个极简 Linux 环境，在 OpenWrt 环境运行 mieru 客户端软件需要额外的步骤。请参照[客户端安装与配置](./client-install.md)，同时按照这里的提示安装和配置 mieru 客户端。
+OpenWrt 是一个极简 Linux 环境，在 OpenWrt 环境运行 shadowlemon 客户端软件需要额外的步骤。请参照[客户端安装与配置](./client-install.md)，同时按照这里的提示安装和配置 shadowlemon 客户端。
 
-## 下载 mieru 客户端
+## 下载 shadowlemon 客户端
 
-在下载 mieru 客户端软件后，请将解压缩后的 `shadowlemon` 可执行文件复制到 OpenWrt 系统的 `/usr/bin/` 目录下。
+在下载 shadowlemon 客户端软件后，请将解压缩后的 `shadowlemon` 可执行文件复制到 OpenWrt 系统的 `/usr/bin/` 目录下。
 
 ## 修改客户端的设置
 
 为了能让其他设备连接至 OpenWrt 上的代理客户端，必须将 `socks5ListenLAN` 设置成 `true`。
 
-在 OpenWrt 中，请勿使用 `shadowlemon client apply config <FILE>` 和 `shadowlemon client describe config` 指令。请将客户端配置直接保存至 `/etc/mieru_client_config.json` 文件。
+在 OpenWrt 中，请勿使用 `shadowlemon client apply config <FILE>` 和 `shadowlemon client describe config` 指令。请将客户端配置直接保存至 `/etc/shadowlemon_client_config.json` 文件。
 
 另外，建议将日志等级 `loggingLevel` 设置成 `ERROR` 防止日志打满硬盘。
 
 ## 启动客户端
 
-需要启动和停止客户端时，请通过 init 脚本操作，不要绕过它直接调用 `shadowlemon client start` 或 `shadowlemon client stop`（脚本内部正是用这两条指令管理进程与 pid 文件）。请将项目根目录下的 `configs/examples/etc_initd_mieru` 文件复制并保存至 `/etc/init.d/mieru` 文件，并赋予可执行权限。此后，mieru 客户端将在 OpenWrt 开机后自行启动。
+需要启动和停止客户端时，请通过 init 脚本操作，不要绕过它直接调用 `shadowlemon client start` 或 `shadowlemon client stop`（脚本内部正是用这两条指令管理进程与 pid 文件）。请将项目根目录下的 `configs/examples/etc_initd_shadowlemon` 文件复制并保存至 `/etc/init.d/shadowlemon` 文件，并赋予可执行权限。此后，shadowlemon 客户端将在 OpenWrt 开机后自行启动。
 
-如果需要手动启动或停止 mieru 客户端，可以使用指令 `/etc/init.d/mieru start` 和 `/etc/init.d/mieru stop`。
+如果需要手动启动或停止 shadowlemon 客户端，可以使用指令 `/etc/init.d/shadowlemon start` 和 `/etc/init.d/shadowlemon stop`。

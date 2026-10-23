@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
 )
 
 type datagramFailResolver struct{}

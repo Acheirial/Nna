@@ -1,4 +1,4 @@
-module github.com/enfein/mieru/v3
+module github.com/Acheirial/shadowlemon/v3
 
 go 1.26
 

@@ -15,11 +15,11 @@
 
 syntax = "proto3";
 
-package mieru.appctl;
+package shadowlemon.appctl;
 
 import "appctl/proto/base.proto";
 
-option go_package = "github.com/enfein/mieru/v3/pkg/appctl/appctlpb";
+option go_package = "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb";
 
 message ClientConfig {
     // A list of known client profiles.
@@ -31,7 +31,7 @@ message ClientConfig {
     // Was: optional int32 rpcPort = 3;
     reserved 3;
 
-    // The socks5 port that mieru is listening.
+    // The socks5 port that the shadowlemon client listens on.
     optional int32 socks5Port = 4;
 
     // Was: optional ClientAdvancedSettings advancedSettings = 5;
@@ -47,7 +47,8 @@ message ClientConfig {
     // Was: optional bool httpProxyListenLAN = 9;
     reserved 8, 9;
 
-    // A list of accounts that can authenticate mieru socks5 proxy service.
+    // A list of accounts that can authenticate the shadowlemon socks5 proxy
+    // service.
     // If the list is empty, authentication is not required.
     repeated Auth socks5Authentication = 10;
 }
@@ -75,7 +76,8 @@ message ClientProfile {
     // Fine tune traffic behaviors.
     optional TrafficPattern trafficPattern = 7;
 
-    // Optional proxy dialer used by the client to connect to mita.
+    // Optional proxy dialer used by the client to connect to the shadowlemon
+    // server.
     optional ClientDialer dialer = 8;
 
     // Ordered list of cipher suites the client is willing to use.

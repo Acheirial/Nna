@@ -23,9 +23,9 @@ import (
 	"net/url"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/apis/model"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/model"
 )
 
 // ClientDialer connects to upstream endpoints through a socks5 proxy.

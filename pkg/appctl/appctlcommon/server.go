@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
 )
 
 // ValidateServerListenIPAddress validates the optional server listen IP address.

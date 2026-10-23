@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
 )
 
 func TestSessionStruct(t *testing.T) {

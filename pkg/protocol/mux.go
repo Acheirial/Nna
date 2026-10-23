@@ -29,16 +29,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/trafficpattern"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/mathext"
-	"github.com/enfein/mieru/v3/pkg/protocol/serveruser"
-	"github.com/enfein/mieru/v3/pkg/sockopts"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/trafficpattern"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/mathext"
+	"github.com/Acheirial/shadowlemon/v3/pkg/protocol/serveruser"
+	"github.com/Acheirial/shadowlemon/v3/pkg/sockopts"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 const (
@@ -179,7 +179,7 @@ type Mux struct {
 
 var _ net.Listener = &Mux{}
 
-// NewMux creates a new mieru v2 multiplex controller.
+// NewMux creates a new ShadowLemon multiplex controller.
 func NewMux(isClinet bool) *Mux {
 	if isClinet {
 		log.Infof("Initializing client multiplexer")

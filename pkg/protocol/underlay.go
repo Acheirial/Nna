@@ -19,7 +19,7 @@ import (
 	"context"
 	"net"
 
-	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 )
 
 // UnderlayProperties defines network properties of a underlay.

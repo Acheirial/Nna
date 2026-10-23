@@ -1,8 +1,8 @@
-# 見える / mieru
+# ShadowLemon
 
-mieru【見える】是一款基于 TCP 或 UDP 协议的 socks5 网络代理软件，在客户端与代理服务器之间建立加密通道。
+ShadowLemon 是一款基于 TCP 或 UDP 协议的 socks5 网络代理软件，在客户端与代理服务器之间建立加密通道。
 
-mieru 代理软件只有一个程序 `shadowlemon`，它同时包含客户端与代理服务器两个角色：`shadowlemon client <命令>` 以客户端角色运行，`shadowlemon server <命令>` 以代理服务器角色运行；编译产物是唯一的二进制 `bin/shadowlemon`，不再有单独的客户端程序与服务端程序。
+ShadowLemon 只有一个程序 `shadowlemon`，它同时承担客户端与代理服务器两个角色：`shadowlemon client <命令>` 以客户端角色运行，`shadowlemon server <命令>` 以代理服务器角色运行；编译产物是唯一的二进制 `bin/shadowlemon`，不再有单独的客户端程序与服务端程序。
 
 ## 特性
 
@@ -25,7 +25,7 @@ mieru 代理软件只有一个程序 `shadowlemon`，它同时包含客户端与
 
 ## 原理和协议
 
-mieru 的代理原理与 shadowsocks / v2ray 等软件类似，在客户端和代理服务器之间建立一个加密的通道。中间网络设备无法解密传输内容，也无法判定最终访问的目标地址。
+ShadowLemon 的代理原理与 shadowsocks / v2ray 等软件类似，在客户端和代理服务器之间建立一个加密的通道。中间网络设备无法解密传输内容，也无法判定最终访问的目标地址。
 
 从流量特征上看：线路上没有明文的魔数、协议版本或长度字段，协议版本与密码套件协商、以及全部控制信息都位于 AEAD 加密与认证之下；默认（未配置 `trafficPattern`）不改写 nonce 前缀，因此每个数据段开头的 24 字节线路 nonce 保持均匀随机，密文整体也呈均匀随机分布。需要说明的是，本协议并不模拟某种具体协议（例如 TLS 或 HTTP）的字节分布，也不承诺流量在任何统计意义上与某个既有协议不可区分。
 

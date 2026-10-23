@@ -18,7 +18,7 @@ SHORT_SHA=$(shell git rev-parse --short HEAD)
 TEST_BINARY_PREREQ = test-binary
 # Tag of the container image used by the integration tests. It can be overridden
 # from the environment, e.g. by CI when the image is built by another tool.
-TEST_CONTAINER_IMAGE ?= mieru_basic:${SHORT_SHA}
+TEST_CONTAINER_IMAGE ?= shadowlemon_basic:${SHORT_SHA}
 BENCH_TIME ?= 10s
 FUZZ_TIME ?= 10s
 BENCH_PACKAGES ?= ./pkg/cipher ./pkg/common ./pkg/protocol ./pkg/protocol/serveruser
@@ -216,7 +216,7 @@ protobuf:
 	fi
 
 	PATH=${PATH}:"${ROOT}/tools/build" ${ROOT}/tools/build/protoc -I="${ROOT}/pkg" \
-		--go_out="${ROOT}/pkg/appctl" --go_opt=module="github.com/enfein/mieru/v3/pkg/appctl" \
+		--go_out="${ROOT}/pkg/appctl" --go_opt=module="github.com/Acheirial/shadowlemon/v3/pkg/appctl" \
 		--proto_path="${ROOT}/pkg" \
 		"${ROOT}/pkg/appctl/proto/base.proto" \
 		"${ROOT}/pkg/appctl/proto/clientcfg.proto" \

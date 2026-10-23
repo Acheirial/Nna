@@ -22,7 +22,7 @@ import (
 	"runtime/pprof"
 	"sync"
 
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 var (

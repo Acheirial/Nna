@@ -9,15 +9,15 @@ import (
 	"sync"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/apis/model"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/egress"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/mathext"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/model"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/egress"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/mathext"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 // ProxyDialer creates a new connection to proxy server.
@@ -31,7 +31,7 @@ type UDPAssociateMode int
 const (
 	// UDPAssociateModePacketOverStream relays UDP packets through a streaming
 	// connection using PacketOverStreamTunnel. This is the default
-	// mode used by mieru client and server.
+	// mode used by shadowlemon client and server.
 	UDPAssociateModePacketOverStream UDPAssociateMode = iota
 
 	// UDPAssociateModeDatagram relays UDP packets with packeting connection.
@@ -50,7 +50,7 @@ type Config struct {
 	// Use 0 or negative value to disable the timeout.
 	HandshakeTimeout time.Duration
 
-	// Use mieru proxy to carry socks5 traffic.
+	// Use shadowlemon proxy to carry socks5 traffic.
 	UseProxy bool
 
 	// Resolver can be provided to do custom name resolution.

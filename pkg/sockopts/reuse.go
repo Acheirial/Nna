@@ -27,9 +27,9 @@ package sockopts
 // platforms.
 //
 // js, wasip1, plan9 and hurd have no socket option API in the syscall package.
-// AIX, z/OS and other remaining platforms are not built or released by mieru,
-// and there is no test environment to verify a change of the historical no-op
-// behavior.
+// AIX, z/OS and other remaining platforms are not built or released by
+// shadowlemon, and there is no test environment to verify a change of the
+// historical no-op behavior.
 //
 // Windows, and the platforms that support the options, are implemented in
 // separate files.

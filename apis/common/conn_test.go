@@ -19,7 +19,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/enfein/mieru/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/common"
 )
 
 type counterCloser struct {

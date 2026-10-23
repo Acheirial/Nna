@@ -20,9 +20,9 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/enfein/mieru/v3/apis/constant"
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 	"google.golang.org/protobuf/proto"
 )
 

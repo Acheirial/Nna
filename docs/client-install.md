@@ -1,15 +1,15 @@
 # 客户端安装与配置
 
-## 下载 mieru 客户端
+## 下载 shadowlemon 客户端
 
-mieru 客户端软件支持 Windows，Mac OS 和 Linux 系统。你可以从源码编译，也可以直接使用已经编译好的 `shadowlemon` 可执行文件。
+shadowlemon 客户端软件支持 Windows，Mac OS 和 Linux 系统。你可以从源码编译，也可以直接使用已经编译好的 `shadowlemon` 可执行文件。
 
 ### 从源码编译
 
 按照[编译](./compile.md)文档准备好编译环境，然后在项目根目录运行：
 
 ```sh
-make build
+make
 ```
 
 编译结果位于 `bin/` 目录。把 `bin/shadowlemon` 复制到系统路径 `PATH` 即可。
@@ -85,7 +85,7 @@ shadowlemon client replace config <FILE>
 2. 在 `profiles` -> `user` -> `password` 属性中，填写密码。此处必须与代理服务器中的设置相同。
 3. 在 `profiles` -> `servers` -> `ipAddress` 属性中，填写代理服务器的公网地址。支持 IPv4 和 IPv6 地址。
 4. 【可选】如果你为代理服务器注册了域名，请在 `profiles` -> `servers` -> `domainName` 中填写域名。否则，请勿修改这个属性。
-5. 在 `profiles` -> `servers` -> `portBindings` -> `port` 中填写 mita 监听的 TCP 或 UDP 端口号。这个端口号必须与代理服务器中的设置相同。如果想要监听连续的端口号，也可以改为使用 `portRange` 属性。
+5. 在 `profiles` -> `servers` -> `portBindings` -> `port` 中填写 shadowlemon server 监听的 TCP 或 UDP 端口号。这个端口号必须与代理服务器中的设置相同。如果想要监听连续的端口号，也可以改为使用 `portRange` 属性。
 6. 【可选】请为 `profiles` -> `mtu` 属性指定一个从 1280 到 1500 之间的值，默认值为 1400。该值是 L3 MTU，即网络路径能够通过的最大 IP 报文长度；UDP 代理协议的有效载荷预算会在此基础上另外扣除 IP 报文头与 UDP 报文头（IPv6 下最多 48 字节）。这个值必须与代理服务器相同；只有两端取值一致，才能避免因分片导致的性能下降。
 7. 【可选】如果想要调整多路复用的频率，是更多地创建新连接，还是更多地重用旧连接，可以为 `profiles` -> `multiplexing` -> `level` 属性设定一个值。这里可以使用的值包括 `MULTIPLEXING_OFF`, `MULTIPLEXING_LOW`, `MULTIPLEXING_MIDDLE`, `MULTIPLEXING_HIGH`。其中 `MULTIPLEXING_OFF` 会关闭多路复用功能。默认值为 `MULTIPLEXING_LOW`。
 8. 【可选】如果想开启 0-RTT 握手，请将 `profiles` -> `handshakeMode` 属性的值设置为 `HANDSHAKE_NO_WAIT`，否则请设置为 `HANDSHAKE_STANDARD`。默认值为 `HANDSHAKE_STANDARD`。
@@ -104,7 +104,7 @@ shadowlemon client replace config <FILE>
 
 > **注意**：本版本已移除 HTTP / HTTPS 代理功能、客户端自动更新检查功能与本地控制接口，配置中不再支持 `httpProxyPort`、`httpProxyListenLAN`、`noCheckUpdate`、`rpcPort` 和客户端 `advancedSettings` 字段。如果你从旧版本升级，请先从配置文件中删除这些字段，否则 `shadowlemon client apply config`、`shadowlemon client import config` 或 `shadowlemon client run` 会报未知字段（unknown field）错误。
 
-如果你安装了多台代理服务器，或者一台服务器监听多个端口，可以把它们都添加到客户端设置中。每次发起新的连接时，客户端会随机选取其中的一台服务器和一个端口。**如果使用了多台服务器，请确保每一台服务器都启动了 mita 代理服务。**
+如果你安装了多台代理服务器，或者一台服务器监听多个端口，可以把它们都添加到客户端设置中。每次发起新的连接时，客户端会随机选取其中的一台服务器和一个端口。**如果使用了多台服务器，请确保每一台服务器都启动了 `shadowlemon server`。**
 
 假设这个配置文件的文件名是 `client_config.json`，在修改完成之后，调用指令 `shadowlemon client apply config client_config.json` 写入该配置。
 
@@ -132,9 +132,9 @@ shadowlemon client start
 shadowlemon client run
 ```
 
-mieru 客户端不会与系统一同启动。在重新启动计算机后，需要手动使用 `shadowlemon client start` 指令启动客户端。`shadowlemon client start` 会先加载并校验客户端配置，配置非法时立即报错、不会启动守护进程。客户端守护进程的 pid 记录在客户端配置目录下的 `mieru.pid` 文件中。该文件在 Linux 上记录进程号与进程的启动时刻（格式为 `<pid> <starttime>`），`shadowlemon client stop` 在发送信号前会核对进程身份，避免误伤恰好复用了同一 PID 的其他进程；在无法获取启动时刻的平台上，该文件退化为只记录进程号。文件路径保持不变，仍为客户端配置目录下的 `mieru.pid`。
+shadowlemon 客户端不会与系统一同启动。在重新启动计算机后，需要手动使用 `shadowlemon client start` 指令启动客户端。`shadowlemon client start` 会先加载并校验客户端配置，配置非法时立即报错、不会启动守护进程。客户端守护进程的 pid 记录在客户端配置目录下的 `shadowlemon.pid` 文件中。该文件在 Linux 上记录进程号与进程的启动时刻（格式为 `<pid> <starttime>`），`shadowlemon client stop` 在发送信号前会核对进程身份，避免误伤恰好复用了同一 PID 的其他进程；在无法获取启动时刻的平台上，该文件退化为只记录进程号。文件路径保持不变，仍为客户端配置目录下的 `shadowlemon.pid`。
 
-如果需要停止 mieru 客户端，请输入指令
+如果需要停止 shadowlemon 客户端，请输入指令
 
 ```sh
 shadowlemon client stop
@@ -170,39 +170,11 @@ Chrome / Firefox 等浏览器可以通过安装插件，使用 socks5 代理访�
 
 客户端内置的 socks5 服务端只接受版本号为 `5` 的请求，其他版本字节会被拒绝。对于 socks5 UDP ASSOCIATE，客户端会按请求中声明的客户端地址校验数据报来源，来源不符的数据报会被丢弃。
 
-## Clash 设置
-
-如果使用 Clash.Meta / mihomo 客户端，请参考下面的配置。
-
-```yaml
-proxies:
-  - name: server1
-    type: mieru
-    server: 12.34.56.78
-    port-range: 2012-2022
-    transport: TCP
-    udp: true
-    username: user1
-    password: password1
-    multiplexing: MULTIPLEXING_HIGH
-  - name: server2
-    type: mieru
-    server: 12.34.56.78
-    port: 2027
-    transport: TCP
-    udp: true
-    username: user1
-    password: password1
-    multiplexing: MULTIPLEXING_HIGH
-```
-
-使用 `udp: true` 允许 socks5 UDP associate 请求。你不能在一条配置内同时使用 `port` 和 `port-range` 属性。
-
 ## 高级设置
 
-### 通过 socks5 代理连接 mita 服务器
+### 通过 socks5 代理连接 shadowlemon 服务器
 
-如果 mieru 客户端必须通过已有的 socks5 代理连接 mita 服务器，可以在客户端 profile 中添加 `dialer` 对象。没有 `dialer` 的已有 profile 会继续直接连接 mita。
+如果 shadowlemon 客户端必须通过已有的 socks5 代理连接 shadowlemon 服务器，可以在客户端 profile 中添加 `dialer` 对象。没有 `dialer` 的已有 profile 会继续直接连接服务器。
 
 ```js
 {
@@ -232,7 +204,7 @@ proxies:
 
 当前只支持 `SOCKS5_PROXY_PROTOCOL`。`host` 和 `port` 必须填写。`socks5Authentication` 是可选的；如果填写，则 `user` 和 `password` 都必须设置。
 
-将 `socks5UDPAssociate` 设置为 `true`，可以通过 socks5 UDP ASSOCIATE 连接 mita 代理服务器。如果它为 `false` 或未填写，UDP 流量不会通过 socks5 代理。
+将 `socks5UDPAssociate` 设置为 `true`，可以通过 socks5 UDP ASSOCIATE 连接 shadowlemon 代理服务器。如果它为 `false` 或未填写，UDP 流量不会通过 socks5 代理。
 
 ### socks5 用户名和密码验证
 
@@ -298,24 +270,24 @@ proxies:
 使用指令 `shadowlemon client export config` 生成一个标准分享链接。例如：
 
 ```
-mieru://<base64 编码的客户端配置>
+shadowlemon://<base64 编码的客户端配置>
 ```
 
-标准分享链接以 `mieru://` 开始，使用 base64 编码完整的客户端配置。用户可以使用标准分享链接在一台全新的设备上复刻客户端配置。
+标准分享链接以 `shadowlemon://` 开始，使用 base64 编码完整的客户端配置。用户可以使用标准分享链接在一台全新的设备上复刻客户端配置。
 
 ### 简单分享链接
 
 使用指令 `shadowlemon client export config simple` 生成人类可读的简单分享链接。例如：
 
 ```
-mierus://user1:password1@1.2.3.4?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&multiplexing=MULTIPLEXING_HIGH&port=6666&port=10000-10001&port=10002&port=10003&profile=default&protocol=TCP&protocol=TCP&protocol=UDP&protocol=UDP&traffic-pattern=CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3
+shadowlemons://user1:password1@1.2.3.4?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400&multiplexing=MULTIPLEXING_HIGH&port=6666&port=10000-10001&port=10002&port=10003&profile=default&protocol=TCP&protocol=TCP&protocol=UDP&protocol=UDP&traffic-pattern=CCoQARoECAEQCiIYCAMQASoIMDAwMTAyMDMqCDA0MDUwNjA3
 ```
 
 简单分享链接的格式如下：
 
-`mierus://用户名:密码@服务器地址?参数列表`
+`shadowlemons://用户名:密码@服务器地址?参数列表`
 
-简单分享链接以 `mierus://` 开始，其中 `s` 表示 `simple`。
+简单分享链接以 `shadowlemons://` 开始，其中 `s` 表示 `simple`。
 
 简单分享链接中只有一个服务器地址。如果客户端的设置含有多台服务器，则会生成多个链接。
 

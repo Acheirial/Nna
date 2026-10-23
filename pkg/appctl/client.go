@@ -24,17 +24,17 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlcommon"
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlcommon"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	EnvMieruConfigFile     = "MIERU_CONFIG_FILE"
-	EnvMieruConfigJSONFile = "MIERU_CONFIG_JSON_FILE"
+	EnvClientConfigFile     = "SHADOWLEMON_CLIENT_CONFIG_FILE"
+	EnvClientConfigJSONFile = "SHADOWLEMON_CLIENT_CONFIG_JSON_FILE"
 )
 
 var (
@@ -43,11 +43,11 @@ var (
 
 	// cachedClientConfigDir is the absolute path of client config directory.
 	//
-	// In Linux, it is typically /home/<user>/.config/mieru
+	// In Linux, it is typically /home/<user>/.config/shadowlemon
 	//
-	// In Mac OS, it is typically /Users/<user>/Library/Application Support/mieru
+	// In Mac OS, it is typically /Users/<user>/Library/Application Support/shadowlemon
 	//
-	// In Windows, it is typically C:\Users\<user>\AppData\Roaming\mieru
+	// In Windows, it is typically C:\Users\<user>\AppData\Roaming\shadowlemon
 	cachedClientConfigDir string
 
 	// cachedClientConfigFilePath is the absolute path of client config file.
@@ -202,13 +202,13 @@ func ReplaceJSONClientConfig(path string) error {
 // ParseURLClientConfig parses a client config URL and returns the config
 // without applying it.
 func ParseURLClientConfig(u string) (*pb.ClientConfig, error) {
-	if strings.HasPrefix(u, "mieru://") {
+	if strings.HasPrefix(u, configURLPrefix) {
 		c, err := URLToClientConfig(u)
 		if err != nil {
 			return nil, fmt.Errorf("URLToClientConfig() failed: %w", err)
 		}
 		return c, nil
-	} else if strings.HasPrefix(u, "mierus://") {
+	} else if strings.HasPrefix(u, simpleURLPrefix) {
 		p, err := URLToClientProfile(u)
 		if err != nil {
 			return nil, fmt.Errorf("URLToClientProfile() failed: %w", err)
@@ -217,7 +217,7 @@ func ParseURLClientConfig(u string) (*pb.ClientConfig, error) {
 			Profiles: []*pb.ClientProfile{p},
 		}, nil
 	} else {
-		return nil, fmt.Errorf("unrecognized URL scheme. URL must begin with mieru:// or mierus://")
+		return nil, fmt.Errorf("unrecognized URL scheme. URL must begin with %s or %s", configURLPrefix, simpleURLPrefix)
 	}
 }
 
@@ -313,20 +313,20 @@ func prepareClientConfigDir() error {
 	if err != nil {
 		return err
 	}
-	cachedClientConfigDir = configDir + string(os.PathSeparator) + "mieru"
+	cachedClientConfigDir = configDir + string(os.PathSeparator) + "shadowlemon"
 	return os.MkdirAll(cachedClientConfigDir, 0755)
 }
 
 // clientConfigFilePath returns the client config file path and file type.
-// If environment variable MIERU_CONFIG_FILE or MIERU_CONFIG_JSON_FILE is specified,
-// those values are returned.
+// If environment variable SHADOWLEMON_CLIENT_CONFIG_FILE or
+// SHADOWLEMON_CLIENT_CONFIG_JSON_FILE is specified, those values are returned.
 func clientConfigFilePath() (string, ConfigFileType, error) {
-	if v, found := os.LookupEnv(EnvMieruConfigFile); found {
+	if v, found := os.LookupEnv(EnvClientConfigFile); found {
 		cachedClientConfigFilePath = v
 		cachedClientConfigDir = filepath.Dir(v)
 		return cachedClientConfigFilePath, PROTOBUF_CONFIG_FILE_TYPE, nil
 	}
-	if v, found := os.LookupEnv(EnvMieruConfigJSONFile); found {
+	if v, found := os.LookupEnv(EnvClientConfigJSONFile); found {
 		cachedClientConfigFilePath = v
 		cachedClientConfigDir = filepath.Dir(v)
 		return cachedClientConfigFilePath, JSON_CONFIG_FILE_TYPE, nil

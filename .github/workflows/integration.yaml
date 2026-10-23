@@ -26,7 +26,7 @@ jobs:
     env:
       # The image is built by docker/build-push-action below, not by the
       # Makefile, so override the tag that `make ...` uses by default.
-      TEST_CONTAINER_IMAGE: mieru_basic:${{ github.sha }}
+      TEST_CONTAINER_IMAGE: shadowlemon_basic:${{ github.sha }}
     strategy:
       # Run every script of the basic suite even when one of them fails.
       fail-fast: false
@@ -68,7 +68,7 @@ jobs:
         # The image is built from the binaries of the checked out commit and
         # from test/deploy/basic/Dockerfile only, so every matrix entry ends up
         # with the same image content under the same tag
-        # (mieru_basic:${{ github.sha }}), and the test step can reuse it.
+        # (shadowlemon_basic:${{ github.sha }}), and the test step can reuse it.
         # The layers are cached in the GitHub Actions cache; every matrix entry
         # uses its own cache scope, so the parallel jobs never overwrite each
         # other's cache while still starting warm on the next run.

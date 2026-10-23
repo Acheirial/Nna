@@ -23,9 +23,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/version"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/version"
 )
 
 const (
@@ -162,8 +162,8 @@ type BlockContext struct {
 var hintPepperUniqueValue = version.ProtocolIdentifier() + " user hint pepper"
 
 // HintPepper derives the HintPepperLen bytes pepper of the keyed user hint
-// from a user name and the credential shared with the server. In mieru that
-// credential is HashPassword(rawPassword, userName), which is also the
+// from a user name and the credential shared with the server. In shadowlemon
+// that credential is HashPassword(rawPassword, userName), which is also the
 // password the block cipher keys are derived from.
 //
 // The result is deterministic: it depends only on the arguments, never on the

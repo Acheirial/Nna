@@ -26,16 +26,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/apis/model"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	apicommon "github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/model"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
-// RunUDPAssociateLoop exchanges socks5 UDP packets between a socks5 proxy client and a mieru proxy server,
-// the proxy server is connected via the PacketOverStreamTunnel.
+// RunUDPAssociateLoop exchanges socks5 UDP packets between a socks5 proxy
+// client and a shadowlemon server, the proxy server is connected via the
+// PacketOverStreamTunnel.
 // check verifies whether a UDP datagram can be sent to a destination address.
 // A nil check allows all the destinations.
 func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamTunnel, resolver apicommon.DNSResolver, check udpDestinationChecker) error {
@@ -47,7 +48,7 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Packets from socks5 proxy client -> mieru proxy server.
+	// Packets from socks5 proxy client -> shadowlemon server.
 	go func() {
 		defer wg.Done()
 		defer udpConn.Close()
@@ -90,7 +91,7 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 		}
 	}()
 
-	// Packets from mieru proxy server -> socks5 proxy client.
+	// Packets from shadowlemon server -> socks5 proxy client.
 	go func() {
 		defer wg.Done()
 		bufPtr := getCopyBuffer()
@@ -134,8 +135,9 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 	return udpErr.Load().(error)
 }
 
-// RunUDPForwardingLoop exchanges socks5 UDP packets between a mieru proxy client and a socks5 proxy server,
-// the proxy client is connected via the PacketOverStreamTunnel.
+// RunUDPForwardingLoop exchanges socks5 UDP packets between a shadowlemon
+// client and a socks5 proxy server, the proxy client is connected via the
+// PacketOverStreamTunnel.
 func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamTunnel, downstreamAddr *net.UDPAddr, ctrlConn net.Conn) error {
 	var udpErr error
 	var closeOnce sync.Once
@@ -159,7 +161,7 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 		closeAll(err)
 	}()
 
-	// Packets from mieru proxy client -> socks5 proxy server.
+	// Packets from shadowlemon client -> socks5 proxy server.
 	go func() {
 		defer wg.Done()
 		defer udpConn.Close()
@@ -179,7 +181,7 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 		}
 	}()
 
-	// Packets from socks5 proxy server -> mieru proxy client.
+	// Packets from socks5 proxy server -> shadowlemon client.
 	go func() {
 		defer wg.Done()
 		bufPtr := getCopyBuffer()
@@ -195,7 +197,7 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 				return
 			}
 			// Only relay the response of the downstream socks5 proxy server.
-			// Otherwise an off-path host can inject data to the mieru proxy
+			// Otherwise an off-path host can inject data to the shadowlemon
 			// client by sending a datagram to this UDP listener.
 			if !sameUDPAddr(addr, downstreamAddr) {
 				log.Debugf("UDP forwarding %v dropped packet from unexpected endpoint %v", udpConn.LocalAddr(), addr)
@@ -369,8 +371,9 @@ func runUDPAssociateDatagramLoop(udpConn *net.UDPConn, ctrlConn net.Conn, req *m
 // nil when the request doesn't declare one, in which case the client endpoint
 // is learned from the first datagram.
 // The port declared in the request is intentionally ignored, because it is not
-// reliable: some SOCKS5 clients, including the mieru socks5 client dialer, put
-// the destination address and port there instead of the source endpoint.
+// reliable: some SOCKS5 clients, including the socks5 client dialer provided
+// by shadowlemon, put the destination address and port there instead of the
+// source endpoint.
 func associateClientIP(req *model.Request) net.IP {
 	if req == nil {
 		return nil

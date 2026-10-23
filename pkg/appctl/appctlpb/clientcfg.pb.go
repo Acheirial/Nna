@@ -151,13 +151,14 @@ type ClientConfig struct {
 	Profiles []*ClientProfile `protobuf:"bytes,1,rep,name=profiles,proto3" json:"profiles,omitempty"`
 	// The active profile name.
 	ActiveProfile *string `protobuf:"bytes,2,opt,name=activeProfile,proto3,oneof" json:"activeProfile,omitempty"`
-	// The socks5 port that mieru is listening.
+	// The socks5 port that the shadowlemon client listens on.
 	Socks5Port *int32 `protobuf:"varint,4,opt,name=socks5Port,proto3,oneof" json:"socks5Port,omitempty"`
 	// Client logging level.
-	LoggingLevel *LoggingLevel `protobuf:"varint,6,opt,name=loggingLevel,proto3,enum=mieru.appctl.LoggingLevel,oneof" json:"loggingLevel,omitempty"`
+	LoggingLevel *LoggingLevel `protobuf:"varint,6,opt,name=loggingLevel,proto3,enum=shadowlemon.appctl.LoggingLevel,oneof" json:"loggingLevel,omitempty"`
 	// If set, the socks5 port listens to LAN rather than localhost.
 	Socks5ListenLAN *bool `protobuf:"varint,7,opt,name=socks5ListenLAN,proto3,oneof" json:"socks5ListenLAN,omitempty"`
-	// A list of accounts that can authenticate mieru socks5 proxy service.
+	// A list of accounts that can authenticate the shadowlemon socks5 proxy
+	// service.
 	// If the list is empty, authentication is not required.
 	Socks5Authentication []*Auth `protobuf:"bytes,10,rep,name=socks5Authentication,proto3" json:"socks5Authentication,omitempty"`
 	unknownFields        protoimpl.UnknownFields
@@ -250,17 +251,18 @@ type ClientProfile struct {
 	// Multiplexing behaviors.
 	Multiplexing *MultiplexingConfig `protobuf:"bytes,5,opt,name=multiplexing,proto3,oneof" json:"multiplexing,omitempty"`
 	// Handshake mode when client open a connection.
-	HandshakeMode *HandshakeMode `protobuf:"varint,6,opt,name=handshakeMode,proto3,enum=mieru.appctl.HandshakeMode,oneof" json:"handshakeMode,omitempty"`
+	HandshakeMode *HandshakeMode `protobuf:"varint,6,opt,name=handshakeMode,proto3,enum=shadowlemon.appctl.HandshakeMode,oneof" json:"handshakeMode,omitempty"`
 	// Fine tune traffic behaviors.
 	TrafficPattern *TrafficPattern `protobuf:"bytes,7,opt,name=trafficPattern,proto3,oneof" json:"trafficPattern,omitempty"`
-	// Optional proxy dialer used by the client to connect to mita.
+	// Optional proxy dialer used by the client to connect to the shadowlemon
+	// server.
 	Dialer *ClientDialer `protobuf:"bytes,8,opt,name=dialer,proto3,oneof" json:"dialer,omitempty"`
 	// Ordered list of cipher suites the client is willing to use.
 	// The first entry is the most preferred suite. The suite used by a
 	// session is negotiated with the server, see ServerConfig.cipherSuites.
 	// An empty list means only CIPHER_SUITE_XCHACHA20_POLY1305 is used.
 	// CIPHER_SUITE_UNSPECIFIED is rejected, duplicated entries are ignored.
-	CipherSuites  []CipherSuite `protobuf:"varint,9,rep,packed,name=cipherSuites,proto3,enum=mieru.appctl.CipherSuite" json:"cipherSuites,omitempty"`
+	CipherSuites  []CipherSuite `protobuf:"varint,9,rep,packed,name=cipherSuites,proto3,enum=shadowlemon.appctl.CipherSuite" json:"cipherSuites,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -361,7 +363,7 @@ func (x *ClientProfile) GetCipherSuites() []CipherSuite {
 type ClientDialer struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Dialer proxy protocol.
-	Protocol *ProxyProtocol `protobuf:"varint,1,opt,name=protocol,proto3,enum=mieru.appctl.ProxyProtocol,oneof" json:"protocol,omitempty"`
+	Protocol *ProxyProtocol `protobuf:"varint,1,opt,name=protocol,proto3,enum=shadowlemon.appctl.ProxyProtocol,oneof" json:"protocol,omitempty"`
 	// Dialer proxy IP address or domain name.
 	Host *string `protobuf:"bytes,2,opt,name=host,proto3,oneof" json:"host,omitempty"`
 	// Dialer proxy port number.
@@ -507,7 +509,7 @@ func (x *ServerEndpoint) GetPortBindings() []*PortBinding {
 type MultiplexingConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// How frequent a network connection is reused.
-	Level         *MultiplexingLevel `protobuf:"varint,1,opt,name=level,proto3,enum=mieru.appctl.MultiplexingLevel,oneof" json:"level,omitempty"`
+	Level         *MultiplexingLevel `protobuf:"varint,1,opt,name=level,proto3,enum=shadowlemon.appctl.MultiplexingLevel,oneof" json:"level,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -553,61 +555,61 @@ var File_appctl_proto_clientcfg_proto protoreflect.FileDescriptor
 
 const file_appctl_proto_clientcfg_proto_rawDesc = "" +
 	"\n" +
-	"\x1cappctl/proto/clientcfg.proto\x12\fmieru.appctl\x1a\x17appctl/proto/base.proto\"\xb1\x03\n" +
-	"\fClientConfig\x127\n" +
-	"\bprofiles\x18\x01 \x03(\v2\x1b.mieru.appctl.ClientProfileR\bprofiles\x12)\n" +
+	"\x1cappctl/proto/clientcfg.proto\x12\x12shadowlemon.appctl\x1a\x17appctl/proto/base.proto\"\xc3\x03\n" +
+	"\fClientConfig\x12=\n" +
+	"\bprofiles\x18\x01 \x03(\v2!.shadowlemon.appctl.ClientProfileR\bprofiles\x12)\n" +
 	"\ractiveProfile\x18\x02 \x01(\tH\x00R\ractiveProfile\x88\x01\x01\x12#\n" +
 	"\n" +
 	"socks5Port\x18\x04 \x01(\x05H\x01R\n" +
-	"socks5Port\x88\x01\x01\x12C\n" +
-	"\floggingLevel\x18\x06 \x01(\x0e2\x1a.mieru.appctl.LoggingLevelH\x02R\floggingLevel\x88\x01\x01\x12-\n" +
-	"\x0fsocks5ListenLAN\x18\a \x01(\bH\x03R\x0fsocks5ListenLAN\x88\x01\x01\x12F\n" +
+	"socks5Port\x88\x01\x01\x12I\n" +
+	"\floggingLevel\x18\x06 \x01(\x0e2 .shadowlemon.appctl.LoggingLevelH\x02R\floggingLevel\x88\x01\x01\x12-\n" +
+	"\x0fsocks5ListenLAN\x18\a \x01(\bH\x03R\x0fsocks5ListenLAN\x88\x01\x01\x12L\n" +
 	"\x14socks5Authentication\x18\n" +
-	" \x03(\v2\x12.mieru.appctl.AuthR\x14socks5AuthenticationB\x10\n" +
+	" \x03(\v2\x18.shadowlemon.appctl.AuthR\x14socks5AuthenticationB\x10\n" +
 	"\x0e_activeProfileB\r\n" +
 	"\v_socks5PortB\x0f\n" +
 	"\r_loggingLevelB\x12\n" +
 	"\x10_socks5ListenLANJ\x04\b\x03\x10\x04J\x04\b\x05\x10\x06J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"\"\xea\x04\n" +
+	"\"\x94\x05\n" +
 	"\rClientProfile\x12%\n" +
-	"\vprofileName\x18\x01 \x01(\tH\x00R\vprofileName\x88\x01\x01\x12+\n" +
-	"\x04user\x18\x02 \x01(\v2\x12.mieru.appctl.UserH\x01R\x04user\x88\x01\x01\x126\n" +
-	"\aservers\x18\x03 \x03(\v2\x1c.mieru.appctl.ServerEndpointR\aservers\x12\x15\n" +
-	"\x03mtu\x18\x04 \x01(\x05H\x02R\x03mtu\x88\x01\x01\x12I\n" +
-	"\fmultiplexing\x18\x05 \x01(\v2 .mieru.appctl.MultiplexingConfigH\x03R\fmultiplexing\x88\x01\x01\x12F\n" +
-	"\rhandshakeMode\x18\x06 \x01(\x0e2\x1b.mieru.appctl.HandshakeModeH\x04R\rhandshakeMode\x88\x01\x01\x12I\n" +
-	"\x0etrafficPattern\x18\a \x01(\v2\x1c.mieru.appctl.TrafficPatternH\x05R\x0etrafficPattern\x88\x01\x01\x127\n" +
-	"\x06dialer\x18\b \x01(\v2\x1a.mieru.appctl.ClientDialerH\x06R\x06dialer\x88\x01\x01\x12=\n" +
-	"\fcipherSuites\x18\t \x03(\x0e2\x19.mieru.appctl.CipherSuiteR\fcipherSuitesB\x0e\n" +
+	"\vprofileName\x18\x01 \x01(\tH\x00R\vprofileName\x88\x01\x01\x121\n" +
+	"\x04user\x18\x02 \x01(\v2\x18.shadowlemon.appctl.UserH\x01R\x04user\x88\x01\x01\x12<\n" +
+	"\aservers\x18\x03 \x03(\v2\".shadowlemon.appctl.ServerEndpointR\aservers\x12\x15\n" +
+	"\x03mtu\x18\x04 \x01(\x05H\x02R\x03mtu\x88\x01\x01\x12O\n" +
+	"\fmultiplexing\x18\x05 \x01(\v2&.shadowlemon.appctl.MultiplexingConfigH\x03R\fmultiplexing\x88\x01\x01\x12L\n" +
+	"\rhandshakeMode\x18\x06 \x01(\x0e2!.shadowlemon.appctl.HandshakeModeH\x04R\rhandshakeMode\x88\x01\x01\x12O\n" +
+	"\x0etrafficPattern\x18\a \x01(\v2\".shadowlemon.appctl.TrafficPatternH\x05R\x0etrafficPattern\x88\x01\x01\x12=\n" +
+	"\x06dialer\x18\b \x01(\v2 .shadowlemon.appctl.ClientDialerH\x06R\x06dialer\x88\x01\x01\x12C\n" +
+	"\fcipherSuites\x18\t \x03(\x0e2\x1f.shadowlemon.appctl.CipherSuiteR\fcipherSuitesB\x0e\n" +
 	"\f_profileNameB\a\n" +
 	"\x05_userB\x06\n" +
 	"\x04_mtuB\x0f\n" +
 	"\r_multiplexingB\x10\n" +
 	"\x0e_handshakeModeB\x11\n" +
 	"\x0f_trafficPatternB\t\n" +
-	"\a_dialer\"\xcf\x02\n" +
-	"\fClientDialer\x12<\n" +
-	"\bprotocol\x18\x01 \x01(\x0e2\x1b.mieru.appctl.ProxyProtocolH\x00R\bprotocol\x88\x01\x01\x12\x17\n" +
+	"\a_dialer\"\xdb\x02\n" +
+	"\fClientDialer\x12B\n" +
+	"\bprotocol\x18\x01 \x01(\x0e2!.shadowlemon.appctl.ProxyProtocolH\x00R\bprotocol\x88\x01\x01\x12\x17\n" +
 	"\x04host\x18\x02 \x01(\tH\x01R\x04host\x88\x01\x01\x12\x17\n" +
 	"\x04port\x18\x03 \x01(\x05H\x02R\x04port\x88\x01\x01\x123\n" +
-	"\x12socks5UDPAssociate\x18\x04 \x01(\bH\x03R\x12socks5UDPAssociate\x88\x01\x01\x12K\n" +
-	"\x14socks5Authentication\x18\x05 \x01(\v2\x12.mieru.appctl.AuthH\x04R\x14socks5Authentication\x88\x01\x01B\v\n" +
+	"\x12socks5UDPAssociate\x18\x04 \x01(\bH\x03R\x12socks5UDPAssociate\x88\x01\x01\x12Q\n" +
+	"\x14socks5Authentication\x18\x05 \x01(\v2\x18.shadowlemon.appctl.AuthH\x04R\x14socks5Authentication\x88\x01\x01B\v\n" +
 	"\t_protocolB\a\n" +
 	"\x05_hostB\a\n" +
 	"\x05_portB\x15\n" +
 	"\x13_socks5UDPAssociateB\x17\n" +
-	"\x15_socks5Authentication\"\xb4\x01\n" +
+	"\x15_socks5Authentication\"\xba\x01\n" +
 	"\x0eServerEndpoint\x12!\n" +
 	"\tipAddress\x18\x01 \x01(\tH\x00R\tipAddress\x88\x01\x01\x12#\n" +
 	"\n" +
 	"domainName\x18\x02 \x01(\tH\x01R\n" +
-	"domainName\x88\x01\x01\x12=\n" +
-	"\fportBindings\x18\x03 \x03(\v2\x19.mieru.appctl.PortBindingR\fportBindingsB\f\n" +
+	"domainName\x88\x01\x01\x12C\n" +
+	"\fportBindings\x18\x03 \x03(\v2\x1f.shadowlemon.appctl.PortBindingR\fportBindingsB\f\n" +
 	"\n" +
 	"_ipAddressB\r\n" +
-	"\v_domainName\"Z\n" +
-	"\x12MultiplexingConfig\x12:\n" +
-	"\x05level\x18\x01 \x01(\x0e2\x1f.mieru.appctl.MultiplexingLevelH\x00R\x05level\x88\x01\x01B\b\n" +
+	"\v_domainName\"`\n" +
+	"\x12MultiplexingConfig\x12@\n" +
+	"\x05level\x18\x01 \x01(\x0e2%.shadowlemon.appctl.MultiplexingLevelH\x00R\x05level\x88\x01\x01B\b\n" +
 	"\x06_level*\x89\x01\n" +
 	"\x11MultiplexingLevel\x12\x18\n" +
 	"\x14MULTIPLEXING_DEFAULT\x10\x00\x12\x14\n" +
@@ -618,7 +620,7 @@ const file_appctl_proto_clientcfg_proto_rawDesc = "" +
 	"\rHandshakeMode\x12\x15\n" +
 	"\x11HANDSHAKE_DEFAULT\x10\x00\x12\x16\n" +
 	"\x12HANDSHAKE_STANDARD\x10\x01\x12\x15\n" +
-	"\x11HANDSHAKE_NO_WAIT\x10\x02B0Z.github.com/enfein/mieru/v3/pkg/appctl/appctlpbb\x06proto3"
+	"\x11HANDSHAKE_NO_WAIT\x10\x02B9Z7github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpbb\x06proto3"
 
 var (
 	file_appctl_proto_clientcfg_proto_rawDescOnce sync.Once
@@ -635,36 +637,36 @@ func file_appctl_proto_clientcfg_proto_rawDescGZIP() []byte {
 var file_appctl_proto_clientcfg_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_appctl_proto_clientcfg_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_appctl_proto_clientcfg_proto_goTypes = []any{
-	(MultiplexingLevel)(0),     // 0: mieru.appctl.MultiplexingLevel
-	(HandshakeMode)(0),         // 1: mieru.appctl.HandshakeMode
-	(*ClientConfig)(nil),       // 2: mieru.appctl.ClientConfig
-	(*ClientProfile)(nil),      // 3: mieru.appctl.ClientProfile
-	(*ClientDialer)(nil),       // 4: mieru.appctl.ClientDialer
-	(*ServerEndpoint)(nil),     // 5: mieru.appctl.ServerEndpoint
-	(*MultiplexingConfig)(nil), // 6: mieru.appctl.MultiplexingConfig
-	(LoggingLevel)(0),          // 7: mieru.appctl.LoggingLevel
-	(*Auth)(nil),               // 8: mieru.appctl.Auth
-	(*User)(nil),               // 9: mieru.appctl.User
-	(*TrafficPattern)(nil),     // 10: mieru.appctl.TrafficPattern
-	(CipherSuite)(0),           // 11: mieru.appctl.CipherSuite
-	(ProxyProtocol)(0),         // 12: mieru.appctl.ProxyProtocol
-	(*PortBinding)(nil),        // 13: mieru.appctl.PortBinding
+	(MultiplexingLevel)(0),     // 0: shadowlemon.appctl.MultiplexingLevel
+	(HandshakeMode)(0),         // 1: shadowlemon.appctl.HandshakeMode
+	(*ClientConfig)(nil),       // 2: shadowlemon.appctl.ClientConfig
+	(*ClientProfile)(nil),      // 3: shadowlemon.appctl.ClientProfile
+	(*ClientDialer)(nil),       // 4: shadowlemon.appctl.ClientDialer
+	(*ServerEndpoint)(nil),     // 5: shadowlemon.appctl.ServerEndpoint
+	(*MultiplexingConfig)(nil), // 6: shadowlemon.appctl.MultiplexingConfig
+	(LoggingLevel)(0),          // 7: shadowlemon.appctl.LoggingLevel
+	(*Auth)(nil),               // 8: shadowlemon.appctl.Auth
+	(*User)(nil),               // 9: shadowlemon.appctl.User
+	(*TrafficPattern)(nil),     // 10: shadowlemon.appctl.TrafficPattern
+	(CipherSuite)(0),           // 11: shadowlemon.appctl.CipherSuite
+	(ProxyProtocol)(0),         // 12: shadowlemon.appctl.ProxyProtocol
+	(*PortBinding)(nil),        // 13: shadowlemon.appctl.PortBinding
 }
 var file_appctl_proto_clientcfg_proto_depIdxs = []int32{
-	3,  // 0: mieru.appctl.ClientConfig.profiles:type_name -> mieru.appctl.ClientProfile
-	7,  // 1: mieru.appctl.ClientConfig.loggingLevel:type_name -> mieru.appctl.LoggingLevel
-	8,  // 2: mieru.appctl.ClientConfig.socks5Authentication:type_name -> mieru.appctl.Auth
-	9,  // 3: mieru.appctl.ClientProfile.user:type_name -> mieru.appctl.User
-	5,  // 4: mieru.appctl.ClientProfile.servers:type_name -> mieru.appctl.ServerEndpoint
-	6,  // 5: mieru.appctl.ClientProfile.multiplexing:type_name -> mieru.appctl.MultiplexingConfig
-	1,  // 6: mieru.appctl.ClientProfile.handshakeMode:type_name -> mieru.appctl.HandshakeMode
-	10, // 7: mieru.appctl.ClientProfile.trafficPattern:type_name -> mieru.appctl.TrafficPattern
-	4,  // 8: mieru.appctl.ClientProfile.dialer:type_name -> mieru.appctl.ClientDialer
-	11, // 9: mieru.appctl.ClientProfile.cipherSuites:type_name -> mieru.appctl.CipherSuite
-	12, // 10: mieru.appctl.ClientDialer.protocol:type_name -> mieru.appctl.ProxyProtocol
-	8,  // 11: mieru.appctl.ClientDialer.socks5Authentication:type_name -> mieru.appctl.Auth
-	13, // 12: mieru.appctl.ServerEndpoint.portBindings:type_name -> mieru.appctl.PortBinding
-	0,  // 13: mieru.appctl.MultiplexingConfig.level:type_name -> mieru.appctl.MultiplexingLevel
+	3,  // 0: shadowlemon.appctl.ClientConfig.profiles:type_name -> shadowlemon.appctl.ClientProfile
+	7,  // 1: shadowlemon.appctl.ClientConfig.loggingLevel:type_name -> shadowlemon.appctl.LoggingLevel
+	8,  // 2: shadowlemon.appctl.ClientConfig.socks5Authentication:type_name -> shadowlemon.appctl.Auth
+	9,  // 3: shadowlemon.appctl.ClientProfile.user:type_name -> shadowlemon.appctl.User
+	5,  // 4: shadowlemon.appctl.ClientProfile.servers:type_name -> shadowlemon.appctl.ServerEndpoint
+	6,  // 5: shadowlemon.appctl.ClientProfile.multiplexing:type_name -> shadowlemon.appctl.MultiplexingConfig
+	1,  // 6: shadowlemon.appctl.ClientProfile.handshakeMode:type_name -> shadowlemon.appctl.HandshakeMode
+	10, // 7: shadowlemon.appctl.ClientProfile.trafficPattern:type_name -> shadowlemon.appctl.TrafficPattern
+	4,  // 8: shadowlemon.appctl.ClientProfile.dialer:type_name -> shadowlemon.appctl.ClientDialer
+	11, // 9: shadowlemon.appctl.ClientProfile.cipherSuites:type_name -> shadowlemon.appctl.CipherSuite
+	12, // 10: shadowlemon.appctl.ClientDialer.protocol:type_name -> shadowlemon.appctl.ProxyProtocol
+	8,  // 11: shadowlemon.appctl.ClientDialer.socks5Authentication:type_name -> shadowlemon.appctl.Auth
+	13, // 12: shadowlemon.appctl.ServerEndpoint.portBindings:type_name -> shadowlemon.appctl.PortBinding
+	0,  // 13: shadowlemon.appctl.MultiplexingConfig.level:type_name -> shadowlemon.appctl.MultiplexingLevel
 	14, // [14:14] is the sub-list for method output_type
 	14, // [14:14] is the sub-list for method input_type
 	14, // [14:14] is the sub-list for extension type_name

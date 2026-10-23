@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -50,7 +50,7 @@ func newClientProfileWithCipherSuites() *pb.ClientProfile {
 	}
 }
 
-// TestClientConfigCipherSuitesURL verifies that the mieru:// sharing link,
+// TestClientConfigCipherSuitesURL verifies that the shadowlemon:// sharing link,
 // which carries the whole client config as protobuf, round trips cipher suites.
 func TestClientConfigCipherSuitesURL(t *testing.T) {
 	config := &pb.ClientConfig{
@@ -71,8 +71,8 @@ func TestClientConfigCipherSuitesURL(t *testing.T) {
 	}
 }
 
-// TestClientProfileCipherSuitesSimpleURL verifies that the mierus:// sharing
-// link, which encodes each field by hand, round trips cipher suites too.
+// TestClientProfileCipherSuitesSimpleURL verifies that the shadowlemons://
+// sharing link, which encodes each field by hand, round trips cipher suites too.
 func TestClientProfileCipherSuitesSimpleURL(t *testing.T) {
 	profile := newClientProfileWithCipherSuites()
 	urls, err := ClientProfileToMultiURLs(profile)
@@ -102,7 +102,8 @@ func TestClientProfileCipherSuitesSimpleURL(t *testing.T) {
 }
 
 // TestClientConfigCipherSuitesJSON verifies that cipher suites survive a JSON
-// round trip through the encoding used by "mieru apply/replace/describe config".
+// round trip through the encoding used by
+// "shadowlemon client apply/replace/describe config".
 func TestClientConfigCipherSuitesJSON(t *testing.T) {
 	config := &pb.ClientConfig{
 		Profiles:      []*pb.ClientProfile{newClientProfileWithCipherSuites()},

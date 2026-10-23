@@ -101,7 +101,7 @@ type ServerConfig struct {
 	// Server advanced settings.
 	AdvancedSettings *ServerAdvancedSettings `protobuf:"bytes,3,opt,name=advancedSettings,proto3,oneof" json:"advancedSettings,omitempty"`
 	// Server logging level.
-	LoggingLevel *LoggingLevel `protobuf:"varint,4,opt,name=loggingLevel,proto3,enum=mieru.appctl.LoggingLevel,oneof" json:"loggingLevel,omitempty"`
+	LoggingLevel *LoggingLevel `protobuf:"varint,4,opt,name=loggingLevel,proto3,enum=shadowlemon.appctl.LoggingLevel,oneof" json:"loggingLevel,omitempty"`
 	// Maximum transmission unit of L2 payload.
 	// This setting only applies to UDP protocol egress traffic.
 	Mtu *int32 `protobuf:"varint,5,opt,name=mtu,proto3,oneof" json:"mtu,omitempty"`
@@ -117,7 +117,7 @@ type ServerConfig struct {
 	// is also supported by the client, the first entry of this list wins.
 	// An empty list means every supported cipher suite is accepted.
 	// CIPHER_SUITE_UNSPECIFIED is rejected, duplicated entries are ignored.
-	CipherSuites  []CipherSuite `protobuf:"varint,10,rep,packed,name=cipherSuites,proto3,enum=mieru.appctl.CipherSuite" json:"cipherSuites,omitempty"`
+	CipherSuites  []CipherSuite `protobuf:"varint,10,rep,packed,name=cipherSuites,proto3,enum=shadowlemon.appctl.CipherSuite" json:"cipherSuites,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -326,7 +326,7 @@ func (x *Egress) GetRules() []*EgressRule {
 type EgressProxy struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Name     *string                `protobuf:"bytes,1,opt,name=name,proto3,oneof" json:"name,omitempty"`
-	Protocol *ProxyProtocol         `protobuf:"varint,2,opt,name=protocol,proto3,enum=mieru.appctl.ProxyProtocol,oneof" json:"protocol,omitempty"`
+	Protocol *ProxyProtocol         `protobuf:"varint,2,opt,name=protocol,proto3,enum=shadowlemon.appctl.ProxyProtocol,oneof" json:"protocol,omitempty"`
 	// Proxy IP address or domain name.
 	Host *string `protobuf:"bytes,3,opt,name=host,proto3,oneof" json:"host,omitempty"`
 	// Proxy port number.
@@ -412,7 +412,7 @@ type EgressRule struct {
 	// Use "*" to match all domain names.
 	DomainNames []string `protobuf:"bytes,2,rep,name=domainNames,proto3" json:"domainNames,omitempty"`
 	// The action to do when the rule is matched.
-	Action *EgressAction `protobuf:"varint,3,opt,name=action,proto3,enum=mieru.appctl.EgressAction,oneof" json:"action,omitempty"`
+	Action *EgressAction `protobuf:"varint,3,opt,name=action,proto3,enum=shadowlemon.appctl.EgressAction,oneof" json:"action,omitempty"`
 	// The list of proxies to connect.
 	// This must not be empty when the action is PROXY.
 	// When multiple proxies are provided, a random one is selected
@@ -483,7 +483,7 @@ func (x *EgressRule) GetProxyNames() []string {
 type DNS struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Pick up IP address from IP version preference.
-	DualStack *DualStack `protobuf:"varint,1,opt,name=dualStack,proto3,enum=mieru.appctl.DualStack,oneof" json:"dualStack,omitempty"`
+	DualStack *DualStack `protobuf:"varint,1,opt,name=dualStack,proto3,enum=shadowlemon.appctl.DualStack,oneof" json:"dualStack,omitempty"`
 	// Static domain to IP mappings, similar to /etc/hosts.
 	Hosts         map[string]string `protobuf:"bytes,2,rep,name=hosts,proto3" json:"hosts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
@@ -538,19 +538,19 @@ var File_appctl_proto_servercfg_proto protoreflect.FileDescriptor
 
 const file_appctl_proto_servercfg_proto_rawDesc = "" +
 	"\n" +
-	"\x1cappctl/proto/servercfg.proto\x12\fmieru.appctl\x1a\x17appctl/proto/base.proto\"\xa8\x05\n" +
+	"\x1cappctl/proto/servercfg.proto\x12\x12shadowlemon.appctl\x1a\x17appctl/proto/base.proto\"\xd8\x05\n" +
 	"\fServerConfig\x12-\n" +
-	"\x0flistenIPAddress\x18\t \x01(\tH\x00R\x0flistenIPAddress\x88\x01\x01\x12=\n" +
-	"\fportBindings\x18\x01 \x03(\v2\x19.mieru.appctl.PortBindingR\fportBindings\x12(\n" +
-	"\x05users\x18\x02 \x03(\v2\x12.mieru.appctl.UserR\x05users\x12U\n" +
-	"\x10advancedSettings\x18\x03 \x01(\v2$.mieru.appctl.ServerAdvancedSettingsH\x01R\x10advancedSettings\x88\x01\x01\x12C\n" +
-	"\floggingLevel\x18\x04 \x01(\x0e2\x1a.mieru.appctl.LoggingLevelH\x02R\floggingLevel\x88\x01\x01\x12\x15\n" +
-	"\x03mtu\x18\x05 \x01(\x05H\x03R\x03mtu\x88\x01\x01\x121\n" +
-	"\x06egress\x18\x06 \x01(\v2\x14.mieru.appctl.EgressH\x04R\x06egress\x88\x01\x01\x12(\n" +
-	"\x03dns\x18\a \x01(\v2\x11.mieru.appctl.DNSH\x05R\x03dns\x88\x01\x01\x12I\n" +
-	"\x0etrafficPattern\x18\b \x01(\v2\x1c.mieru.appctl.TrafficPatternH\x06R\x0etrafficPattern\x88\x01\x01\x12=\n" +
+	"\x0flistenIPAddress\x18\t \x01(\tH\x00R\x0flistenIPAddress\x88\x01\x01\x12C\n" +
+	"\fportBindings\x18\x01 \x03(\v2\x1f.shadowlemon.appctl.PortBindingR\fportBindings\x12.\n" +
+	"\x05users\x18\x02 \x03(\v2\x18.shadowlemon.appctl.UserR\x05users\x12[\n" +
+	"\x10advancedSettings\x18\x03 \x01(\v2*.shadowlemon.appctl.ServerAdvancedSettingsH\x01R\x10advancedSettings\x88\x01\x01\x12I\n" +
+	"\floggingLevel\x18\x04 \x01(\x0e2 .shadowlemon.appctl.LoggingLevelH\x02R\floggingLevel\x88\x01\x01\x12\x15\n" +
+	"\x03mtu\x18\x05 \x01(\x05H\x03R\x03mtu\x88\x01\x01\x127\n" +
+	"\x06egress\x18\x06 \x01(\v2\x1a.shadowlemon.appctl.EgressH\x04R\x06egress\x88\x01\x01\x12.\n" +
+	"\x03dns\x18\a \x01(\v2\x17.shadowlemon.appctl.DNSH\x05R\x03dns\x88\x01\x01\x12O\n" +
+	"\x0etrafficPattern\x18\b \x01(\v2\".shadowlemon.appctl.TrafficPatternH\x06R\x0etrafficPattern\x88\x01\x01\x12C\n" +
 	"\fcipherSuites\x18\n" +
-	" \x03(\x0e2\x19.mieru.appctl.CipherSuiteR\fcipherSuitesB\x12\n" +
+	" \x03(\x0e2\x1f.shadowlemon.appctl.CipherSuiteR\fcipherSuitesB\x12\n" +
 	"\x10_listenIPAddressB\x13\n" +
 	"\x11_advancedSettingsB\x0f\n" +
 	"\r_loggingLevelB\x06\n" +
@@ -560,33 +560,33 @@ const file_appctl_proto_servercfg_proto_rawDesc = "" +
 	"\x0f_trafficPattern\"s\n" +
 	"\x16ServerAdvancedSettings\x125\n" +
 	"\x13userHintIsMandatory\x18\x03 \x01(\bH\x00R\x13userHintIsMandatory\x88\x01\x01B\x16\n" +
-	"\x14_userHintIsMandatoryJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03\"m\n" +
-	"\x06Egress\x123\n" +
-	"\aproxies\x18\x01 \x03(\v2\x19.mieru.appctl.EgressProxyR\aproxies\x12.\n" +
-	"\x05rules\x18\x02 \x03(\v2\x18.mieru.appctl.EgressRuleR\x05rules\"\xa4\x02\n" +
+	"\x14_userHintIsMandatoryJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03\"y\n" +
+	"\x06Egress\x129\n" +
+	"\aproxies\x18\x01 \x03(\v2\x1f.shadowlemon.appctl.EgressProxyR\aproxies\x124\n" +
+	"\x05rules\x18\x02 \x03(\v2\x1e.shadowlemon.appctl.EgressRuleR\x05rules\"\xb0\x02\n" +
 	"\vEgressProxy\x12\x17\n" +
-	"\x04name\x18\x01 \x01(\tH\x00R\x04name\x88\x01\x01\x12<\n" +
-	"\bprotocol\x18\x02 \x01(\x0e2\x1b.mieru.appctl.ProxyProtocolH\x01R\bprotocol\x88\x01\x01\x12\x17\n" +
+	"\x04name\x18\x01 \x01(\tH\x00R\x04name\x88\x01\x01\x12B\n" +
+	"\bprotocol\x18\x02 \x01(\x0e2!.shadowlemon.appctl.ProxyProtocolH\x01R\bprotocol\x88\x01\x01\x12\x17\n" +
 	"\x04host\x18\x03 \x01(\tH\x02R\x04host\x88\x01\x01\x12\x17\n" +
-	"\x04port\x18\x04 \x01(\x05H\x03R\x04port\x88\x01\x01\x12K\n" +
-	"\x14socks5Authentication\x18\x05 \x01(\v2\x12.mieru.appctl.AuthH\x04R\x14socks5Authentication\x88\x01\x01B\a\n" +
+	"\x04port\x18\x04 \x01(\x05H\x03R\x04port\x88\x01\x01\x12Q\n" +
+	"\x14socks5Authentication\x18\x05 \x01(\v2\x18.shadowlemon.appctl.AuthH\x04R\x14socks5Authentication\x88\x01\x01B\a\n" +
 	"\x05_nameB\v\n" +
 	"\t_protocolB\a\n" +
 	"\x05_hostB\a\n" +
 	"\x05_portB\x17\n" +
-	"\x15_socks5Authentication\"\xae\x01\n" +
+	"\x15_socks5Authentication\"\xb4\x01\n" +
 	"\n" +
 	"EgressRule\x12\x1a\n" +
 	"\bipRanges\x18\x01 \x03(\tR\bipRanges\x12 \n" +
-	"\vdomainNames\x18\x02 \x03(\tR\vdomainNames\x127\n" +
-	"\x06action\x18\x03 \x01(\x0e2\x1a.mieru.appctl.EgressActionH\x00R\x06action\x88\x01\x01\x12\x1e\n" +
+	"\vdomainNames\x18\x02 \x03(\tR\vdomainNames\x12=\n" +
+	"\x06action\x18\x03 \x01(\x0e2 .shadowlemon.appctl.EgressActionH\x00R\x06action\x88\x01\x01\x12\x1e\n" +
 	"\n" +
 	"proxyNames\x18\x04 \x03(\tR\n" +
 	"proxyNamesB\t\n" +
-	"\a_action\"\xbd\x01\n" +
-	"\x03DNS\x12:\n" +
-	"\tdualStack\x18\x01 \x01(\x0e2\x17.mieru.appctl.DualStackH\x00R\tdualStack\x88\x01\x01\x122\n" +
-	"\x05hosts\x18\x02 \x03(\v2\x1c.mieru.appctl.DNS.HostsEntryR\x05hosts\x1a8\n" +
+	"\a_action\"\xc9\x01\n" +
+	"\x03DNS\x12@\n" +
+	"\tdualStack\x18\x01 \x01(\x0e2\x1d.shadowlemon.appctl.DualStackH\x00R\tdualStack\x88\x01\x01\x128\n" +
+	"\x05hosts\x18\x02 \x03(\v2\".shadowlemon.appctl.DNS.HostsEntryR\x05hosts\x1a8\n" +
 	"\n" +
 	"HostsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
@@ -598,7 +598,7 @@ const file_appctl_proto_servercfg_proto_rawDesc = "" +
 	"\n" +
 	"\x06DIRECT\x10\x01\x12\n" +
 	"\n" +
-	"\x06REJECT\x10\x02B0Z.github.com/enfein/mieru/v3/pkg/appctl/appctlpbb\x06proto3"
+	"\x06REJECT\x10\x02B9Z7github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpbb\x06proto3"
 
 var (
 	file_appctl_proto_servercfg_proto_rawDescOnce sync.Once
@@ -615,39 +615,39 @@ func file_appctl_proto_servercfg_proto_rawDescGZIP() []byte {
 var file_appctl_proto_servercfg_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_appctl_proto_servercfg_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_appctl_proto_servercfg_proto_goTypes = []any{
-	(EgressAction)(0),              // 0: mieru.appctl.EgressAction
-	(*ServerConfig)(nil),           // 1: mieru.appctl.ServerConfig
-	(*ServerAdvancedSettings)(nil), // 2: mieru.appctl.ServerAdvancedSettings
-	(*Egress)(nil),                 // 3: mieru.appctl.Egress
-	(*EgressProxy)(nil),            // 4: mieru.appctl.EgressProxy
-	(*EgressRule)(nil),             // 5: mieru.appctl.EgressRule
-	(*DNS)(nil),                    // 6: mieru.appctl.DNS
-	nil,                            // 7: mieru.appctl.DNS.HostsEntry
-	(*PortBinding)(nil),            // 8: mieru.appctl.PortBinding
-	(*User)(nil),                   // 9: mieru.appctl.User
-	(LoggingLevel)(0),              // 10: mieru.appctl.LoggingLevel
-	(*TrafficPattern)(nil),         // 11: mieru.appctl.TrafficPattern
-	(CipherSuite)(0),               // 12: mieru.appctl.CipherSuite
-	(ProxyProtocol)(0),             // 13: mieru.appctl.ProxyProtocol
-	(*Auth)(nil),                   // 14: mieru.appctl.Auth
-	(DualStack)(0),                 // 15: mieru.appctl.DualStack
+	(EgressAction)(0),              // 0: shadowlemon.appctl.EgressAction
+	(*ServerConfig)(nil),           // 1: shadowlemon.appctl.ServerConfig
+	(*ServerAdvancedSettings)(nil), // 2: shadowlemon.appctl.ServerAdvancedSettings
+	(*Egress)(nil),                 // 3: shadowlemon.appctl.Egress
+	(*EgressProxy)(nil),            // 4: shadowlemon.appctl.EgressProxy
+	(*EgressRule)(nil),             // 5: shadowlemon.appctl.EgressRule
+	(*DNS)(nil),                    // 6: shadowlemon.appctl.DNS
+	nil,                            // 7: shadowlemon.appctl.DNS.HostsEntry
+	(*PortBinding)(nil),            // 8: shadowlemon.appctl.PortBinding
+	(*User)(nil),                   // 9: shadowlemon.appctl.User
+	(LoggingLevel)(0),              // 10: shadowlemon.appctl.LoggingLevel
+	(*TrafficPattern)(nil),         // 11: shadowlemon.appctl.TrafficPattern
+	(CipherSuite)(0),               // 12: shadowlemon.appctl.CipherSuite
+	(ProxyProtocol)(0),             // 13: shadowlemon.appctl.ProxyProtocol
+	(*Auth)(nil),                   // 14: shadowlemon.appctl.Auth
+	(DualStack)(0),                 // 15: shadowlemon.appctl.DualStack
 }
 var file_appctl_proto_servercfg_proto_depIdxs = []int32{
-	8,  // 0: mieru.appctl.ServerConfig.portBindings:type_name -> mieru.appctl.PortBinding
-	9,  // 1: mieru.appctl.ServerConfig.users:type_name -> mieru.appctl.User
-	2,  // 2: mieru.appctl.ServerConfig.advancedSettings:type_name -> mieru.appctl.ServerAdvancedSettings
-	10, // 3: mieru.appctl.ServerConfig.loggingLevel:type_name -> mieru.appctl.LoggingLevel
-	3,  // 4: mieru.appctl.ServerConfig.egress:type_name -> mieru.appctl.Egress
-	6,  // 5: mieru.appctl.ServerConfig.dns:type_name -> mieru.appctl.DNS
-	11, // 6: mieru.appctl.ServerConfig.trafficPattern:type_name -> mieru.appctl.TrafficPattern
-	12, // 7: mieru.appctl.ServerConfig.cipherSuites:type_name -> mieru.appctl.CipherSuite
-	4,  // 8: mieru.appctl.Egress.proxies:type_name -> mieru.appctl.EgressProxy
-	5,  // 9: mieru.appctl.Egress.rules:type_name -> mieru.appctl.EgressRule
-	13, // 10: mieru.appctl.EgressProxy.protocol:type_name -> mieru.appctl.ProxyProtocol
-	14, // 11: mieru.appctl.EgressProxy.socks5Authentication:type_name -> mieru.appctl.Auth
-	0,  // 12: mieru.appctl.EgressRule.action:type_name -> mieru.appctl.EgressAction
-	15, // 13: mieru.appctl.DNS.dualStack:type_name -> mieru.appctl.DualStack
-	7,  // 14: mieru.appctl.DNS.hosts:type_name -> mieru.appctl.DNS.HostsEntry
+	8,  // 0: shadowlemon.appctl.ServerConfig.portBindings:type_name -> shadowlemon.appctl.PortBinding
+	9,  // 1: shadowlemon.appctl.ServerConfig.users:type_name -> shadowlemon.appctl.User
+	2,  // 2: shadowlemon.appctl.ServerConfig.advancedSettings:type_name -> shadowlemon.appctl.ServerAdvancedSettings
+	10, // 3: shadowlemon.appctl.ServerConfig.loggingLevel:type_name -> shadowlemon.appctl.LoggingLevel
+	3,  // 4: shadowlemon.appctl.ServerConfig.egress:type_name -> shadowlemon.appctl.Egress
+	6,  // 5: shadowlemon.appctl.ServerConfig.dns:type_name -> shadowlemon.appctl.DNS
+	11, // 6: shadowlemon.appctl.ServerConfig.trafficPattern:type_name -> shadowlemon.appctl.TrafficPattern
+	12, // 7: shadowlemon.appctl.ServerConfig.cipherSuites:type_name -> shadowlemon.appctl.CipherSuite
+	4,  // 8: shadowlemon.appctl.Egress.proxies:type_name -> shadowlemon.appctl.EgressProxy
+	5,  // 9: shadowlemon.appctl.Egress.rules:type_name -> shadowlemon.appctl.EgressRule
+	13, // 10: shadowlemon.appctl.EgressProxy.protocol:type_name -> shadowlemon.appctl.ProxyProtocol
+	14, // 11: shadowlemon.appctl.EgressProxy.socks5Authentication:type_name -> shadowlemon.appctl.Auth
+	0,  // 12: shadowlemon.appctl.EgressRule.action:type_name -> shadowlemon.appctl.EgressAction
+	15, // 13: shadowlemon.appctl.DNS.dualStack:type_name -> shadowlemon.appctl.DualStack
+	7,  // 14: shadowlemon.appctl.DNS.hosts:type_name -> shadowlemon.appctl.DNS.HostsEntry
 	15, // [15:15] is the sub-list for method output_type
 	15, // [15:15] is the sub-list for method input_type
 	15, // [15:15] is the sub-list for extension type_name

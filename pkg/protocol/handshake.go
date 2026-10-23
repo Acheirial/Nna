@@ -23,7 +23,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 )
 
 const (

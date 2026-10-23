@@ -23,7 +23,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/version"
+	"github.com/Acheirial/shadowlemon/v3/pkg/version"
 )
 
 // RFC 7748 section 6.1 test vectors.

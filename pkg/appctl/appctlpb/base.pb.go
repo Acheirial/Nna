@@ -507,17 +507,18 @@ func (LowEntropyMaskRotation) EnumDescriptor() ([]byte, []int) {
 	return file_appctl_proto_base_proto_rawDescGZIP(), []int{6}
 }
 
-// Cipher suites supported by the mieru proxy protocol.
+// Cipher suites supported by the shadowlemon proxy protocol.
 //
 // The numeric value of each entry is the suite identifier used on the wire, so
 // the numbering must never change.
 //
 // A connection always uses exactly one suite, negotiated by the two ends:
-//   - A mieru client lists the suites it is willing to use, in preference
+//   - A shadowlemon client lists the suites it is willing to use, in preference
 //     order, in ClientProfile.cipherSuites. An empty list means only
 //     CIPHER_SUITE_XCHACHA20_POLY1305 is used.
-//   - A mita server lists the suites it accepts in ServerConfig.cipherSuites.
-//     An empty list means every supported suite is accepted.
+//   - A shadowlemon process in the server role lists the suites it accepts in
+//     ServerConfig.cipherSuites. An empty list means every supported suite is
+//     accepted.
 //
 // The negotiated suite is the first entry of the server list that also appears
 // in the client list. If the two lists have no entry in common, the session
@@ -600,7 +601,7 @@ type PortBinding struct {
 	// A single port number.
 	// This field can't be set with portRange at the same time.
 	Port     *int32             `protobuf:"varint,1,opt,name=port,proto3,oneof" json:"port,omitempty"`
-	Protocol *TransportProtocol `protobuf:"varint,2,opt,name=protocol,proto3,enum=mieru.appctl.TransportProtocol,oneof" json:"protocol,omitempty"`
+	Protocol *TransportProtocol `protobuf:"varint,2,opt,name=protocol,proto3,enum=shadowlemon.appctl.TransportProtocol,oneof" json:"protocol,omitempty"`
 	// A port number range.
 	// For example, "8000-9000" contains 1001 ports from 8000 to 9000.
 	// This field can't be set with port at the same time.
@@ -953,7 +954,7 @@ func (x *TCPFragment) GetMaxSleepMs() int32 {
 type NoncePattern struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Strategy to manipulate nonce.
-	Type *NonceType `protobuf:"varint,1,opt,name=type,proto3,enum=mieru.appctl.NonceType,oneof" json:"type,omitempty"`
+	Type *NonceType `protobuf:"varint,1,opt,name=type,proto3,enum=shadowlemon.appctl.NonceType,oneof" json:"type,omitempty"`
 	// If the pattern applies to each UDP packet,
 	// or only applies to the first UDP packet.
 	ApplyToAllUDPPacket *bool `protobuf:"varint,2,opt,name=applyToAllUDPPacket,proto3,oneof" json:"applyToAllUDPPacket,omitempty"`
@@ -1106,11 +1107,11 @@ func (x *PaddingPattern) GetMaxEndPaddingLen() int32 {
 type LowEntropyPattern struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// If low entropy is enabled, and how much entropy is reduced.
-	Mode *LowEntropyMode `protobuf:"varint,1,opt,name=mode,proto3,enum=mieru.appctl.LowEntropyMode,oneof" json:"mode,omitempty"`
+	Mode *LowEntropyMode `protobuf:"varint,1,opt,name=mode,proto3,enum=shadowlemon.appctl.LowEntropyMode,oneof" json:"mode,omitempty"`
 	// Low entropy uses a 64-bit long mask to determine the position of padding bits.
 	// This determines how to rotate the mask between two adjacent chunks.
 	// It has no effect if low entropy mode is disabled.
-	MaskRotation  *LowEntropyMaskRotation `protobuf:"varint,2,opt,name=maskRotation,proto3,enum=mieru.appctl.LowEntropyMaskRotation,oneof" json:"maskRotation,omitempty"`
+	MaskRotation  *LowEntropyMaskRotation `protobuf:"varint,2,opt,name=maskRotation,proto3,enum=shadowlemon.appctl.LowEntropyMaskRotation,oneof" json:"maskRotation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1163,10 +1164,10 @@ var File_appctl_proto_base_proto protoreflect.FileDescriptor
 
 const file_appctl_proto_base_proto_rawDesc = "" +
 	"\n" +
-	"\x17appctl/proto/base.proto\x12\fmieru.appctl\"\xaf\x01\n" +
+	"\x17appctl/proto/base.proto\x12\x12shadowlemon.appctl\"\xb5\x01\n" +
 	"\vPortBinding\x12\x17\n" +
-	"\x04port\x18\x01 \x01(\x05H\x00R\x04port\x88\x01\x01\x12@\n" +
-	"\bprotocol\x18\x02 \x01(\x0e2\x1f.mieru.appctl.TransportProtocolH\x01R\bprotocol\x88\x01\x01\x12!\n" +
+	"\x04port\x18\x01 \x01(\x05H\x00R\x04port\x88\x01\x01\x12F\n" +
+	"\bprotocol\x18\x02 \x01(\x0e2%.shadowlemon.appctl.TransportProtocolH\x01R\bprotocol\x88\x01\x01\x12!\n" +
 	"\tportRange\x18\x03 \x01(\tH\x02R\tportRange\x88\x01\x01B\a\n" +
 	"\x05_portB\v\n" +
 	"\t_protocolB\f\n" +
@@ -1187,15 +1188,15 @@ const file_appctl_proto_base_proto_rawDesc = "" +
 	"\x04user\x18\x01 \x01(\tH\x00R\x04user\x88\x01\x01\x12\x1f\n" +
 	"\bpassword\x18\x02 \x01(\tH\x01R\bpassword\x88\x01\x01B\a\n" +
 	"\x05_userB\v\n" +
-	"\t_password\"\x94\x03\n" +
+	"\t_password\"\xac\x03\n" +
 	"\x0eTrafficPattern\x12\x17\n" +
 	"\x04seed\x18\x01 \x01(\x05H\x00R\x04seed\x88\x01\x01\x12!\n" +
-	"\tunlockAll\x18\x02 \x01(\bH\x01R\tunlockAll\x88\x01\x01\x12@\n" +
-	"\vtcpFragment\x18\x03 \x01(\v2\x19.mieru.appctl.TCPFragmentH\x02R\vtcpFragment\x88\x01\x01\x125\n" +
-	"\x05nonce\x18\x04 \x01(\v2\x1a.mieru.appctl.NoncePatternH\x03R\x05nonce\x88\x01\x01\x12;\n" +
-	"\apadding\x18\x05 \x01(\v2\x1c.mieru.appctl.PaddingPatternH\x04R\apadding\x88\x01\x01\x12D\n" +
+	"\tunlockAll\x18\x02 \x01(\bH\x01R\tunlockAll\x88\x01\x01\x12F\n" +
+	"\vtcpFragment\x18\x03 \x01(\v2\x1f.shadowlemon.appctl.TCPFragmentH\x02R\vtcpFragment\x88\x01\x01\x12;\n" +
+	"\x05nonce\x18\x04 \x01(\v2 .shadowlemon.appctl.NoncePatternH\x03R\x05nonce\x88\x01\x01\x12A\n" +
+	"\apadding\x18\x05 \x01(\v2\".shadowlemon.appctl.PaddingPatternH\x04R\apadding\x88\x01\x01\x12J\n" +
 	"\n" +
-	"lowEntropy\x18\x06 \x01(\v2\x1f.mieru.appctl.LowEntropyPatternH\x05R\n" +
+	"lowEntropy\x18\x06 \x01(\v2%.shadowlemon.appctl.LowEntropyPatternH\x05R\n" +
 	"lowEntropy\x88\x01\x01B\a\n" +
 	"\x05_seedB\f\n" +
 	"\n" +
@@ -1211,9 +1212,9 @@ const file_appctl_proto_base_proto_rawDesc = "" +
 	"maxSleepMs\x18\x02 \x01(\x05H\x01R\n" +
 	"maxSleepMs\x88\x01\x01B\t\n" +
 	"\a_enableB\r\n" +
-	"\v_maxSleepMs\"\x94\x02\n" +
-	"\fNoncePattern\x120\n" +
-	"\x04type\x18\x01 \x01(\x0e2\x17.mieru.appctl.NonceTypeH\x00R\x04type\x88\x01\x01\x125\n" +
+	"\v_maxSleepMs\"\x9a\x02\n" +
+	"\fNoncePattern\x126\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x1d.shadowlemon.appctl.NonceTypeH\x00R\x04type\x88\x01\x01\x125\n" +
 	"\x13applyToAllUDPPacket\x18\x02 \x01(\bH\x01R\x13applyToAllUDPPacket\x88\x01\x01\x12\x1b\n" +
 	"\x06minLen\x18\x03 \x01(\x05H\x02R\x06minLen\x88\x01\x01\x12\x1b\n" +
 	"\x06maxLen\x18\x04 \x01(\x05H\x03R\x06maxLen\x88\x01\x01\x12*\n" +
@@ -1226,10 +1227,10 @@ const file_appctl_proto_base_proto_rawDesc = "" +
 	"\x13maxMiddlePaddingLen\x18\x01 \x01(\x05H\x00R\x13maxMiddlePaddingLen\x88\x01\x01\x12/\n" +
 	"\x10maxEndPaddingLen\x18\x02 \x01(\x05H\x01R\x10maxEndPaddingLen\x88\x01\x01B\x16\n" +
 	"\x14_maxMiddlePaddingLenB\x13\n" +
-	"\x11_maxEndPaddingLen\"\xb3\x01\n" +
-	"\x11LowEntropyPattern\x125\n" +
-	"\x04mode\x18\x01 \x01(\x0e2\x1c.mieru.appctl.LowEntropyModeH\x00R\x04mode\x88\x01\x01\x12M\n" +
-	"\fmaskRotation\x18\x02 \x01(\x0e2$.mieru.appctl.LowEntropyMaskRotationH\x01R\fmaskRotation\x88\x01\x01B\a\n" +
+	"\x11_maxEndPaddingLen\"\xbf\x01\n" +
+	"\x11LowEntropyPattern\x12;\n" +
+	"\x04mode\x18\x01 \x01(\x0e2\".shadowlemon.appctl.LowEntropyModeH\x00R\x04mode\x88\x01\x01\x12S\n" +
+	"\fmaskRotation\x18\x02 \x01(\x0e2*.shadowlemon.appctl.LowEntropyMaskRotationH\x01R\fmaskRotation\x88\x01\x01B\a\n" +
 	"\x05_modeB\x0f\n" +
 	"\r_maskRotation*[\n" +
 	"\fLoggingLevel\x12\v\n" +
@@ -1301,7 +1302,7 @@ const file_appctl_proto_base_proto_rawDesc = "" +
 	"\x18CIPHER_SUITE_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fCIPHER_SUITE_XCHACHA20_POLY1305\x10\x01\x12\x1c\n" +
 	"\x18CIPHER_SUITE_AES_256_GCM\x10\x02\x12\x1c\n" +
-	"\x18CIPHER_SUITE_AES_128_GCM\x10\x03B0Z.github.com/enfein/mieru/v3/pkg/appctl/appctlpbb\x06proto3"
+	"\x18CIPHER_SUITE_AES_128_GCM\x10\x03B9Z7github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpbb\x06proto3"
 
 var (
 	file_appctl_proto_base_proto_rawDescOnce sync.Once
@@ -1318,32 +1319,32 @@ func file_appctl_proto_base_proto_rawDescGZIP() []byte {
 var file_appctl_proto_base_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
 var file_appctl_proto_base_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_appctl_proto_base_proto_goTypes = []any{
-	(LoggingLevel)(0),           // 0: mieru.appctl.LoggingLevel
-	(DualStack)(0),              // 1: mieru.appctl.DualStack
-	(TransportProtocol)(0),      // 2: mieru.appctl.TransportProtocol
-	(ProxyProtocol)(0),          // 3: mieru.appctl.ProxyProtocol
-	(NonceType)(0),              // 4: mieru.appctl.NonceType
-	(LowEntropyMode)(0),         // 5: mieru.appctl.LowEntropyMode
-	(LowEntropyMaskRotation)(0), // 6: mieru.appctl.LowEntropyMaskRotation
-	(CipherSuite)(0),            // 7: mieru.appctl.CipherSuite
-	(*PortBinding)(nil),         // 8: mieru.appctl.PortBinding
-	(*User)(nil),                // 9: mieru.appctl.User
-	(*Auth)(nil),                // 10: mieru.appctl.Auth
-	(*TrafficPattern)(nil),      // 11: mieru.appctl.TrafficPattern
-	(*TCPFragment)(nil),         // 12: mieru.appctl.TCPFragment
-	(*NoncePattern)(nil),        // 13: mieru.appctl.NoncePattern
-	(*PaddingPattern)(nil),      // 14: mieru.appctl.PaddingPattern
-	(*LowEntropyPattern)(nil),   // 15: mieru.appctl.LowEntropyPattern
+	(LoggingLevel)(0),           // 0: shadowlemon.appctl.LoggingLevel
+	(DualStack)(0),              // 1: shadowlemon.appctl.DualStack
+	(TransportProtocol)(0),      // 2: shadowlemon.appctl.TransportProtocol
+	(ProxyProtocol)(0),          // 3: shadowlemon.appctl.ProxyProtocol
+	(NonceType)(0),              // 4: shadowlemon.appctl.NonceType
+	(LowEntropyMode)(0),         // 5: shadowlemon.appctl.LowEntropyMode
+	(LowEntropyMaskRotation)(0), // 6: shadowlemon.appctl.LowEntropyMaskRotation
+	(CipherSuite)(0),            // 7: shadowlemon.appctl.CipherSuite
+	(*PortBinding)(nil),         // 8: shadowlemon.appctl.PortBinding
+	(*User)(nil),                // 9: shadowlemon.appctl.User
+	(*Auth)(nil),                // 10: shadowlemon.appctl.Auth
+	(*TrafficPattern)(nil),      // 11: shadowlemon.appctl.TrafficPattern
+	(*TCPFragment)(nil),         // 12: shadowlemon.appctl.TCPFragment
+	(*NoncePattern)(nil),        // 13: shadowlemon.appctl.NoncePattern
+	(*PaddingPattern)(nil),      // 14: shadowlemon.appctl.PaddingPattern
+	(*LowEntropyPattern)(nil),   // 15: shadowlemon.appctl.LowEntropyPattern
 }
 var file_appctl_proto_base_proto_depIdxs = []int32{
-	2,  // 0: mieru.appctl.PortBinding.protocol:type_name -> mieru.appctl.TransportProtocol
-	12, // 1: mieru.appctl.TrafficPattern.tcpFragment:type_name -> mieru.appctl.TCPFragment
-	13, // 2: mieru.appctl.TrafficPattern.nonce:type_name -> mieru.appctl.NoncePattern
-	14, // 3: mieru.appctl.TrafficPattern.padding:type_name -> mieru.appctl.PaddingPattern
-	15, // 4: mieru.appctl.TrafficPattern.lowEntropy:type_name -> mieru.appctl.LowEntropyPattern
-	4,  // 5: mieru.appctl.NoncePattern.type:type_name -> mieru.appctl.NonceType
-	5,  // 6: mieru.appctl.LowEntropyPattern.mode:type_name -> mieru.appctl.LowEntropyMode
-	6,  // 7: mieru.appctl.LowEntropyPattern.maskRotation:type_name -> mieru.appctl.LowEntropyMaskRotation
+	2,  // 0: shadowlemon.appctl.PortBinding.protocol:type_name -> shadowlemon.appctl.TransportProtocol
+	12, // 1: shadowlemon.appctl.TrafficPattern.tcpFragment:type_name -> shadowlemon.appctl.TCPFragment
+	13, // 2: shadowlemon.appctl.TrafficPattern.nonce:type_name -> shadowlemon.appctl.NoncePattern
+	14, // 3: shadowlemon.appctl.TrafficPattern.padding:type_name -> shadowlemon.appctl.PaddingPattern
+	15, // 4: shadowlemon.appctl.TrafficPattern.lowEntropy:type_name -> shadowlemon.appctl.LowEntropyPattern
+	4,  // 5: shadowlemon.appctl.NoncePattern.type:type_name -> shadowlemon.appctl.NonceType
+	5,  // 6: shadowlemon.appctl.LowEntropyPattern.mode:type_name -> shadowlemon.appctl.LowEntropyMode
+	6,  // 7: shadowlemon.appctl.LowEntropyPattern.maskRotation:type_name -> shadowlemon.appctl.LowEntropyMaskRotation
 	8,  // [8:8] is the sub-list for method output_type
 	8,  // [8:8] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name

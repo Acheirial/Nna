@@ -82,14 +82,14 @@ func ReuseAddrPortRawErr() RawControlErr {
 // socket does not need it, and because rejecting every new connection when an
 // optional option can not be set is worse than not setting the option.
 //
-// If the MIERU_PROTECT_PATH environment variable is set (the Android VPN
+// If the SHADOWLEMON_PROTECT_PATH environment variable is set (the Android VPN
 // service), the file descriptor is also sent to that path.
 func DefaultDialerControl() Control {
 	return func(network, address string, c syscall.RawConn) error {
 		if err := applyRawControlErr(c, reuseAddrRawErr()); err != nil {
 			return err
 		}
-		if path, found := os.LookupEnv("MIERU_PROTECT_PATH"); found {
+		if path, found := os.LookupEnv("SHADOWLEMON_PROTECT_PATH"); found {
 			if err := c.Control(ProtectPathRaw(path)); err != nil {
 				return err
 			}

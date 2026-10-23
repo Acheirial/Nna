@@ -23,8 +23,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 	"google.golang.org/protobuf/proto"
 )
 

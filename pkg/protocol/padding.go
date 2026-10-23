@@ -20,16 +20,16 @@ import (
 	"fmt"
 	mrand "math/rand"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/mathext"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/mathext"
 )
 
 var (
 	// recommendedConsecutiveASCIILen is the minimum length of consecutive
 	// printable ASCII characters in the ASCII padding strategy. It is drawn
 	// once per process so that the padding byte distribution is not a stable
-	// fingerprint of the host name and mieru version.
+	// fingerprint of the host name and shadowlemon version.
 	recommendedConsecutiveASCIILen = 24 + mrand.Intn(17)
 	recommendedTargetProbability   = 0.325
 )

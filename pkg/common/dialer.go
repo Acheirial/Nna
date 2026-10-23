@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/enfein/mieru/v3/pkg/sockopts"
+	"github.com/Acheirial/shadowlemon/v3/pkg/sockopts"
 )
 
 // UDPDialer is one implementation of apicommon.PacketDialer interface.

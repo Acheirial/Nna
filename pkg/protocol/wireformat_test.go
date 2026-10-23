@@ -20,12 +20,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 )
 
-// The wire format is shared by every mieru client and server, including the
-// older builds that are still deployed, so its lengths must not change.
+// The wire format is shared by every shadowlemon client and server, including
+// the older builds that are still deployed, so its lengths must not change.
 // These tests assert the numbers directly, so that an accidental change of a
 // constant, or of a change of the way a length is derived, fails the test
 // instead of silently breaking the compatibility with the deployed peers.

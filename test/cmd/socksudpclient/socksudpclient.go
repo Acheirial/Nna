@@ -25,9 +25,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/socks5"
-	"github.com/enfein/mieru/v3/pkg/testtool"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/socks5"
+	"github.com/Acheirial/shadowlemon/v3/pkg/testtool"
 )
 
 var (

@@ -1,6 +1,6 @@
 # 运营维护与故障排查
 
-本指南涵盖 **mita** 服务器和 **mieru** 客户端的日常运维：查看运行状态、查看日志、排查常见故障，以及说明配置文件的存放位置、可用环境变量和修改设置后的生效方式。
+本指南涵盖 shadowlemon 的两个角色——服务器 `shadowlemon server` 与客户端 `shadowlemon client`——的日常运维：查看运行状态、查看日志、排查常见故障，以及说明配置文件的存放位置、可用环境变量和修改设置后的生效方式。
 
 - [查看运行状态](#查看运行状态)
 - [查看日志](#查看日志)
@@ -42,31 +42,31 @@ shadowlemon client status
 
 ## 查看日志
 
-### 服务器 (mita)
+### 服务器 (shadowlemon server)
 
 服务器日志输出到守护进程的标准输出。由 systemd 托管时，可以用 journalctl 查看：
 
 ```sh
-sudo journalctl -u mita -xe --no-pager
+sudo journalctl -u shadowlemon-server -xe --no-pager
 ```
 
 只看最后若干行可以加上 `-n`，例如：
 
 ```sh
-sudo journalctl -u mita -xe --no-pager -n 200
+sudo journalctl -u shadowlemon-server -xe --no-pager -n 200
 ```
 
 如果是用 `shadowlemon server start` 直接启动后台守护进程，可以按需把 `shadowlemon server start` 的标准输出重定向到文件。调试时更简单的方式是用 `shadowlemon server run` 在前台运行，日志直接打印到终端。
 
-### 客户端 (mieru)
+### 客户端 (shadowlemon client)
 
 | 操作系统 | 日志目录 | 示例 |
 |----------|----------|------|
-| Linux | `$HOME/.cache/mieru/` 或 `$XDG_CACHE_HOME/mieru/` | `/home/enfein/.cache/mieru/` |
-| macOS | `$HOME/Library/Caches/mieru/` | `/Users/enfein/Library/Caches/mieru/` |
-| Windows | `%USERPROFILE%\AppData\Local\mieru\` | `C:\Users\enfein\AppData\Local\mieru\` |
+| Linux | `$HOME/.cache/shadowlemon/` 或 `$XDG_CACHE_HOME/shadowlemon/` | `/home/enfein/.cache/shadowlemon/` |
+| macOS | `$HOME/Library/Caches/shadowlemon/` | `/Users/enfein/Library/Caches/shadowlemon/` |
+| Windows | `%USERPROFILE%\AppData\Local\shadowlemon\` | `C:\Users\enfein\AppData\Local\shadowlemon\` |
 
-日志文件命名格式：`yyyyMMdd_HHmm_PID.log`。每次重启 mieru 会生成新文件。日志数量过多时，旧文件会被自动清理。
+日志文件命名格式：`yyyyMMdd_HHmm_PID.log`。每次重启 shadowlemon 客户端会生成新文件。日志数量过多时，旧文件会被自动清理。
 
 客户端以 `shadowlemon client start` 后台运行时，日志写入上表中的日志目录；直接用 `shadowlemon client run` 在前台运行时，日志打印到当前终端。
 
@@ -74,7 +74,7 @@ sudo journalctl -u mita -xe --no-pager -n 200
 
 ## 打开和关闭调试日志
 
-默认情况下，mieru / mita 打印的日志非常少，且不包含 IP 地址、端口号等敏感信息。如需诊断单个网络连接，可以打开调试日志。
+默认情况下，shadowlemon 客户端与服务器打印的日志非常少，且不包含 IP 地址、端口号等敏感信息。如需诊断单个网络连接，可以打开调试日志。
 
 仓库在 `configs/templates/` 目录下提供了模板文件。
 
@@ -135,7 +135,7 @@ common.UnmarshalJSON() failed: proto: (line 2:2): unknown field "profiles"
 common.UnmarshalJSON() failed: proto: (line 2:2): unknown field "portBindings"
 ```
 
-这通常表示配置文件被应用到了错误的程序。如果 `shadowlemon server` 报告 `profiles` 等未知字段，很可能是它正在读取客户端配置；如果 `shadowlemon client` 报告 `portBindings` 或 `users` 等未知字段，很可能是它正在读取服务器配置。
+这通常表示配置文件被应用到了错误的角色。如果 `shadowlemon server` 报告 `profiles` 等未知字段，很可能是它正在读取客户端配置；如果 `shadowlemon client` 报告 `portBindings` 或 `users` 等未知字段，很可能是它正在读取服务器配置。
 
 请使用匹配的命令：
 
@@ -195,7 +195,7 @@ shadowlemon client apply config <client_config.json>
 
 | 文件 | 路径 | 格式 |
 |------|------|------|
-| 配置 | `/etc/mita/server.conf.pb` | Protocol buffer（二进制） |
+| 配置 | `/etc/shadowlemon/server.conf.pb` | Protocol buffer（二进制） |
 
 服务器**不**存储密码明文，仅保存校验码。
 
@@ -203,9 +203,9 @@ shadowlemon client apply config <client_config.json>
 
 | 操作系统 | 配置路径 | 示例 |
 |----------|----------|------|
-| Linux | `$HOME/.config/mieru/client.conf.pb` | `/home/enfein/.config/mieru/client.conf.pb` |
-| macOS | `$HOME/Library/Application Support/mieru/client.conf.pb` | `/Users/enfein/Library/Application Support/mieru/client.conf.pb` |
-| Windows | `%USERPROFILE%\AppData\Roaming\mieru\client.conf.pb` | `C:\Users\enfein\AppData\Roaming\mieru\client.conf.pb` |
+| Linux | `$HOME/.config/shadowlemon/client.conf.pb` | `/home/enfein/.config/shadowlemon/client.conf.pb` |
+| macOS | `$HOME/Library/Application Support/shadowlemon/client.conf.pb` | `/Users/enfein/Library/Application Support/shadowlemon/client.conf.pb` |
+| Windows | `%USERPROFILE%\AppData\Roaming\shadowlemon\client.conf.pb` | `C:\Users\enfein\AppData\Roaming\shadowlemon\client.conf.pb` |
 
 `apply config`、`replace config`、`describe config`、`import config` 等命令读写的都是上表中的文件。
 
@@ -215,16 +215,16 @@ shadowlemon client apply config <client_config.json>
 
 | 变量 | 用途 |
 |------|------|
-| `MITA_CONFIG_JSON_FILE` | 从该路径加载 JSON 格式服务器配置文件。 |
-| `MITA_CONFIG_FILE` | 从该路径加载 protobuf 格式服务器配置文件。 |
-| `MIERU_CONFIG_JSON_FILE` | 从该路径加载 JSON 格式客户端配置文件。 |
-| `MIERU_CONFIG_FILE` | 从该路径加载 protobuf 格式客户端配置文件。 |
-| `MITA_LOG_NO_TIMESTAMP` | 非空时，服务器日志不打印时间戳（配合 journald 使用）。 |
+| `SHADOWLEMON_SERVER_CONFIG_JSON_FILE` | 从该路径加载 JSON 格式服务器配置文件。 |
+| `SHADOWLEMON_SERVER_CONFIG_FILE` | 从该路径加载 protobuf 格式服务器配置文件。 |
+| `SHADOWLEMON_CLIENT_CONFIG_JSON_FILE` | 从该路径加载 JSON 格式客户端配置文件。 |
+| `SHADOWLEMON_CLIENT_CONFIG_FILE` | 从该路径加载 protobuf 格式客户端配置文件。 |
+| `SHADOWLEMON_LOG_NO_TIMESTAMP` | 非空时，服务器日志不打印时间戳（配合 journald 使用）。 |
 
 **示例：使用自定义配置文件在前台运行客户端**
 
 ```sh
-MIERU_CONFIG_JSON_FILE=/etc/mieru_client_config.json shadowlemon client run
+SHADOWLEMON_CLIENT_CONFIG_JSON_FILE=/etc/shadowlemon_client_config.json shadowlemon client run
 ```
 
 日志直接输出到终端。按 `Ctrl+C` 退出。

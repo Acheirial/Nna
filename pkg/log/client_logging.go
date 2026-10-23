@@ -30,14 +30,14 @@ const maxClientLogFiles = 25
 
 // cachedClientLogDir is the directory where client log files are stored.
 //
-// In Linux, it is typically /home/<user>/.cache/mieru
+// In Linux, it is typically /home/<user>/.cache/shadowlemon
 //
-// In Mac OS, it is typically /Users/<user>/Library/Caches/mieru
+// In Mac OS, it is typically /Users/<user>/Library/Caches/shadowlemon
 //
-// In Windows, it is typically C:\Users\<user>\AppData\Local\mieru
+// In Windows, it is typically C:\Users\<user>\AppData\Local\shadowlemon
 var cachedClientLogDir string
 
-// NewClientLogFile returns a file handler for mieru client to write logs.
+// NewClientLogFile returns a file handler for shadowlemon client to write logs.
 func NewClientLogFile() (io.WriteCloser, error) {
 	if err := prepareClientLogDir(); err != nil {
 		return nil, fmt.Errorf("prepareClientLogDir() failed: %w", err)
@@ -90,6 +90,6 @@ func prepareClientLogDir() error {
 	if err != nil {
 		return err
 	}
-	cachedClientLogDir = cacheDir + string(os.PathSeparator) + "mieru"
+	cachedClientLogDir = cacheDir + string(os.PathSeparator) + "shadowlemon"
 	return os.MkdirAll(cachedClientLogDir, 0755)
 }

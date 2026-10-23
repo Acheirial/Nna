@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 )
 
 // BufPipe is like net.Pipe() but with an internal buffer.

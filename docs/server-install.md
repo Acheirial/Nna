@@ -1,8 +1,8 @@
 # 服务器安装与配置
 
-代理服务器软件 mita 需要运行在 Linux 系统中。
+代理服务器软件 `shadowlemon server` 需要运行在 Linux 系统中。
 
-## 安装 mita
+## 安装 shadowlemon 服务端
 
 你可以从源码编译，也可以直接使用已经编译好的 `shadowlemon` 可执行文件。
 
@@ -11,7 +11,7 @@
 按照[编译](./compile.md)文档准备好编译环境，然后在项目根目录运行：
 
 ```sh
-make build
+make
 ```
 
 编译结果位于 `bin/` 目录。把 `shadowlemon` 复制到系统路径 `PATH` 即可，例如：
@@ -26,7 +26,7 @@ sudo install -m 755 bin/shadowlemon /usr/local/bin/shadowlemon
 
 ## 修改代理服务器设置
 
-mieru 代理支持 TCP 和 UDP 两种不同的传输协议。要了解协议之间的差别，请阅读 [mieru 代理协议](./protocol.md)。
+shadowlemon 代理支持 TCP 和 UDP 两种不同的传输协议。要了解协议之间的差别，请阅读 [shadowlemon 代理协议](./protocol.md)。
 
 用户可以通过
 
@@ -79,7 +79,7 @@ shadowlemon server replace config <FILE>
 }
 ```
 
-1. `portBindings` -> `port` 属性是 mita 监听的 TCP 或 UDP 端口号，请指定一个从 1025 到 65535 之间的值。如果想要监听连续的端口号，也可以改为使用 `portRange` 属性。**请确保防火墙允许使用这些端口进行通信。**
+1. `portBindings` -> `port` 属性是 shadowlemon server 监听的 TCP 或 UDP 端口号，请指定一个从 1025 到 65535 之间的值。如果想要监听连续的端口号，也可以改为使用 `portRange` 属性。**请确保防火墙允许使用这些端口进行通信。**
 2. `portBindings` -> `protocol` 属性可以使用 `TCP` 或者 `UDP`。
 3. 在 `users` -> `name` 属性中填写用户名。
 4. 在 `users` -> `password` 属性中填写该用户的密码。
@@ -95,13 +95,13 @@ shadowlemon server replace config <FILE>
 - 每条 `portBindings` 不能同时设置 `port` 和 `portRange`。
 - `cipherSuites` 只接受 `CIPHER_SUITE_XCHACHA20_POLY1305`、`CIPHER_SUITE_AES_256_GCM`、`CIPHER_SUITE_AES_128_GCM` 等合法的枚举值，不能包含 `CIPHER_SUITE_UNSPECIFIED`，非法取值或拼写错误会报错；列表中的重复项会被忽略，只保留第一次出现的那个，因此相对偏好顺序保持不变。
 
-除此之外，mita 可以监听多个不同的端口。我们建议在服务器和客户端配置中使用多个端口。
+除此之外，shadowlemon server 可以监听多个不同的端口。我们建议在服务器和客户端配置中使用多个端口。
 
 如果你想把代理线路分享给别人使用，也可以创建多个不同的用户。
 
 假设在服务器上，这个配置文件的文件名是 `server_config.json`，在文件修改完成之后，请调用指令 `shadowlemon server apply config server_config.json` 写入该配置。
 
-如果配置有误，mita 会打印出现的问题。请根据提示修改配置文件，重新运行 `shadowlemon server apply config <FILE>` 指令写入修正后的配置。
+如果配置有误，`shadowlemon server` 会打印出现的问题。请根据提示修改配置文件，重新运行 `shadowlemon server apply config <FILE>` 指令写入修正后的配置。
 
 写入后，可以用
 
@@ -113,7 +113,7 @@ shadowlemon server describe config
 
 ## 启动代理服务
 
-mita 采用「守护进程 + 命令行」的结构：命令行工具通过 pid 文件与操作系统信号控制后台守护进程，两者之间没有额外的网络接口或本地 socket 通信。守护进程负责监听端口并处理客户端请求。
+shadowlemon server 采用「守护进程 + 命令行」的结构：命令行工具通过 pid 文件与操作系统信号控制后台守护进程，两者之间没有额外的网络接口或本地 socket 通信。守护进程负责监听端口并处理客户端请求。
 
 调试时可以在前台运行守护进程，日志直接输出到当前终端，按 `Ctrl+C` 退出：
 
@@ -127,7 +127,7 @@ sudo shadowlemon server run
 shadowlemon server start
 ```
 
-`shadowlemon server start` 会先加载并校验服务器配置，配置非法时立即报错、不会派生守护进程（因此无需等到启动超时）。校验通过后，它会让守护进程脱离当前终端在后台运行，并在 `/var/run/mita/mita.pid` 中记录进程号，随后 mita 开始监听设置中指定的端口号。因为守护进程已经脱离终端，关闭终端不会影响服务。
+`shadowlemon server start` 会先加载并校验服务器配置，配置非法时立即报错、不会派生守护进程（因此无需等到启动超时）。校验通过后，它会让守护进程脱离当前终端在后台运行，并在 `/var/run/shadowlemon/shadowlemon.pid` 中记录进程号，随后 shadowlemon server 开始监听设置中指定的端口号。因为守护进程已经脱离终端，关闭终端不会影响服务。
 
 接下来，调用指令
 
@@ -137,7 +137,7 @@ shadowlemon server status
 
 查询工作状态。如果返回 `shadowlemon server status is "RUNNING"`，说明代理服务正在运行，可以开始响应客户端的请求了；如果返回 `"STOPPED"`，说明守护进程没有在运行。
 
-UDP 监听端的事件循环如果因为监听套接字出错而异常退出，守护进程会自动重新创建该监听端，两次尝试之间的等待时间从 1 秒起按失败次数翻倍，最长 30 秒，并带有随机抖动；监听端成功运行满 30 秒后，退避会被清零。因此 UDP 端口短暂不可用是正常的自愈过程，**不必**为此重启 mita。唯一的例外是首次监听失败（例如端口被其它进程占用）：这时 `shadowlemon server start` 会直接报错，需要先解决端口冲突。
+UDP 监听端的事件循环如果因为监听套接字出错而异常退出，守护进程会自动重新创建该监听端，两次尝试之间的等待时间从 1 秒起按失败次数翻倍，最长 30 秒，并带有随机抖动；监听端成功运行满 30 秒后，退避会被清零。因此 UDP 端口短暂不可用是正常的自愈过程，**不必**为此重启 shadowlemon server。唯一的例外是首次监听失败（例如端口被其它进程占用）：这时 `shadowlemon server start` 会直接报错，需要先解决端口冲突。
 
 如果想要停止服务，请使用指令
 
@@ -145,25 +145,25 @@ UDP 监听端的事件循环如果因为监听套接字出错而异常退出，�
 shadowlemon server stop
 ```
 
-`shadowlemon server stop` 会读取 pid 文件，向守护进程发送终止信号并等待它退出；如果它没有及时退出，会强制结束进程。pid 文件在 Linux 上记录进程号与该进程的启动时刻（格式为 `<pid> <starttime>`），`shadowlemon server stop` 在发送信号前会核对进程身份，避免误伤恰好复用了同一 PID 的其他进程；在无法获取启动时刻的平台上，pid 文件退化为只记录进程号。文件路径保持不变，仍为 `/var/run/mita/mita.pid`。
+`shadowlemon server stop` 会读取 pid 文件，向守护进程发送终止信号并等待它退出；如果它没有及时退出，会强制结束进程。pid 文件在 Linux 上记录进程号与该进程的启动时刻（格式为 `<pid> <starttime>`），`shadowlemon server stop` 在发送信号前会核对进程身份，避免误伤恰好复用了同一 PID 的其他进程；在无法获取启动时刻的平台上，pid 文件退化为只记录进程号。文件路径保持不变，仍为 `/var/run/shadowlemon/shadowlemon.pid`。
 
 ### 使用 systemd 托管（可选）
 
-也可以用 systemd 等进程管理器托管守护进程，此时需要以 `shadowlemon server run` 作为 `ExecStart`，让 systemd 负责进程的启动、停止与重启。仓库在 `configs/examples/mita.service` 提供了一个这样的服务单元示例（以 `mita` 用户运行 `/usr/bin/shadowlemon server run`）。
+也可以用 systemd 等进程管理器托管守护进程，此时需要以 `shadowlemon server run` 作为 `ExecStart`，让 systemd 负责进程的启动、停止与重启。仓库在 `configs/examples/shadowlemon-server.service` 提供了一个这样的服务单元示例（以 `shadowlemon` 用户运行 `/usr/bin/shadowlemon server run`）。
 
-本仓库不再提供 deb / rpm 安装包，因此 `mita` 用户与相关目录需要手动创建，否则服务无法启动：
+本仓库不再提供 deb / rpm 安装包，因此 `shadowlemon` 用户与相关目录需要手动创建，否则服务无法启动：
 
 ```sh
-sudo useradd -r -s /usr/sbin/nologin mita
-sudo mkdir -p /etc/mita /var/run/mita
-sudo chown -R mita:mita /etc/mita /var/run/mita
+sudo useradd -r -s /usr/sbin/nologin shadowlemon
+sudo mkdir -p /etc/shadowlemon /var/run/shadowlemon
+sudo chown -R shadowlemon:shadowlemon /etc/shadowlemon /var/run/shadowlemon
 ```
 
-其中 `/etc/mita` 存放服务器配置，`/var/run/mita` 存放守护进程的 pid 文件。
+其中 `/etc/shadowlemon` 存放服务器配置，`/var/run/shadowlemon` 存放守护进程的 pid 文件。
 
-然后把服务单元复制到 `/etc/systemd/system/mita.service`，再执行 `sudo systemctl enable --now mita` 启动。使用 systemd 时用 `systemctl` 而不是 `shadowlemon server start` / `shadowlemon server stop` 控制服务，以免两套机制互相干扰。
+然后把服务单元复制到 `/etc/systemd/system/shadowlemon-server.service`，再执行 `sudo systemctl enable --now shadowlemon-server` 启动。使用 systemd 时用 `systemctl` 而不是 `shadowlemon server start` / `shadowlemon server stop` 控制服务，以免两套机制互相干扰。
 
-注意，每次使用 `shadowlemon server apply config <FILE>` 或 `shadowlemon server replace config <FILE>` 修改设置后，都需要重启服务（`shadowlemon server stop` + `shadowlemon server start`，或 `systemctl restart mita`），才能使新设置生效。本版本不再提供不中断连接的局部重载能力，任何设置改动（包括 `loggingLevel` 与 `users`）都必须通过重启生效。
+注意，每次使用 `shadowlemon server apply config <FILE>` 或 `shadowlemon server replace config <FILE>` 修改设置后，都需要重启服务（`shadowlemon server stop` + `shadowlemon server start`，或 `systemctl restart shadowlemon-server`），才能使新设置生效。本版本不再提供不中断连接的局部重载能力，任何设置改动（包括 `loggingLevel` 与 `users`）都必须通过重启生效。
 
 启动代理服务后，请继续进行[客户端安装与配置](./client-install.md)。
 
@@ -171,7 +171,7 @@ sudo chown -R mita:mita /etc/mita /var/run/mita
 
 ### 监听 IP 地址
 
-默认情况下，mita 监听所有网络接口。将 `listenIPAddress` 属性设置为一个 IPv4 或 IPv6 地址，即可只监听该地址上的端口。例如，监听 `1.2.3.4`：
+默认情况下，shadowlemon server 监听所有网络接口。将 `listenIPAddress` 属性设置为一个 IPv4 或 IPv6 地址，即可只监听该地址上的端口。例如，监听 `1.2.3.4`：
 
 ```js
 {
@@ -198,13 +198,13 @@ net.ipv4.tcp_congestion_control = bbr
 
 ### 配置出站代理
 
-出站代理功能允许 mieru 与其他代理工具结合构成链式代理。链式代理的网络拓扑结构的一个例子如下图所示：
+出站代理功能允许 shadowlemon 与其他代理工具结合构成链式代理。链式代理的网络拓扑结构的一个例子如下图所示：
 
 ```
-mieru 客户端 -> 互联网 -> mita 服务器 -> cloudflare 代理客户端 -> cloudflare CDN -> 目标网站
+shadowlemon 客户端 -> 互联网 -> shadowlemon 服务器 -> cloudflare 代理客户端 -> cloudflare CDN -> 目标网站
 ```
 
-通过链式代理，目标网站看到的 IP 地址是 cloudflare CDN 的地址，而不是 mita 服务器的地址。
+通过链式代理，目标网站看到的 IP 地址是 cloudflare CDN 的地址，而不是 shadowlemon 服务器的地址。
 
 下面是配置链式代理的一个例子。
 
@@ -303,7 +303,7 @@ mieru 客户端 -> 互联网 -> mita 服务器 -> cloudflare 代理客户端 -> 
 
 ### 用户提示
 
-从 v3.31.0 版本开始，mieru 客户端会在每个报文 nonce 的末尾附带 4 字节的用户提示（user hint），mita 服务器可以据此跳过明显不匹配的用户，减少对未认证首包的解密尝试次数。代理用户数量较多时，这尤其有帮助。客户端发送的是 keyed 提示：它由用户名与密码共同派生（其中的 pepper 以 `ShadowLemon V0.1 user hint pepper` 为种子字符串），旁观者只要不掌握凭据就无法算出，也无法用候选用户名去验证服务端注册了哪些用户。服务端只接受这一种提示，其它形式的提示不会被当作用户名提示。
+从 v3.31.0 版本开始，shadowlemon 客户端会在每个报文 nonce 的末尾附带 4 字节的用户提示（user hint），shadowlemon 服务器可以据此跳过明显不匹配的用户，减少对未认证首包的解密尝试次数。代理用户数量较多时，这尤其有帮助。客户端发送的是 keyed 提示：它由用户名与密码共同派生（其中的 pepper 以 `ShadowLemon V0.1 user hint pepper` 为种子字符串），旁观者只要不掌握凭据就无法算出，也无法用候选用户名去验证服务端注册了哪些用户。服务端只接受这一种提示，其它形式的提示不会被当作用户名提示。
 
 `advancedSettings` -> `userHintIsMandatory` 属性决定服务端是否强制要求首包携带匹配的用户名提示，**它的默认值是 `true`**：没有携带提示、或者提示与任何已注册用户都不匹配的报文会被直接丢弃，不会进入逐用户的试解密。这样一来，未认证首包的试解代价从 Θ(用户数 × 套件数) 降到只对提示匹配的少数用户尝试，显著降低了未认证流量放大服务端 CPU 消耗的风险。在提示为必需的前提下，某个源地址用同一提示试解失败后，其后续报文在 10 秒内会被负缓存直接拒绝，连试解密循环都不会进入；认证成功后该记录会被清除。这条负缓存只在要求提示时才生效，因为提示可选时「提示不匹配」可能只是报文没带提示。
 

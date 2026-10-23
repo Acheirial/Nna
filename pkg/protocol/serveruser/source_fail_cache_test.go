@@ -20,7 +20,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 )
 
 func TestSourceFailCacheRecordMissClear(t *testing.T) {

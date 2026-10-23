@@ -25,13 +25,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 const (
-	// serverPidFilePath is the file that stores the PID of the running mita server.
-	serverPidFilePath = "/var/run/mita/mita.pid"
+	// serverPidFilePath is the file that stores the PID of the running
+	// shadowlemon process in the server role.
+	serverPidFilePath = "/var/run/shadowlemon/shadowlemon.pid"
 
 	// daemonStartTimeout is how long the start command waits for
 	// the started daemon to become alive.
@@ -67,15 +68,17 @@ var ErrPidFileExists = errors.New("pid file already exists")
 // not written yet, which happens when a concurrent command creates the file.
 var errPidFileBeingWritten = errors.New("pid file content is not written yet")
 
-// ClientPidFilePath returns the file path that stores the PID of the running mieru client.
+// ClientPidFilePath returns the file path that stores the PID of the running
+// shadowlemon process in the client role.
 func ClientPidFilePath() (string, error) {
 	if err := prepareClientConfigDir(); err != nil {
 		return "", fmt.Errorf("prepareClientConfigDir() failed: %w", err)
 	}
-	return filepath.Join(cachedClientConfigDir, "mieru.pid"), nil
+	return filepath.Join(cachedClientConfigDir, "shadowlemon.pid"), nil
 }
 
-// ServerPidFilePath returns the file path that stores the PID of the running mita server.
+// ServerPidFilePath returns the file path that stores the PID of the running
+// shadowlemon process in the server role.
 func ServerPidFilePath() string {
 	return serverPidFilePath
 }

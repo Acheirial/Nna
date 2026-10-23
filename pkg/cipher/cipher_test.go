@@ -22,8 +22,8 @@ import (
 	mrand "math/rand"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 	"google.golang.org/protobuf/proto"
 )
 

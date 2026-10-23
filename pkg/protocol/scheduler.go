@@ -20,14 +20,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
 )
 
 var (
 	// scheduleIdleTime determines when a underlay is considered idle.
 	// The extra delay is drawn once per process so that the connection reuse
 	// and teardown timing is not a stable fingerprint of the host name and
-	// mieru version.
+	// shadowlemon version.
 	scheduleIdleTime = cipher.KeyRefreshInterval + time.Duration(mrand.Intn(61))*time.Second
 )
 

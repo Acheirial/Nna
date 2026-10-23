@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 // Every test below passes an explicit pid file path inside t.TempDir(), so the

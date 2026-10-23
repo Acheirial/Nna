@@ -24,8 +24,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/pkg/testtool"
+	"github.com/Acheirial/shadowlemon/v3/apis/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/testtool"
 )
 
 // scriptedConn is a net.Conn which serves the bytes of a script, and which

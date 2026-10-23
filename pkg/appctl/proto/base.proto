@@ -15,9 +15,9 @@
 
 syntax = "proto3";
 
-package mieru.appctl;
+package shadowlemon.appctl;
 
-option go_package = "github.com/enfein/mieru/v3/pkg/appctl/appctlpb";
+option go_package = "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb";
 
 enum LoggingLevel {
     DEFAULT = 0;
@@ -269,17 +269,18 @@ enum LowEntropyMaskRotation {
     LOW_ENTROPY_MASK_ROTATE_LEFT_15 = 240;
 }
 
-// Cipher suites supported by the mieru proxy protocol.
+// Cipher suites supported by the shadowlemon proxy protocol.
 //
 // The numeric value of each entry is the suite identifier used on the wire, so
 // the numbering must never change.
 //
 // A connection always uses exactly one suite, negotiated by the two ends:
-//   - A mieru client lists the suites it is willing to use, in preference
+//   - A shadowlemon client lists the suites it is willing to use, in preference
 //     order, in ClientProfile.cipherSuites. An empty list means only
 //     CIPHER_SUITE_XCHACHA20_POLY1305 is used.
-//   - A mita server lists the suites it accepts in ServerConfig.cipherSuites.
-//     An empty list means every supported suite is accepted.
+//   - A shadowlemon process in the server role lists the suites it accepts in
+//     ServerConfig.cipherSuites. An empty list means every supported suite is
+//     accepted.
 //
 // The negotiated suite is the first entry of the server list that also appears
 // in the client list. If the two lists have no entry in common, the session

@@ -17,12 +17,12 @@
 
 function print_client_log() {
     echo "========== BEGIN OF CLIENT LOG =========="
-    cat $HOME/.cache/mieru/*.log
+    cat $HOME/.cache/shadowlemon/*.log
     echo "==========  END OF CLIENT LOG  =========="
 }
 
 function delete_client_log() {
-    rm -rf $HOME/.cache/mieru/*.log
+    rm -rf $HOME/.cache/shadowlemon/*.log
 }
 
 # run_or_fail <command description> <command> [arguments...]

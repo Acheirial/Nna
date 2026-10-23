@@ -75,7 +75,7 @@ func fuzzSuiteConfigured(configured []Suite, suite Suite) bool {
 // the caller uses Suite() to decide which suite protects the session.
 func FuzzTryDecrypt(f *testing.F) {
 	for i, suite := range AllSuites() {
-		plaintext := []byte(fmt.Sprintf("mieru try decrypt seed %d", i))
+		plaintext := []byte(fmt.Sprintf("shadowlemon try decrypt seed %d", i))
 		ciphertext, err := fuzzStatelessCiphertext(suite, fuzzPasswords[0], plaintext)
 		if err != nil {
 			f.Fatalf("failed to build the seed of cipher suite %v: %v", suite, err)

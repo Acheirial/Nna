@@ -14,8 +14,8 @@ linters:
             - "!**/*_test.go"
           allow:
             - $gostd
-            - github.com/enfein/mieru/v3/apis/constant
-            - github.com/enfein/mieru/v3/apis/model
+            - github.com/Acheirial/shadowlemon/v3/apis/constant
+            - github.com/Acheirial/shadowlemon/v3/apis/model
         apis-constant:
           files:
             - "**/apis/constant/**"
@@ -27,7 +27,7 @@ linters:
             - "!**/*_test.go"
           allow:
             - $gostd
-            - github.com/enfein/mieru/v3/apis/constant
+            - github.com/Acheirial/shadowlemon/v3/apis/constant
         pkg-log:
           files:
             - "**/pkg/log/**"

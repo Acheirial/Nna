@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
 )
 
 type Request struct {

@@ -21,7 +21,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
 )
 
 // runAuthClient drives the client side of the socks5 authentication handshake

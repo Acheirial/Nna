@@ -25,12 +25,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/rng"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/rng"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 )
 
 const (
@@ -87,7 +87,7 @@ const (
 
 // readOneSegmentTimeout returns the read deadline used for one metadata read.
 // The value is randomized on every call so that the idle lifetime of an underlay
-// can't be predicted from the host name and mieru version.
+// can't be predicted from the host name and shadowlemon version.
 func readOneSegmentTimeout() time.Duration {
 	return time.Duration(60+rng.Intn(61)) * time.Second
 }

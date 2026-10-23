@@ -33,8 +33,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
 )
 
 // testCountingWriter counts the writes and the bytes it receives, and keeps a

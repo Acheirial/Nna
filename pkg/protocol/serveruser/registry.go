@@ -24,13 +24,14 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/enfein/mieru/v3/apis/constant"
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/apis/constant"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cipher"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
 )
 
-// metadataLength is the fixed plaintext size of mieru protocol metadata.
+// metadataLength is the fixed plaintext size of the ShadowLemon protocol
+// metadata.
 // We don't use the definition in protocol package, because protocol depends on
 // this package.
 const metadataLength = 32

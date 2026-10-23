@@ -22,9 +22,9 @@ import (
 	"os"
 	"runtime/debug"
 
-	"github.com/enfein/mieru/v3/pkg/appctl"
-	"github.com/enfein/mieru/v3/pkg/cli"
-	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl"
+	"github.com/Acheirial/shadowlemon/v3/pkg/cli"
+	"github.com/Acheirial/shadowlemon/v3/pkg/log"
 )
 
 func main() {

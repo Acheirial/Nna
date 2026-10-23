@@ -23,10 +23,26 @@ import (
 	"strconv"
 	"strings"
 
-	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/stderror"
+	pb "github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/common"
+	"github.com/Acheirial/shadowlemon/v3/pkg/stderror"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	// configURLScheme is the scheme of the sharing link that carries
+	// the whole client config as protobuf.
+	configURLScheme = "shadowlemon"
+
+	// simpleURLScheme is the scheme of the human readable sharing link
+	// that encodes the client profile by hand.
+	simpleURLScheme = "shadowlemons"
+
+	// configURLPrefix and simpleURLPrefix are the prefixes of the two
+	// schemes above. Code uses them instead of a hardcoded scheme length,
+	// so that the length of a scheme is never assumed.
+	configURLPrefix = configURLScheme + "://"
+	simpleURLPrefix = simpleURLScheme + "://"
 )
 
 // ClientConfigToURL creates a URL to share the client configuration.
@@ -38,7 +54,7 @@ func ClientConfigToURL(config *pb.ClientConfig) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("proto.Marshal() failed: %w", err)
 	}
-	return "mieru://" + base64.StdEncoding.EncodeToString(b), nil
+	return configURLPrefix + base64.StdEncoding.EncodeToString(b), nil
 }
 
 // ClientProfileToMultiURLs creates a list of human readable URLs to share
@@ -64,7 +80,7 @@ func ClientProfileToMultiURLs(profile *pb.ClientProfile) (urls []string, err err
 		return nil, fmt.Errorf("profile %s has no server", profileName)
 	}
 	for _, server := range servers {
-		u := &url.URL{Scheme: "mierus"} // mierus => mieru simple
+		u := &url.URL{Scheme: simpleURLScheme} // A simple URL encodes the profile by hand.
 		u.User = url.UserPassword(userName, password)
 		if server.GetDomainName() != "" {
 			u.Host = server.GetDomainName()
@@ -121,13 +137,13 @@ func URLToClientConfig(s string) (*pb.ClientConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("url.Parse() failed: %w", err)
 	}
-	if u.Scheme != "mieru" {
+	if u.Scheme != configURLScheme {
 		return nil, fmt.Errorf("unrecognized URL scheme %q", u.Scheme)
 	}
 	if u.Opaque != "" {
 		return nil, fmt.Errorf("URL is opaque")
 	}
-	b, err := base64.StdEncoding.DecodeString(s[8:]) // Remove "mieru://"
+	b, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(s, configURLPrefix))
 	if err != nil {
 		return nil, fmt.Errorf("base64.StdEncoding.DecodeString() failed: %w", err)
 	}
@@ -138,13 +154,13 @@ func URLToClientConfig(s string) (*pb.ClientConfig, error) {
 	return c, nil
 }
 
-// URLToClientProfile returns a client profile based on the mieru simple URL.
+// URLToClientProfile returns a client profile based on the shadowlemon simple URL.
 func URLToClientProfile(s string) (*pb.ClientProfile, error) {
 	u, err := url.Parse(s)
 	if err != nil {
 		return nil, fmt.Errorf("url.Parse() failed: %w", err)
 	}
-	if u.Scheme != "mierus" {
+	if u.Scheme != simpleURLScheme {
 		return nil, fmt.Errorf("unrecognized URL scheme %q", u.Scheme)
 	}
 	if u.Opaque != "" {

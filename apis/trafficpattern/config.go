@@ -20,8 +20,8 @@ import (
 	"fmt"
 	mrand "math/rand/v2"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/rng"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/rng"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -90,7 +90,7 @@ func (c *Config) generateImplicitTrafficPattern() {
 	seed := int(c.original.GetSeed())
 	if c.original.Seed == nil {
 		// The default seed must not be derived from the host name and the
-		// mieru version: that made the whole implicit pattern table
+		// shadowlemon version: that made the whole implicit pattern table
 		// reproducible offline for any observer who knows the two inputs.
 		// math/rand/v2 seeds its global source from the operating system and
 		// offers no way to make it deterministic again, so every start of the

@@ -22,9 +22,9 @@ import (
 	"math/bits"
 	mrand "math/rand"
 
-	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/v3/pkg/mathext"
-	"github.com/enfein/mieru/v3/pkg/rng"
+	"github.com/Acheirial/shadowlemon/v3/pkg/appctl/appctlpb"
+	"github.com/Acheirial/shadowlemon/v3/pkg/mathext"
+	"github.com/Acheirial/shadowlemon/v3/pkg/rng"
 )
 
 // lowEntropyChunkLen is the number of bytes of each low entropy chunk.

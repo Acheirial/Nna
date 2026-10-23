@@ -56,7 +56,7 @@ sleep 1
 ./shadowlemon client export config simple
 sleep 1
 ./shadowlemon client export config > client.url.txt
-rm ~/.config/mieru/client.conf.pb
+rm ~/.config/shadowlemon/client.conf.pb
 sleep 1
 echo "client config before import:"
 ./shadowlemon client describe config

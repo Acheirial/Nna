@@ -117,7 +117,7 @@ func TestToBitDistributionMatchesSlowImplementation(t *testing.T) {
 		{"all zero bits", make([]byte, 257)},
 		{"all one bits", bytes.Repeat([]byte{0xFF}, 257)},
 		{"alternating bits", []byte{0xAA, 0x55, 0xAA, 0x55}},
-		{"printable ASCII", []byte("mieru padding data 0123456789 =~!")},
+		{"printable ASCII", []byte("shadowlemon padding data 0123456789 =~!")},
 		{"one bit per byte", []byte{0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80}},
 	}
 	for _, tc := range testcases {
