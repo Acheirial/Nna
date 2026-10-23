@@ -362,7 +362,11 @@ func validateLowEntropyDataAckMetadata(das *dataAckStruct) error {
 	if das.payloadLen%lowEntropyChunkLen != 0 {
 		return fmt.Errorf("invalid low entropy payload length %d", das.payloadLen)
 	}
-	if _, err := validateLowEntropyCodecParams(appctlpb.LowEntropyMode(das.lowEntropyMode), das.lowEntropyMask, appctlpb.LowEntropyMaskRotation(das.lowEntropyMaskRotation)); err != nil {
+	// The number of plaintext bytes each chunk carries is derived from the
+	// half-mask of this message and not from the mode, so validate the mask
+	// first and check the encoded payload length against its stride.
+	params, err := validateLowEntropyCodecParams(appctlpb.LowEntropyMode(das.lowEntropyMode), das.lowEntropyMask, appctlpb.LowEntropyMaskRotation(das.lowEntropyMaskRotation))
+	if err != nil {
 		return err
 	}
 	if das.extractedPayloadLen == 0 {
@@ -371,7 +375,7 @@ func validateLowEntropyDataAckMetadata(das *dataAckStruct) error {
 		}
 		return nil
 	}
-	expectedPayloadLen, err := lowEntropyEncodedPayloadLen(int(das.extractedPayloadLen), appctlpb.LowEntropyMode(das.lowEntropyMode))
+	expectedPayloadLen, err := lowEntropyEncodedPayloadLen(int(das.extractedPayloadLen), params.sourceBytesPerChunk)
 	if err != nil {
 		return err
 	}

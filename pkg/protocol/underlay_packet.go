@@ -715,7 +715,7 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 			u.rxBuf = make([]byte, 1500)
 		}
 		b := u.rxBuf[:1500]
-		common.SetReadTimeout(u.conn, readOneSegmentTimeout)
+		common.SetReadTimeout(u.conn, readOneSegmentTimeout())
 		n, addr, err := u.conn.ReadFrom(b)
 		if err != nil {
 			if stderror.IsTimeout(err) {
@@ -765,6 +765,11 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 		// recorded only after the packet passed all the checks below, so a
 		// forged or truncated packet never enters the cache.
 		//
+		// The signature spans the entire 24 byte wire nonce, not just the first
+		// 16 bytes: a noncePattern can pin those leading bytes to a constant,
+		// which would leave almost no entropy in the signed input and make the
+		// signature collide across packets.
+		//
 		// The tag is the source address of the packet, which exempts an exact
 		// retransmission from the same source from the replay detection. The
 		// domain separates the two directions of the traffic.
@@ -773,7 +778,7 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 			replayDomain = replay.DomainPacketClientToServer
 		}
 		replayTag, _ := udpAddrPortKey(addr)
-		isNewSessionReplay := packetReplayCache.Seen(replayDomain, encryptedMeta[:cipher.DefaultOverhead], replayTag)
+		isNewSessionReplay := packetReplayCache.Seen(replayDomain, encryptedMeta[:cipher.DefaultNonceSize], replayTag)
 		nonce := encryptedMeta[:cipher.DefaultNonceSize]
 
 		// Decrypt metadata.
@@ -875,7 +880,7 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 					continue
 				}
 			}
-			packetReplayCache.Record(replayDomain, encryptedMeta[:cipher.DefaultOverhead], replayTag)
+			packetReplayCache.Record(replayDomain, encryptedMeta[:cipher.DefaultNonceSize], replayTag)
 			return seg, addr, nil
 		} else if isDataAckProtocol(protocolType(p)) {
 			das := &dataAckStruct{}
@@ -898,7 +903,7 @@ func (u *PacketUnderlay) readOneSegment() (*segment, net.Addr, error) {
 					continue
 				}
 			}
-			packetReplayCache.Record(replayDomain, encryptedMeta[:cipher.DefaultOverhead], replayTag)
+			packetReplayCache.Record(replayDomain, encryptedMeta[:cipher.DefaultNonceSize], replayTag)
 			return seg, addr, nil
 		} else {
 			log.Debugf("%v unable to handle unknown protocol %d", u, p)
@@ -1106,7 +1111,7 @@ func (u *PacketUnderlay) writeOneSegment(seg *segment, addr net.Addr) error {
 		existingData := append(buf.plain[:0], metaBuf[:]...)
 		existingData = append(existingData, seg.payload...)
 		padding, err := newPaddingInto(buf.padding[:0],
-			buildRecommendedPaddingOpts(maxPaddingSize, existingData, blockCipher.BlockContext().UserName),
+			buildRecommendedPaddingOpts(maxPaddingSize, existingData),
 		)
 		if err != nil {
 			return fmt.Errorf("newPaddingInto() failed: %w", err)

@@ -18,7 +18,7 @@ package trafficpattern
 import (
 	"encoding/hex"
 	"fmt"
-	"math"
+	mrand "math/rand/v2"
 
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/rng"
@@ -89,7 +89,15 @@ func Validate(pattern *appctlpb.TrafficPattern) error {
 func (c *Config) generateImplicitTrafficPattern() {
 	seed := int(c.original.GetSeed())
 	if c.original.Seed == nil {
-		seed = rng.FixedIntVH(math.MaxInt32)
+		// The default seed must not be derived from the host name and the
+		// mieru version: that made the whole implicit pattern table
+		// reproducible offline for any observer who knows the two inputs.
+		// math/rand/v2 seeds its global source from the operating system and
+		// offers no way to make it deterministic again, so every start of the
+		// client or the server produces a different implicit pattern. An
+		// explicitly configured seed is still honored so that the documented
+		// reproducibility contract holds.
+		seed = int(mrand.Int32())
 	}
 	unlockAll := c.original.GetUnlockAll()
 	c.generateTCPFragment(seed, unlockAll)
@@ -153,9 +161,14 @@ func (c *Config) generateNoncePattern(seed int, unlockAll bool) {
 			typeRange := 3
 			n.Type = appctlpb.NonceType(rng.FixedInt(typeRange, fmt.Sprintf("%d:nonce.type", seed))).Enum()
 		} else {
-			// Generate a random number in [1, 2]
-			typeRange := 2
-			n.Type = appctlpb.NonceType(rng.FixedInt(typeRange, fmt.Sprintf("%d:nonce.type", seed)) + 1).Enum()
+			// Conservative default: do not rewrite the nonce. A configurable
+			// printable prefix is trivially detectable at a fixed position in
+			// the first packets of a connection, so the implicit pattern keeps
+			// NONCE_TYPE_RANDOM (enum value 0) and leaves the wire nonce fully
+			// random. This matches the long standing promise of
+			// docs/traffic-pattern.md that the default value is
+			// NONCE_TYPE_RANDOM.
+			n.Type = appctlpb.NonceType_NONCE_TYPE_RANDOM.Enum()
 		}
 	}
 
@@ -188,10 +201,10 @@ func (c *Config) generatePaddingPattern(seed int, unlockAll bool) {
 	p := c.effective.Padding
 
 	if c.original.Padding == nil || c.original.Padding.MaxMiddlePaddingLen == nil {
-		maxMiddlePaddingLen := rng.FixedInt(maxPaddingLen+1, fmt.Sprintf("%d:padding.maxMiddlePaddingLen", seed)) - 128
-		if maxMiddlePaddingLen <= 0 {
-			maxMiddlePaddingLen = 0
-		}
+		// Draw uniformly from [0, maxPaddingLen/2] == [0, 127]. The previous
+		// formula was rng.FixedInt(maxPaddingLen+1) - 128 with negatives clamped
+		// to 0, which biased roughly half of all draws to exactly 0.
+		maxMiddlePaddingLen := rng.FixedInt(maxPaddingLen/2+1, fmt.Sprintf("%d:padding.maxMiddlePaddingLen", seed))
 		p.MaxMiddlePaddingLen = proto.Int32(int32(maxMiddlePaddingLen))
 	}
 

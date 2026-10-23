@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"reflect"
 	"testing"
 
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
@@ -32,6 +33,35 @@ var lowEntropyTestMasks = map[appctlpb.LowEntropyMode]uint32{
 	appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_40: 0x1f1f1f1f,
 	appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_48: 0x3f3f3f3f,
 	appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56: 0x7f7f7f7f,
+}
+
+// lowEntropyFamilyMasks returns one half-mask per stride of the mode family,
+// keyed by the number of plaintext bytes each 8 byte chunk carries. The masks
+// use a byte aligned pattern, so a mask with n one-bits in every byte carries n
+// plaintext bytes per chunk.
+func lowEntropyFamilyMasks(t *testing.T, mode appctlpb.LowEntropyMode) map[int]uint32 {
+	t.Helper()
+	choices := halfMaskOnesChoices(mode)
+	if len(choices) == 0 {
+		t.Fatalf("halfMaskOnesChoices(%d) is empty", mode)
+	}
+	masks := make(map[int]uint32, len(choices))
+	for _, ones := range choices {
+		stride := ones / 4
+		masks[stride] = uint32(0x01010101) * (uint32(1)<<stride - 1)
+	}
+	return masks
+}
+
+// lowEntropyStrideForTest returns the number of plaintext bytes each chunk
+// carries with halfMask, exactly as the decoder derives it.
+func lowEntropyStrideForTest(t *testing.T, mode appctlpb.LowEntropyMode, halfMask uint32) int {
+	t.Helper()
+	params, err := validateLowEntropyCodecParams(mode, halfMask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION)
+	if err != nil {
+		t.Fatalf("validateLowEntropyCodecParams(%d, %08x) failed: %v", mode, halfMask, err)
+	}
+	return params.sourceBytesPerChunk
 }
 
 func TestExtractLowEntropyConfig(t *testing.T) {
@@ -112,10 +142,7 @@ func TestBuildLowEntropyParams(t *testing.T) {
 
 func TestLowEntropyEncodedPayloadLen(t *testing.T) {
 	for mode, mask := range lowEntropyTestMasks {
-		params, err := validateLowEntropyCodecParams(mode, mask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION)
-		if err != nil {
-			t.Fatalf("validateLowEntropyCodecParams(%d) failed: %v", mode, err)
-		}
+		stride := lowEntropyStrideForTest(t, mode, mask)
 		tests := []struct {
 			extracted int
 			want      uint16
@@ -124,27 +151,104 @@ func TestLowEntropyEncodedPayloadLen(t *testing.T) {
 			{0, 0, true},
 			{-1, 0, true},
 			{1, 8, false},
-			{params.sourceBytesPerChunk, 8, false},
-			{params.sourceBytesPerChunk + 1, 16, false},
-			{(math.MaxUint16 / lowEntropyChunkLen) * params.sourceBytesPerChunk, (math.MaxUint16 / lowEntropyChunkLen) * lowEntropyChunkLen, false},
-			{(math.MaxUint16/lowEntropyChunkLen)*params.sourceBytesPerChunk + 1, 0, true},
+			{stride, 8, false},
+			{stride + 1, 16, false},
+			{(math.MaxUint16 / lowEntropyChunkLen) * stride, (math.MaxUint16 / lowEntropyChunkLen) * lowEntropyChunkLen, false},
+			{(math.MaxUint16/lowEntropyChunkLen)*stride + 1, 0, true},
 			{math.MaxInt, 0, true},
 		}
 		for _, test := range tests {
 			t.Run(fmt.Sprintf("mode_%d_len_%d", mode, test.extracted), func(t *testing.T) {
-				got, err := lowEntropyEncodedPayloadLen(test.extracted, mode)
+				got, err := lowEntropyEncodedPayloadLen(test.extracted, stride)
 				if (err != nil) != test.wantErr {
-					t.Fatalf("lowEntropyEncodedPayloadLen(%d, %d) error = %v, wantErr %v", test.extracted, mode, err, test.wantErr)
+					t.Fatalf("lowEntropyEncodedPayloadLen(%d, %d) error = %v, wantErr %v", test.extracted, stride, err, test.wantErr)
 				}
 				if got != test.want {
-					t.Errorf("lowEntropyEncodedPayloadLen(%d, %d) = %d, want %d", test.extracted, mode, got, test.want)
+					t.Errorf("lowEntropyEncodedPayloadLen(%d, %d) = %d, want %d", test.extracted, stride, got, test.want)
 				}
 			})
 		}
 	}
 
-	if _, err := lowEntropyEncodedPayloadLen(1, appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_OFF); err == nil {
-		t.Error("lowEntropyEncodedPayloadLen() accepted mode OFF")
+	// Every stride of the mode family must be accepted, and the smallest stride
+	// must produce the longest encoded payload: maxFragmentSize() budgets for
+	// that worst case.
+	for mode := range lowEntropyTestMasks {
+		family := lowEntropyFamilyMasks(t, mode)
+		minStride, err := lowEntropyMinStride(mode)
+		if err != nil {
+			t.Fatalf("lowEntropyMinStride(%d) failed: %v", mode, err)
+		}
+		const extracted = 4096
+		minEncoded, err := lowEntropyEncodedPayloadLen(extracted, minStride)
+		if err != nil {
+			t.Fatalf("lowEntropyEncodedPayloadLen(%d, %d) failed: %v", extracted, minStride, err)
+		}
+		for stride, mask := range family {
+			if got := lowEntropyStrideForTest(t, mode, mask); got != stride {
+				t.Errorf("mode %d mask %08x carries %d bytes per chunk, want %d", mode, mask, got, stride)
+			}
+			encoded, err := lowEntropyEncodedPayloadLen(extracted, stride)
+			if err != nil {
+				t.Fatalf("lowEntropyEncodedPayloadLen(%d, %d) failed: %v", extracted, stride, err)
+			}
+			if encoded > minEncoded {
+				t.Errorf("stride %d encodes %d bytes, more than the %d bytes of the smallest stride %d", stride, encoded, minEncoded, minStride)
+			}
+		}
+	}
+
+	for _, stride := range []int{-1, 0, lowEntropyChunkLen + 1} {
+		if _, err := lowEntropyEncodedPayloadLen(1, stride); err == nil {
+			t.Errorf("lowEntropyEncodedPayloadLen() accepted stride %d", stride)
+		}
+	}
+	if _, err := lowEntropyNominalEncodedPayloadLen(1, appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_OFF); err == nil {
+		t.Error("lowEntropyNominalEncodedPayloadLen() accepted mode OFF")
+	}
+	nominal, err := lowEntropyNominalEncodedPayloadLen(8, appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32)
+	if err != nil || nominal != 16 {
+		t.Errorf("lowEntropyNominalEncodedPayloadLen(8, mode 32) = (%d, %v), want (16, nil)", nominal, err)
+	}
+}
+
+func TestHalfMaskOnesChoices(t *testing.T) {
+	tests := []struct {
+		mode appctlpb.LowEntropyMode
+		want []int
+	}{
+		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32, []int{12, 16, 20}},
+		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_40, []int{16, 20, 24}},
+		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_48, []int{20, 24, 28}},
+		// 32 one-bits would leave no padding bit, so it is not offered.
+		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56, []int{24, 28}},
+	}
+	for _, test := range tests {
+		t.Run(test.mode.String(), func(t *testing.T) {
+			got := halfMaskOnesChoices(test.mode)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("halfMaskOnesChoices(%d) = %v, want %v", test.mode, got, test.want)
+			}
+			base, err := buildLowEntropyParams(test.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			minStride, err := lowEntropyMinStride(test.mode)
+			if err != nil {
+				t.Fatalf("lowEntropyMinStride(%d) failed: %v", test.mode, err)
+			}
+			if minStride != base.sourceBytesPerChunk-1 {
+				t.Errorf("lowEntropyMinStride(%d) = %d, want %d", test.mode, minStride, base.sourceBytesPerChunk-1)
+			}
+		})
+	}
+	for _, mode := range []appctlpb.LowEntropyMode{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_OFF, appctlpb.LowEntropyMode(5)} {
+		if got := halfMaskOnesChoices(mode); got != nil {
+			t.Errorf("halfMaskOnesChoices(%d) = %v, want nil", mode, got)
+		}
+		if _, err := lowEntropyMinStride(mode); err == nil {
+			t.Errorf("lowEntropyMinStride(%d) succeeded, want error", mode)
+		}
 	}
 }
 
@@ -198,22 +302,70 @@ func TestLowEntropyRotations(t *testing.T) {
 
 func TestNewLowEntropyHalfMask(t *testing.T) {
 	for mode := range lowEntropyTestMasks {
-		params, err := buildLowEntropyParams(mode)
-		if err != nil {
-			t.Fatal(err)
+		choices := halfMaskOnesChoices(mode)
+		if len(choices) == 0 {
+			t.Fatalf("halfMaskOnesChoices(%d) is empty", mode)
 		}
-		for i := 0; i < 100; i++ {
+		seen := make(map[int]bool)
+		for i := 0; i < 200; i++ {
 			mask, err := newLowEntropyHalfMask(mode)
 			if err != nil {
 				t.Fatalf("newLowEntropyHalfMask(%d) failed: %v", mode, err)
 			}
-			if got := bits.OnesCount32(mask); got != params.halfMaskOnes {
-				t.Fatalf("newLowEntropyHalfMask(%d) produced %d one-bits, want %d", mode, got, params.halfMaskOnes)
+			ones := bits.OnesCount32(mask)
+			if ones%4 != 0 {
+				t.Fatalf("newLowEntropyHalfMask(%d) produced %d one-bits, want a multiple of 4", mode, ones)
 			}
+			if stride := lowEntropyStrideForTest(t, mode, mask); stride*4 != ones {
+				t.Fatalf("newLowEntropyHalfMask(%d) produced %d one-bits and stride %d", mode, ones, stride)
+			}
+			found := false
+			for _, choice := range choices {
+				if ones == choice {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("newLowEntropyHalfMask(%d) produced %d one-bits, want one of %v", mode, ones, choices)
+			}
+			seen[ones] = true
+		}
+		if len(seen) != len(choices) {
+			t.Errorf("newLowEntropyHalfMask(%d) used %d of %d choices after 200 draws", mode, len(seen), len(choices))
 		}
 	}
 	if _, err := newLowEntropyHalfMask(appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_OFF); err == nil {
 		t.Error("newLowEntropyHalfMask() accepted mode OFF")
+	}
+}
+
+// TestEncodeLowEntropyPayloadPaddingBitIsRandom verifies that the production
+// wrapper does not use a constant padding polarity.
+func TestEncodeLowEntropyPayloadPaddingBitIsRandom(t *testing.T) {
+	mode := appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32
+	halfMask := lowEntropyTestMasks[mode]
+	source := []byte{1, 2, 3, 4}
+	seen := make(map[byte]bool)
+	for i := 0; i < 200; i++ {
+		encoded, err := encodeLowEntropyPayload(source, mode, halfMask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION)
+		if err != nil {
+			t.Fatalf("encodeLowEntropyPayload() failed: %v", err)
+		}
+		padding := encoded[0] &^ byte(0x0f)
+		if padding != 0x00 && padding != 0xf0 {
+			t.Fatalf("encoded padding bits = %#02x, want a uniform polarity", padding)
+		}
+		decoded, err := decodeLowEntropyPayload(encoded, len(source), mode, halfMask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION)
+		if err != nil {
+			t.Fatalf("decodeLowEntropyPayload() failed: %v", err)
+		}
+		if !bytes.Equal(decoded, source) {
+			t.Fatal("decoded payload differs from source")
+		}
+		seen[padding/0xf0] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("encodeLowEntropyPayload() used %d of 2 padding polarities after 200 draws", len(seen))
 	}
 }
 
@@ -259,37 +411,80 @@ func TestLowEntropyGoldenVector(t *testing.T) {
 }
 
 func TestLowEntropyRoundTrip(t *testing.T) {
-	for mode, halfMask := range lowEntropyTestMasks {
-		params, err := buildLowEntropyParams(mode)
-		if err != nil {
-			t.Fatal(err)
-		}
-		lengths := []int{1, params.sourceBytesPerChunk - 1, params.sourceBytesPerChunk, params.sourceBytesPerChunk + 1, params.sourceBytesPerChunk*3 + 2, 32764, 32768}
-		for _, rotation := range legalLowEntropyRotations() {
-			for _, sourceLen := range lengths {
-				if _, err := lowEntropyEncodedPayloadLen(sourceLen, mode); err != nil {
-					continue
-				}
-				source := lowEntropyTestPayload(sourceLen)
-				for paddingBit := uint8(0); paddingBit <= 1; paddingBit++ {
-					name := fmt.Sprintf("mode_%d_rotation_%d_len_%d_padding_%d", mode, rotation, sourceLen, paddingBit)
-					t.Run(name, func(t *testing.T) {
-						encoded, err := encodeLowEntropyPayloadWithPaddingBit(source, mode, halfMask, rotation, paddingBit)
-						if err != nil {
-							t.Fatalf("encodeLowEntropyPayloadWithPaddingBit() failed: %v", err)
-						}
-						assertLowEntropyPadding(t, encoded, sourceLen, mode, halfMask, rotation, paddingBit)
-						decoded, err := decodeLowEntropyPayload(encoded, sourceLen, mode, halfMask, rotation)
-						if err != nil {
-							t.Fatalf("decodeLowEntropyPayload() failed: %v", err)
-						}
-						if !bytes.Equal(decoded, source) {
-							t.Fatalf("decoded payload differs from source")
-						}
-					})
+	for mode := range lowEntropyTestMasks {
+		for stride, halfMask := range lowEntropyFamilyMasks(t, mode) {
+			lengths := []int{1, stride - 1, stride, stride + 1, stride*3 + 2, (math.MaxUint16 / lowEntropyChunkLen) * stride, 32764, 32768}
+			for _, rotation := range legalLowEntropyRotations() {
+				for _, sourceLen := range lengths {
+					if _, err := lowEntropyEncodedPayloadLen(sourceLen, stride); err != nil {
+						continue
+					}
+					source := lowEntropyTestPayload(sourceLen)
+					for paddingBit := uint8(0); paddingBit <= 1; paddingBit++ {
+						name := fmt.Sprintf("mode_%d_stride_%d_rotation_%d_len_%d_padding_%d", mode, stride, rotation, sourceLen, paddingBit)
+						t.Run(name, func(t *testing.T) {
+							encoded, err := encodeLowEntropyPayloadWithPaddingBit(source, mode, halfMask, rotation, paddingBit)
+							if err != nil {
+								t.Fatalf("encodeLowEntropyPayloadWithPaddingBit() failed: %v", err)
+							}
+							assertLowEntropyPadding(t, encoded, sourceLen, mode, halfMask, rotation, paddingBit)
+							decoded, err := decodeLowEntropyPayload(encoded, sourceLen, mode, halfMask, rotation)
+							if err != nil {
+								t.Fatalf("decodeLowEntropyPayload() failed: %v", err)
+							}
+							if !bytes.Equal(decoded, source) {
+								t.Fatalf("decoded payload differs from source")
+							}
+						})
+					}
 				}
 			}
 		}
+	}
+}
+
+// TestLowEntropyFullChunkMask covers a half-mask without a single padding bit.
+// Such a message has no padding polarity to infer and no padding position to
+// check, so the decoder accepts it even when the unused bits of the final
+// partial chunk carry arbitrary values.
+func TestLowEntropyFullChunkMask(t *testing.T) {
+	mode := appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56
+	halfMask := uint32(0xffffffff)
+	if stride := lowEntropyStrideForTest(t, mode, halfMask); stride != lowEntropyChunkLen {
+		t.Fatalf("full chunk mask carries %d bytes per chunk, want %d", stride, lowEntropyChunkLen)
+	}
+	for _, sourceLen := range []int{1, 7, 8, 9, 16, 32000} {
+		source := lowEntropyTestPayload(sourceLen)
+		t.Run(fmt.Sprintf("len_%d", sourceLen), func(t *testing.T) {
+			for paddingBit := uint8(0); paddingBit <= 1; paddingBit++ {
+				encoded, err := encodeLowEntropyPayloadWithPaddingBit(source, mode, halfMask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION, paddingBit)
+				if err != nil {
+					t.Fatalf("encodeLowEntropyPayloadWithPaddingBit() failed: %v", err)
+				}
+				decoded, err := decodeLowEntropyPayload(encoded, sourceLen, mode, halfMask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION)
+				if err != nil {
+					t.Fatalf("decodeLowEntropyPayload() failed: %v", err)
+				}
+				if !bytes.Equal(decoded, source) {
+					t.Fatal("decoded payload differs from source")
+				}
+			}
+		})
+	}
+
+	// Arbitrary bits in the unused part of the final chunk must not be rejected.
+	source := lowEntropyTestPayload(3)
+	encoded, err := encodeLowEntropyPayloadWithPaddingBit(source, mode, halfMask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION, 0)
+	if err != nil {
+		t.Fatalf("encodeLowEntropyPayloadWithPaddingBit() failed: %v", err)
+	}
+	binary.BigEndian.PutUint64(encoded, binary.BigEndian.Uint64(encoded)|^uint64(0xffffff))
+	decoded, err := decodeLowEntropyPayload(encoded, len(source), mode, halfMask, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION)
+	if err != nil {
+		t.Fatalf("decodeLowEntropyPayload() rejected unused bits of a full chunk mask: %v", err)
+	}
+	if !bytes.Equal(decoded, source) {
+		t.Fatal("decoded payload differs from source")
 	}
 }
 
@@ -314,6 +509,10 @@ func TestLowEntropyMalformedInputs(t *testing.T) {
 		{"empty_source", nil, mode, halfMask, rotation, 0},
 		{"mode_off", source, appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_OFF, halfMask, rotation, 0},
 		{"wrong_mask_popcount", source, mode, halfMask ^ 1, rotation, 0},
+		{"zero_mask", source, mode, 0, rotation, 0},
+		{"mask_ones_not_a_multiple_of_4", source, mode, halfMask ^ 3, rotation, 0},
+		{"stride_above_family", source, mode, 0x3f3f3f3f, rotation, 0},
+		{"stride_below_family", source, appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56, 0x07070707, rotation, 0},
 		{"invalid_rotation", source, mode, halfMask, appctlpb.LowEntropyMaskRotation(17), 0},
 		{"invalid_padding_bit", source, mode, halfMask, rotation, 2},
 		{"encoded_length_overflow", make([]byte, 32765), mode, halfMask, rotation, 0},
@@ -337,6 +536,10 @@ func TestLowEntropyMalformedInputs(t *testing.T) {
 		{"empty_extracted", encoded, 0, mode, halfMask, rotation},
 		{"mode_off", encoded, len(source), appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_OFF, halfMask, rotation},
 		{"wrong_mask_popcount", encoded, len(source), mode, halfMask ^ 1, rotation},
+		{"zero_mask", encoded, len(source), mode, 0, rotation},
+		{"mask_ones_not_a_multiple_of_4", encoded, len(source), mode, halfMask ^ 3, rotation},
+		{"stride_above_family", encoded, len(source), mode, 0x3f3f3f3f, rotation},
+		{"stride_below_family", encoded, len(source), appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56, 0x07070707, rotation},
 		{"invalid_rotation", encoded, len(source), mode, halfMask, appctlpb.LowEntropyMaskRotation(17)},
 		{"short_encoded_body", encoded[:len(encoded)-1], len(source), mode, halfMask, rotation},
 		{"long_encoded_body", append(append([]byte{}, encoded...), make([]byte, lowEntropyChunkLen)...), len(source), mode, halfMask, rotation},
@@ -487,13 +690,14 @@ func BenchmarkLowEntropyCodec(b *testing.B) {
 
 func assertLowEntropyPadding(t *testing.T, encoded []byte, extractedLen int, mode appctlpb.LowEntropyMode, halfMask uint32, rotation appctlpb.LowEntropyMaskRotation, paddingBit uint8) {
 	t.Helper()
-	params, err := buildLowEntropyParams(mode)
+	params, err := validateLowEntropyCodecParams(mode, halfMask, rotation)
 	if err != nil {
 		t.Fatal(err)
 	}
+	stride := params.sourceBytesPerChunk
 	initialMask := mathext.RepeatUint32(halfMask)
-	for chunkIndex, sourceOffset := 0, 0; sourceOffset < extractedLen; chunkIndex, sourceOffset = chunkIndex+1, sourceOffset+params.sourceBytesPerChunk {
-		sourceLen := params.sourceBytesPerChunk
+	for chunkIndex, sourceOffset := 0, 0; sourceOffset < extractedLen; chunkIndex, sourceOffset = chunkIndex+1, sourceOffset+stride {
+		sourceLen := stride
 		if remaining := extractedLen - sourceOffset; remaining < sourceLen {
 			sourceLen = remaining
 		}

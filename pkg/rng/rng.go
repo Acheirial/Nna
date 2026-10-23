@@ -20,15 +20,11 @@ import (
 	"encoding/binary"
 	"math"
 	mrand "math/rand"
-	"os"
 	"sync"
 	"time"
-
-	"github.com/enfein/mieru/v3/pkg/version"
 )
 
 var fixed sync.Map
-var fixedV sync.Map
 
 // Intn returns a random int from [0, n) with scale down distribution.
 func Intn(n int) int {
@@ -99,36 +95,6 @@ func FixedInt(n int, hint string) int {
 		fixed.Store(hint, v)
 	}
 	return v.(int) % n
-}
-
-// FixedIntV returns an integer in [0, n) that stays the same
-// if the same hint is provided in the same mieru version.
-//
-// The returned value is not bigger than math.MaxInt32.
-//
-// This function uses an internal hint cache to accelerate look up.
-func FixedIntV(n int, hint string) int {
-	if n <= 0 {
-		return 0
-	}
-	v, ok := fixedV.Load(hint)
-	if !ok {
-		seed := hint + " " + version.AppVersion
-		b := sha256.Sum256([]byte(seed))
-		b[0] = b[0] & 0b01111111
-		v = int(binary.BigEndian.Uint32(b[:4]))
-		fixedV.Store(hint, v)
-	}
-	return v.(int) % n
-}
-
-// FixedIntVH returns an integer in [0, n) that stays the same
-// on the same host in the same mieru version.
-//
-// The returned value is not bigger than math.MaxInt32.
-func FixedIntVH(n int) int {
-	hostName, _ := os.Hostname()
-	return FixedIntV(n, hostName)
 }
 
 // scaleDown returns a random number from [0.0, 1.0), where

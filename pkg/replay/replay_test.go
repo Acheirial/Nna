@@ -17,6 +17,7 @@ package replay_test
 
 import (
 	crand "crypto/rand"
+	"fmt"
 	"net/netip"
 	"sync"
 	"testing"
@@ -407,6 +408,43 @@ func TestConcurrentSeenAndRecord(t *testing.T) {
 	}
 	if curr, prev := cache.Sizes(); curr != total || prev != 0 {
 		t.Errorf("cache sizes after concurrent inserts are %d %d, want %d 0.", curr, prev, total)
+	}
+}
+
+// TestSignatureCoversFullNonce verifies that the signature of the replay cache
+// spans the whole 24 byte wire nonce instead of only its first 16 bytes. Two
+// inputs that differ in any byte of the nonce must get two signatures,
+// otherwise a noncePattern that pins the leading bytes to a constant would
+// collapse many messages onto the same signature and turn them into false
+// replays.
+func TestSignatureCoversFullNonce(t *testing.T) {
+	const nonceSize = 24
+	domain := replay.DomainPacketClientToServer
+	base := newDistinctData(t, 1)[0][:nonceSize]
+
+	// The last byte of the first half and every byte of the second half are
+	// covered, including the bytes 17 to 24 that the signature used to ignore.
+	positions := []int{0, 15, 16, 17, 18, 20, 23}
+	for _, pos := range positions {
+		t.Run(fmt.Sprintf("byte_%d", pos+1), func(t *testing.T) {
+			cache := replay.NewCache(testCapacity, testExpireInterval)
+			variant := append([]byte(nil), base...)
+			variant[pos] ^= 0xff
+
+			cache.Record(domain, base, replay.Tag{})
+			if res := cache.Seen(domain, base, replay.Tag{}); res == false {
+				t.Errorf("Seen() of the recorded input = false, want true")
+			}
+			if res := cache.Seen(domain, variant, replay.Tag{}); res == true {
+				t.Errorf("Seen() of an input that differs in byte %d = true, want false", pos+1)
+			}
+
+			// Both signatures coexist, so the variant must be recordable.
+			cache.Record(domain, variant, replay.Tag{})
+			if res := cache.Seen(domain, variant, replay.Tag{}); res == false {
+				t.Errorf("Seen() of the recorded variant = false, want true")
+			}
+		})
 	}
 }
 

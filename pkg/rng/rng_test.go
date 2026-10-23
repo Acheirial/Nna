@@ -76,25 +76,3 @@ func TestFixedInt(t *testing.T) {
 		t.Errorf("FixedInt() = %d, want %d", v2, v)
 	}
 }
-
-func TestFixedIntPerHost(t *testing.T) {
-	cacheSize := func() int {
-		size := 0
-		fixedV.Range(func(key, value any) bool {
-			size++
-			return true
-		})
-		return size
-	}
-
-	prevSize := cacheSize()
-	v := FixedIntVH(256)
-	v2 := FixedIntVH(256)
-	if v2 != v {
-		t.Errorf("FixedIntPerHost() = %d, want %d", v2, v)
-	}
-	nextSize := cacheSize()
-	if nextSize > prevSize+1 {
-		t.Errorf("The cache size can only increase by 1")
-	}
-}

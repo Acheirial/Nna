@@ -56,6 +56,14 @@ const (
 
 	serverRespTimeout        = 10 * time.Second
 	sessionHeartbeatInterval = 5 * time.Second
+
+	// sessionHeartbeatJitterMs is the base heartbeat jitter in milliseconds.
+	// randomHeartbeatJitter draws the delay of a heartbeat uniformly in
+	// [-sessionHeartbeatJitterMs, +sessionHeartbeatJitterMs] and, with
+	// probability 1/8, adds a long tail of up to 8*sessionHeartbeatJitterMs
+	// more. An idle packet session therefore still refreshes its NAT binding
+	// on time in the common case, but its heartbeat is no longer a periodic
+	// beacon that an observer can use to identify the tunnel.
 	sessionHeartbeatJitterMs = 1000
 
 	// minOutputInterval is the minimum interval between two output loops.
@@ -202,7 +210,7 @@ type Session struct {
 	nextRecv               atomic.Uint32 // next sequence number to receive
 	lastRXTime             atomic.Int64  // last timestamp when a segment is received, in microseconds since Unix epoch
 	lastTXTime             atomic.Int64  // last timestamp when a segment is sent, in microseconds since Unix epoch
-	heartbeatJitter        time.Duration // random jitter added to heartbeat interval to break periodic pattern
+	heartbeatJitter        time.Duration // random jitter added to the heartbeat interval; long-tailed, see randomHeartbeatJitter
 	nextRetransmissionTime atomic.Int64  // time that need to retransmit a segment in sendBuf, in microseconds since Unix epoch
 	ackOnDataRecv          atomic.Bool   // whether ack should be sent due to receive of new data
 	ackDeadline            atomic.Int64  // time to send the pending ack requested by ackOnDataRecv, in microseconds since Unix epoch
@@ -1264,7 +1272,7 @@ func (s *Session) writeChunk(b []byte) (n int, err error) {
 		part := ptr[:partLen]
 		payloadLen := uint16(partLen)
 		if sendLowEntropy {
-			payloadLen, err = lowEntropyEncodedPayloadLen(partLen, lowEntropyMode)
+			payloadLen, err = lowEntropyNominalEncodedPayloadLen(partLen, lowEntropyMode)
 			if err != nil {
 				s.oLock.Unlock()
 				return 0, err
@@ -2215,8 +2223,15 @@ func (s *Session) moveRecvBufToRecvQueue() error {
 	}
 }
 
-// randomHeartbeatJitter returns a duration in [-1s, +1s] at millisecond granularity.
+// randomHeartbeatJitter returns the random delay added to
+// sessionHeartbeatInterval. Most values stay within the base jitter so that a
+// NAT binding is still refreshed on time, but one draw in eight adds up to
+// 8 seconds more, so the heartbeat of an idle session is not a periodic beacon
+// that an observer can use to identify the tunnel.
 func randomHeartbeatJitter() time.Duration {
 	jitterMs := mrand.Intn(2*sessionHeartbeatJitterMs+1) - sessionHeartbeatJitterMs
+	if mrand.Intn(8) == 0 {
+		jitterMs += mrand.Intn(8*sessionHeartbeatJitterMs) + 1
+	}
 	return time.Duration(jitterMs) * time.Millisecond
 }

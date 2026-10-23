@@ -236,11 +236,19 @@ func TestPartialLowEntropyPatternPreserved(t *testing.T) {
 }
 
 func TestDeterministicGeneration(t *testing.T) {
-	origin := &appctlpb.TrafficPattern{}
+	// An explicitly configured seed must make the generated pattern
+	// reproducible. This is a documented contract, unlike the implicit seed,
+	// which is now drawn at random per process.
+	origin := &appctlpb.TrafficPattern{
+		Seed: proto.Int32(12345),
+	}
 
 	cfg1, _ := NewConfig(origin)
 	cfg2, _ := NewConfig(origin)
 
+	if cfg1.effective.GetSeed() != cfg2.effective.GetSeed() {
+		t.Error("seed should be deterministic")
+	}
 	if cfg1.effective.TcpFragment.GetEnable() != cfg2.effective.TcpFragment.GetEnable() {
 		t.Error("tcpFragment.enable should be deterministic")
 	}
@@ -270,6 +278,77 @@ func TestDeterministicGeneration(t *testing.T) {
 	}
 	if cfg1.effective.LowEntropy.GetMaskRotation() != cfg2.effective.LowEntropy.GetMaskRotation() {
 		t.Error("lowEntropy.maskRotation should be deterministic")
+	}
+}
+
+func TestImplicitNonceTypeDefaultsToRandom(t *testing.T) {
+	// The conservative default (unlockAll == false) must not rewrite the nonce
+	// prefix, regardless of whether the seed is implicit or explicit.
+	cases := []struct {
+		name string
+		seed *int32
+	}{
+		{name: "implicit_seed", seed: nil},
+		{name: "explicit_seed_1", seed: proto.Int32(1)},
+		{name: "explicit_seed_42", seed: proto.Int32(42)},
+		{name: "explicit_seed_large", seed: proto.Int32(2000000000)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			origin := &appctlpb.TrafficPattern{
+				UnlockAll: proto.Bool(false),
+			}
+			if c.seed != nil {
+				origin.Seed = c.seed
+			}
+			cfg, err := NewConfig(origin)
+			if err != nil {
+				t.Fatalf("NewConfig() failed: %v", err)
+			}
+			if got := cfg.effective.Nonce.GetType(); got != appctlpb.NonceType_NONCE_TYPE_RANDOM {
+				t.Errorf("expected implicit nonce.type NONCE_TYPE_RANDOM, got %v", got)
+			}
+		})
+	}
+}
+
+func TestImplicitMiddlePaddingLenRange(t *testing.T) {
+	// The implicit middle padding maximum must be drawn uniformly from [0, 127]
+	// and must not collapse to 0 for every seed.
+	cases := []struct {
+		name string
+		seed int32
+	}{
+		{name: "seed_1", seed: 1},
+		{name: "seed_2", seed: 2},
+		{name: "seed_3", seed: 3},
+		{name: "seed_7", seed: 7},
+		{name: "seed_42", seed: 42},
+		{name: "seed_99", seed: 99},
+		{name: "seed_12345", seed: 12345},
+		{name: "seed_large", seed: 2000000000},
+	}
+	allZero := true
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			origin := &appctlpb.TrafficPattern{
+				Seed: proto.Int32(c.seed),
+			}
+			cfg, err := NewConfig(origin)
+			if err != nil {
+				t.Fatalf("NewConfig() failed: %v", err)
+			}
+			got := cfg.effective.Padding.GetMaxMiddlePaddingLen()
+			if got < 0 || got > 127 {
+				t.Errorf("seed=%d: implicit maxMiddlePaddingLen %d is out of range [0, 127]", c.seed, got)
+			}
+			if got != 0 {
+				allZero = false
+			}
+		})
+	}
+	if allZero {
+		t.Error("implicit maxMiddlePaddingLen is 0 for every tested seed, expected an unbiased range [0, 127]")
 	}
 }
 

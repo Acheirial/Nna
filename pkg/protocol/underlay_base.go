@@ -85,9 +85,12 @@ const (
 	removeSessionWaitTimeout = 5 * time.Second
 )
 
-var (
-	readOneSegmentTimeout = time.Duration(60+rng.FixedIntVH(61)) * time.Second
-)
+// readOneSegmentTimeout returns the read deadline used for one metadata read.
+// The value is randomized on every call so that the idle lifetime of an underlay
+// can't be predicted from the host name and mieru version.
+func readOneSegmentTimeout() time.Duration {
+	return time.Duration(60+rng.Intn(61)) * time.Second
+}
 
 // baseUnderlay contains a partial implementation of underlay.
 type baseUnderlay struct {
@@ -605,7 +608,9 @@ func decodeLowEntropyEncryptedPayload(encryptedPayload []byte, das *dataAckStruc
 }
 
 // prepareLowEntropyDataAckForSend verifies the stable per-segment metadata and
-// generates the fresh half-mask used by this wire transmission.
+// generates the fresh half-mask used by this wire transmission. The half-mask
+// decides how many plaintext bytes each chunk carries, so it is generated
+// first and the encoded payload length is then computed from its stride.
 func prepareLowEntropyDataAckForSend(das *dataAckStruct, plaintextPayloadLen int) error {
 	if das == nil {
 		return stderror.ErrNullPointer
@@ -617,20 +622,20 @@ func prepareLowEntropyDataAckForSend(das *dataAckStruct, plaintextPayloadLen int
 		return fmt.Errorf("plaintext payload length is %d, want %d", plaintextPayloadLen, das.extractedPayloadLen)
 	}
 	mode := appctlpb.LowEntropyMode(das.lowEntropyMode)
-	expectedPayloadLen, err := lowEntropyEncodedPayloadLen(plaintextPayloadLen, mode)
-	if err != nil {
-		return err
-	}
-	if das.payloadLen != expectedPayloadLen {
-		return fmt.Errorf("low entropy payload length is %d, want %d", das.payloadLen, expectedPayloadLen)
-	}
 	rotation := appctlpb.LowEntropyMaskRotation(das.lowEntropyMaskRotation)
-	if !isValidLowEntropyRotation(rotation) {
-		return fmt.Errorf("invalid low entropy mask rotation %d", rotation)
-	}
-	das.lowEntropyMask, err = newLowEntropyHalfMask(mode)
+	mask, err := newLowEntropyHalfMask(mode)
 	if err != nil {
 		return err
 	}
+	das.lowEntropyMask = mask
+	params, err := validateLowEntropyCodecParams(mode, mask, rotation)
+	if err != nil {
+		return err
+	}
+	payloadLen, err := lowEntropyEncodedPayloadLen(plaintextPayloadLen, params.sourceBytesPerChunk)
+	if err != nil {
+		return err
+	}
+	das.payloadLen = payloadLen
 	return validateLowEntropyDataAckMetadata(das)
 }

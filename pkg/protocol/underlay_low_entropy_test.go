@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"math/bits"
 	"net"
 	"testing"
 	"time"
@@ -124,9 +123,12 @@ func TestStreamLowEntropySendReceive(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			payload := []byte("stream low entropy outbound payload with a partial final chunk")
-			payloadLen, err := lowEntropyEncodedPayloadLen(len(payload), test.mode)
+			// The half-mask is generated when the segment goes on the wire, so
+			// the segment starts with the nominal length of the mode and the
+			// mask is filled in later.
+			payloadLen, err := lowEntropyNominalEncodedPayloadLen(len(payload), test.mode)
 			if err != nil {
-				t.Fatalf("lowEntropyEncodedPayloadLen() failed: %v", err)
+				t.Fatalf("lowEntropyNominalEncodedPayloadLen() failed: %v", err)
 			}
 			das := &dataAckStruct{
 				baseStruct:             baseStruct{protocol: uint8(test.protocol)},
@@ -187,12 +189,14 @@ func TestStreamLowEntropySendReceive(t *testing.T) {
 				t.Fatalf("received segment = %v, want protocol %v and original payload", received, test.protocol)
 			}
 			gotMetadata := received.metadata.(*dataAckStruct)
-			params, err := buildLowEntropyParams(test.mode)
-			if err != nil {
-				t.Fatalf("buildLowEntropyParams() failed: %v", err)
+			stride := lowEntropyStrideForTest(t, test.mode, gotMetadata.lowEntropyMask)
+			family := lowEntropyFamilyMasks(t, test.mode)
+			if _, ok := family[stride]; !ok {
+				t.Errorf("received half-mask %08x carries %d bytes per chunk, want one of %v", gotMetadata.lowEntropyMask, stride, family)
 			}
-			if bits.OnesCount32(gotMetadata.lowEntropyMask) != params.halfMaskOnes {
-				t.Errorf("half-mask has %d one-bits, want %d", bits.OnesCount32(gotMetadata.lowEntropyMask), params.halfMaskOnes)
+			wantPayloadLen := uint16(((len(payload)-1)/stride + 1) * lowEntropyChunkLen)
+			if gotMetadata.payloadLen != wantPayloadLen {
+				t.Errorf("received payload length = %d, want %d for stride %d", gotMetadata.payloadLen, wantPayloadLen, stride)
 			}
 			if sender.OutBytes() != receiver.InBytes() {
 				t.Errorf("stream wire byte counts = sent %d, received %d", sender.OutBytes(), receiver.InBytes())
@@ -272,9 +276,11 @@ func TestPacketLowEntropySendReceive(t *testing.T) {
 				for i := range payload {
 					payload[i] = byte(i)
 				}
-				payloadLen, err := lowEntropyEncodedPayloadLen(len(payload), test.mode)
+				// The exact encoded length depends on the half-mask, which is
+				// generated when the segment goes on the wire.
+				payloadLen, err := lowEntropyNominalEncodedPayloadLen(len(payload), test.mode)
 				if err != nil {
-					t.Fatalf("lowEntropyEncodedPayloadLen() failed: %v", err)
+					t.Fatalf("lowEntropyNominalEncodedPayloadLen() failed: %v", err)
 				}
 				das := &dataAckStruct{
 					baseStruct:             baseStruct{protocol: uint8(test.protocol)},
@@ -327,15 +333,17 @@ func TestPacketLowEntropySendReceive(t *testing.T) {
 				if received.Protocol() != test.protocol || !bytes.Equal(received.payload, payload) {
 					t.Fatalf("received segment = %v, want protocol %v and original payload", received, test.protocol)
 				}
-				params, err := buildLowEntropyParams(test.mode)
-				if err != nil {
-					t.Fatalf("buildLowEntropyParams() failed: %v", err)
+				gotMetadata := received.metadata.(*dataAckStruct)
+				stride := lowEntropyStrideForTest(t, test.mode, gotMetadata.lowEntropyMask)
+				if _, ok := lowEntropyFamilyMasks(t, test.mode)[stride]; !ok {
+					t.Errorf("received mask has a stride outside the mode family")
 				}
-				if bits.OnesCount32(received.metadata.(*dataAckStruct).lowEntropyMask) != params.halfMaskOnes {
-					t.Errorf("received mask has wrong one-bit count")
+				wantPayloadLen := uint16(((len(payload)-1)/stride + 1) * lowEntropyChunkLen)
+				if gotMetadata.payloadLen != wantPayloadLen || int(gotMetadata.payloadLen)+packetOverhead > mtu {
+					t.Errorf("received payload length = %d, want %d within MTU %d", gotMetadata.payloadLen, wantPayloadLen, mtu)
 				}
 				wireLen := int(sender.OutBytes())
-				minimumWireLen := packetOverhead + int(payloadLen)
+				minimumWireLen := packetOverhead + int(gotMetadata.payloadLen)
 				if wireLen < minimumWireLen || wireLen > mtu {
 					t.Errorf("datagram length = %d, want [%d, %d]", wireLen, minimumWireLen, mtu)
 				}
@@ -587,7 +595,7 @@ func TestPacketLowEntropyWaitsForSessionEstablishment(t *testing.T) {
 	openRequest.txTime = now.UnixMicro()
 	openRequest.txTimeout = maxBackOffDuration
 	session.nextRetransmissionTime.Store(now.Add(maxBackOffDuration).UnixMicro())
-	session.lastTXTime.Store(now.Add(-2 * sessionHeartbeatInterval).UnixMicro())
+	session.lastTXTime.Store(now.Add(-4 * sessionHeartbeatInterval).UnixMicro())
 	session.ackOnDataRecv.Store(true)
 	session.runOutputOncePacket()
 	expectNoPacketForTest(t, receiverConn)
@@ -628,9 +636,11 @@ func TestPacketLowEntropyRetransmissionReencoding(t *testing.T) {
 	const mtu = 517
 	mode := appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32
 	payload := []byte("plaintext retained across packet retransmissions")
-	payloadLen, err := lowEntropyEncodedPayloadLen(len(payload), mode)
+	// Each transmission draws its own half-mask, so the segment starts with the
+	// nominal length of the mode.
+	payloadLen, err := lowEntropyNominalEncodedPayloadLen(len(payload), mode)
 	if err != nil {
-		t.Fatalf("lowEntropyEncodedPayloadLen() failed: %v", err)
+		t.Fatalf("lowEntropyNominalEncodedPayloadLen() failed: %v", err)
 	}
 	das := &dataAckStruct{
 		baseStruct:             baseStruct{protocol: uint8(dataClientToServerLowEntropy)},
@@ -848,7 +858,9 @@ func flipLowEntropyChunkBit(chunk []byte, bit uint64) {
 func testLowEntropyMetadata(t *testing.T, protocol protocolType, extractedLen, prefixLen, suffixLen int) *dataAckStruct {
 	t.Helper()
 	mode := appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32
-	payloadLen, err := lowEntropyEncodedPayloadLen(extractedLen, mode)
+	// The wire in these tests is built by hand with a fixed half-mask, so the
+	// payload length must be the one that mask carries.
+	payloadLen, err := lowEntropyEncodedPayloadLen(extractedLen, lowEntropyStrideForTest(t, mode, 0x0f0f0f0f))
 	if err != nil {
 		t.Fatalf("lowEntropyEncodedPayloadLen() failed: %v", err)
 	}

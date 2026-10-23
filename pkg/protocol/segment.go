@@ -49,7 +49,13 @@ func maxFragmentSize(mtu int, transport common.TransportProtocol, mode appctlpb.
 		return maxFragmentSizeInternal(mtu, transport), nil
 	}
 
-	params, err := buildLowEntropyParams(mode)
+	// The half-mask of a message decides how many plaintext bytes each chunk
+	// carries, and the sender only knows it when the message is put on the
+	// wire. Size the fragment for the smallest stride of the mode family, which
+	// is the worst case: it produces the longest encoded payload, so the
+	// encoded payload always fits the fragment budget and the uint16 length
+	// field of the metadata.
+	minStride, err := lowEntropyMinStride(mode)
 	if err != nil {
 		return 0, err
 	}
@@ -58,14 +64,14 @@ func maxFragmentSize(mtu int, transport common.TransportProtocol, mode appctlpb.
 	switch transport {
 	case common.StreamTransport:
 		fragmentSize := maxFragmentSizeInternal(mtu, transport)
-		maxEncodableFragmentSize := maxEncodableChunkCount * params.sourceBytesPerChunk
+		maxEncodableFragmentSize := maxEncodableChunkCount * minStride
 		return mathext.Min(fragmentSize, maxEncodableFragmentSize), nil
 	case common.PacketTransport:
 		mtuChunkCount := (mtu - packetOverhead) / lowEntropyChunkLen
 		if mtuChunkCount <= 0 {
 			return 0, fmt.Errorf("MTU %d has no capacity for a low entropy payload chunk", mtu)
 		}
-		return mtuChunkCount * params.sourceBytesPerChunk, nil
+		return mtuChunkCount * minStride, nil
 	default:
 		return maxFragmentSizeInternal(mtu, transport), nil
 	}

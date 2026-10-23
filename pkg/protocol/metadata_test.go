@@ -17,6 +17,7 @@ package protocol
 
 import (
 	"encoding/binary"
+	"fmt"
 	mrand "math/rand"
 	"reflect"
 	"strings"
@@ -208,6 +209,8 @@ func TestLowEntropyDataAckRejectsInvalidMetadata(t *testing.T) {
 		{"zero_extracted_payload_with_nonzero_payload", func(b []byte) { binary.BigEndian.PutUint16(b[29:31], 0) }},
 		{"oversized_extracted_payload", func(b []byte) { binary.BigEndian.PutUint16(b[29:31], maxPDU+1) }},
 		{"wrong_mask_popcount", func(b []byte) { binary.BigEndian.PutUint32(b[25:29], 0x0f0f0f0e) }},
+		{"zero_mask", func(b []byte) { binary.BigEndian.PutUint32(b[25:29], 0) }},
+		{"stride_outside_family", func(b []byte) { binary.BigEndian.PutUint32(b[25:29], 0x3f3f3f3f) }},
 		{"invalid_rotation", func(b []byte) { b[31] = 17 }},
 	}
 	for _, test := range tests {
@@ -218,6 +221,43 @@ func TestLowEntropyDataAckRejectsInvalidMetadata(t *testing.T) {
 				t.Fatal("Unmarshal() succeeded, want error")
 			}
 		})
+	}
+}
+
+// TestLowEntropyDataAckAcceptsFamilyStrides verifies that the metadata of a
+// message is accepted for every stride the half-mask of the mode family can
+// carry, and that the payload length is the one the mask implies.
+func TestLowEntropyDataAckAcceptsFamilyStrides(t *testing.T) {
+	const extractedPayloadLen = 11
+	for _, mode := range []appctlpb.LowEntropyMode{
+		appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32,
+		appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_40,
+		appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_48,
+		appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56,
+	} {
+		for stride, mask := range lowEntropyFamilyMasks(t, mode) {
+			t.Run(fmt.Sprintf("mode_%d_stride_%d", mode, stride), func(t *testing.T) {
+				payloadLen := uint16(((extractedPayloadLen-1)/stride + 1) * lowEntropyChunkLen)
+				want := &dataAckStruct{
+					baseStruct:             baseStruct{protocol: uint8(dataServerToClientLowEntropy)},
+					lowEntropyMode:         uint8(mode),
+					payloadLen:             payloadLen,
+					lowEntropyMask:         mask,
+					extractedPayloadLen:    extractedPayloadLen,
+					lowEntropyMaskRotation: uint8(appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_LEFT_3),
+				}
+				if err := validateLowEntropyDataAckMetadata(want); err != nil {
+					t.Fatalf("validateLowEntropyDataAckMetadata() failed: %v", err)
+				}
+				got := &dataAckStruct{}
+				if err := got.Unmarshal(want.Marshal()); err != nil {
+					t.Fatalf("Unmarshal() failed: %v", err)
+				}
+				if got.lowEntropyMask != mask || got.payloadLen != payloadLen {
+					t.Errorf("unmarshaled metadata = %v, want mask %08x and payload length %d", got, mask, payloadLen)
+				}
+			})
+		}
 	}
 }
 

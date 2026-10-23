@@ -23,11 +23,14 @@ import (
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/common"
 	"github.com/enfein/mieru/v3/pkg/mathext"
-	"github.com/enfein/mieru/v3/pkg/rng"
 )
 
 var (
-	recommendedConsecutiveASCIILen = 24 + rng.FixedIntVH(17)
+	// recommendedConsecutiveASCIILen is the minimum length of consecutive
+	// printable ASCII characters in the ASCII padding strategy. It is drawn
+	// once per process so that the padding byte distribution is not a stable
+	// fingerprint of the host name and mieru version.
+	recommendedConsecutiveASCIILen = 24 + mrand.Intn(17)
 	recommendedTargetProbability   = 0.325
 )
 
@@ -108,7 +111,7 @@ func maxPaddingSize(mtu int, transport common.TransportProtocol, fragmentSize in
 	return mathext.Min(res-int(existingPaddingSize), 255)
 }
 
-func buildRecommendedPaddingOpts(maxLen int, existingData []byte, strategySource string) paddingOpts {
+func buildRecommendedPaddingOpts(maxLen int, existingData []byte) paddingOpts {
 	asciiOpts := paddingOpts{
 		maxLen: maxLen,
 		ascii: &asciiPaddingOpts{
@@ -116,8 +119,11 @@ func buildRecommendedPaddingOpts(maxLen int, existingData []byte, strategySource
 		},
 	}
 
-	// strategySource decides the padding strategy.
-	if rng.FixedIntV(2, strategySource) == 0 {
+	// The padding strategy is chosen randomly for every message so that it is
+	// not a stable property of the sender's account. The padding bytes are not
+	// authenticated and are discarded by the receiver, so this has no effect
+	// on the wire format.
+	if mrand.Intn(2) == 0 {
 		// Use ASCII.
 		return asciiOpts
 	}

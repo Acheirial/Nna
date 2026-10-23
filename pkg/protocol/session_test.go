@@ -114,8 +114,8 @@ func TestStreamLowEntropyWriteChunk(t *testing.T) {
 		wantFirstPartLen  int
 		wantSecondPartLen int
 	}{
-		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION, 2, 32764, 4},
-		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_40, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_RIGHT_7, 1, maxPDU, 0},
+		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_32, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_NO_ROTATION, 2, 24573, 8195},
+		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_40, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_RIGHT_7, 2, 32764, 4},
 		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_48, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_LEFT_3, 1, maxPDU, 0},
 		{appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_RIGHT_15, 1, maxPDU, 0},
 	}
@@ -145,9 +145,9 @@ func TestStreamLowEntropyWriteChunk(t *testing.T) {
 				if das.extractedPayloadLen != uint16(len(seg.payload)) {
 					t.Errorf("fragment %d extracted length = %d, want %d", i, das.extractedPayloadLen, len(seg.payload))
 				}
-				wantEncodedLen, err := lowEntropyEncodedPayloadLen(len(seg.payload), test.mode)
+				wantEncodedLen, err := lowEntropyNominalEncodedPayloadLen(len(seg.payload), test.mode)
 				if err != nil {
-					t.Fatalf("lowEntropyEncodedPayloadLen() failed: %v", err)
+					t.Fatalf("lowEntropyNominalEncodedPayloadLen() failed: %v", err)
 				}
 				if das.payloadLen != wantEncodedLen || das.lowEntropyMask != 0 {
 					t.Errorf("fragment %d metadata = %v, want encoded length %d and deferred mask", i, das, wantEncodedLen)
@@ -210,9 +210,9 @@ func TestPacketLowEntropyWriteChunk(t *testing.T) {
 				if len(seg.payload) > fragmentSize || das.extractedPayloadLen != uint16(len(seg.payload)) {
 					t.Errorf("fragment %d plaintext length = %d, limit %d, extracted length %d", i, len(seg.payload), fragmentSize, das.extractedPayloadLen)
 				}
-				wantEncodedLen, err := lowEntropyEncodedPayloadLen(len(seg.payload), test.mode)
+				wantEncodedLen, err := lowEntropyNominalEncodedPayloadLen(len(seg.payload), test.mode)
 				if err != nil {
-					t.Fatalf("lowEntropyEncodedPayloadLen() failed: %v", err)
+					t.Fatalf("lowEntropyNominalEncodedPayloadLen() failed: %v", err)
 				}
 				if das.payloadLen != wantEncodedLen || int(das.payloadLen)+packetOverhead > s.mtu {
 					t.Errorf("fragment %d encoded length = %d, want %d within MTU %d", i, das.payloadLen, wantEncodedLen, s.mtu)
@@ -515,6 +515,11 @@ func decryptDataAckForTest(t *testing.T, block cipher.BlockCipher, wire []byte) 
 }
 
 func TestPacketOutputDelay(t *testing.T) {
+	// randomHeartbeatJitter() is uniform in [-baseJitter, +baseJitter] and adds
+	// a long tail of up to 8*baseJitter with probability 1/8, so the deadline
+	// of an idle session can be as late as sessionHeartbeatInterval+maxJitter.
+	baseJitter := sessionHeartbeatJitterMs * time.Millisecond
+	maxJitter := baseJitter + 8*sessionHeartbeatJitterMs*time.Millisecond
 	tests := []struct {
 		name    string
 		setup   func(s *Session)
@@ -524,8 +529,8 @@ func TestPacketOutputDelay(t *testing.T) {
 		{
 			name:    "idle waits for heartbeat",
 			setup:   func(s *Session) {},
-			minWant: sessionHeartbeatInterval - sessionHeartbeatJitterMs*time.Millisecond - 100*time.Millisecond,
-			maxWant: sessionHeartbeatInterval + sessionHeartbeatJitterMs*time.Millisecond,
+			minWant: sessionHeartbeatInterval - baseJitter - 100*time.Millisecond,
+			maxWant: sessionHeartbeatInterval + maxJitter,
 		},
 		{
 			name:    "pending ack",
@@ -556,8 +561,8 @@ func TestPacketOutputDelay(t *testing.T) {
 			setup: func(s *Session) {
 				s.nextRetransmissionTime.Store(0)
 			},
-			minWant: sessionHeartbeatInterval - sessionHeartbeatJitterMs*time.Millisecond - 100*time.Millisecond,
-			maxWant: sessionHeartbeatInterval + sessionHeartbeatJitterMs*time.Millisecond,
+			minWant: sessionHeartbeatInterval - baseJitter - 100*time.Millisecond,
+			maxWant: sessionHeartbeatInterval + maxJitter,
 		},
 		{
 			name: "opening client ignores ack and heartbeat",
@@ -590,6 +595,54 @@ func TestPacketOutputDelay(t *testing.T) {
 			if got < test.minWant || got > test.maxWant {
 				t.Fatalf("nextPacketOutputDelay() = %v, want in [%v, %v]", got, test.minWant, test.maxWant)
 			}
+		})
+	}
+}
+
+// TestRandomHeartbeatJitter checks the bounds of the heartbeat jitter and the
+// presence of its long tail. Every draw must stay in
+// [-sessionHeartbeatJitterMs, +9*sessionHeartbeatJitterMs] milliseconds, and
+// the long tail must show up in a sample of 1000 draws: the probability that a
+// sample this large misses it is 0.875^1000, which is effectively zero.
+func TestRandomHeartbeatJitter(t *testing.T) {
+	const draws = 1000
+	baseJitter := sessionHeartbeatJitterMs * time.Millisecond
+	maxJitter := baseJitter + 8*sessionHeartbeatJitterMs*time.Millisecond
+
+	tests := []struct {
+		name  string
+		check func(t *testing.T, jitters []time.Duration)
+	}{
+		{
+			name: "all draws stay within the base jitter and the long tail",
+			check: func(t *testing.T, jitters []time.Duration) {
+				for i, got := range jitters {
+					if got < -baseJitter || got > maxJitter {
+						t.Fatalf("draw %d = %v, want in [%v, %v]", i, got, -baseJitter, maxJitter)
+					}
+				}
+			},
+		},
+		{
+			name: "long tail appears at least once",
+			check: func(t *testing.T, jitters []time.Duration) {
+				for _, got := range jitters {
+					if got > baseJitter {
+						return
+					}
+				}
+				t.Fatalf("no draw exceeded %v in %d draws, the long tail is missing", baseJitter, len(jitters))
+			},
+		},
+	}
+
+	jitters := make([]time.Duration, 0, draws)
+	for range draws {
+		jitters = append(jitters, randomHeartbeatJitter())
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.check(t, jitters)
 		})
 	}
 }
@@ -722,8 +775,11 @@ func TestPacketOutputLoopEventDriven(t *testing.T) {
 	// Only one ACK is sent and the session returns to idle.
 	expectNoPacketForTest(t, receiverConn)
 
-	// Heartbeat is sent when the interval expires.
-	s.lastTXTime.Store(time.Now().Add(-2 * sessionHeartbeatInterval).UnixMicro())
+	// Heartbeat is sent when the interval expires. The last transmit time is
+	// pushed back far enough to exceed the largest possible jittered interval
+	// (sessionHeartbeatInterval plus the long tail), so the heartbeat is due
+	// whatever jitter this session drew.
+	s.lastTXTime.Store(time.Now().Add(-(4 * sessionHeartbeatInterval)).UnixMicro())
 	s.wakeOutput()
 	heartbeat := decryptDataAckForTest(t, decryptBlock, readPacketForTest(t, receiverConn))
 	if heartbeat.Protocol() != ackClientToServer {

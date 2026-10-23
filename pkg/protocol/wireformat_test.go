@@ -16,9 +16,11 @@
 package protocol
 
 import (
+	"encoding/binary"
 	"fmt"
 	"testing"
 
+	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/cipher"
 )
 
@@ -98,6 +100,72 @@ func TestWireFormatDerivedLengths(t *testing.T) {
 	// handshake response.
 	if handshakeRequestFixedLen != handshakeResponseLen {
 		t.Errorf("handshakeRequestFixedLen = %d, want handshakeResponseLen = %d", handshakeRequestFixedLen, handshakeResponseLen)
+	}
+}
+
+// TestLowEntropyWireFormatLengths freezes the low entropy part of the wire
+// format. The number of plaintext bytes a chunk carries is derived from the
+// half-mask of the message, and not from the mode, but neither the chunk length
+// nor the metadata layout may change: the low entropy fields keep their offsets
+// and the encoded payload length stays a whole number of 8 byte chunks.
+func TestLowEntropyWireFormatLengths(t *testing.T) {
+	if lowEntropyChunkLen != 8 {
+		t.Errorf("lowEntropyChunkLen = %d, want 8", lowEntropyChunkLen)
+	}
+
+	tests := []struct {
+		extracted int
+		stride    int
+		want      uint16
+	}{
+		{1, 3, 8},
+		{3, 3, 8},
+		{4, 3, 16},
+		{1, 8, 8},
+		{8, 8, 8},
+		{9, 8, 16},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("extracted_%d_stride_%d", test.extracted, test.stride), func(t *testing.T) {
+			got, err := lowEntropyEncodedPayloadLen(test.extracted, test.stride)
+			if err != nil {
+				t.Fatalf("lowEntropyEncodedPayloadLen() failed: %v", err)
+			}
+			if got != test.want || got%lowEntropyChunkLen != 0 {
+				t.Errorf("lowEntropyEncodedPayloadLen(%d, %d) = %d, want %d and a multiple of %d", test.extracted, test.stride, got, test.want, lowEntropyChunkLen)
+			}
+		})
+	}
+
+	// The low entropy fields of the metadata keep their offsets: the mode is in
+	// byte 1, the payload length in bytes 22-23, the half-mask in bytes 25-28,
+	// the extracted payload length in bytes 29-30 and the rotation in byte 31.
+	das := &dataAckStruct{
+		baseStruct:             baseStruct{protocol: uint8(dataClientToServerLowEntropy)},
+		lowEntropyMode:         uint8(appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56),
+		payloadLen:             16,
+		lowEntropyMask:         0x7f7f7f7f,
+		extractedPayloadLen:    9,
+		lowEntropyMaskRotation: uint8(appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_RIGHT_1),
+	}
+	b := das.Marshal()
+	if len(b) != MetadataLength {
+		t.Fatalf("low entropy metadata length = %d, want %d", len(b), MetadataLength)
+	}
+	if got := b[1]; got != byte(appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56) {
+		t.Errorf("mode byte = %d, want %d", got, appctlpb.LowEntropyMode_LOW_ENTROPY_MODE_56)
+	}
+	if got := binary.BigEndian.Uint16(b[22:24]); got != 16 {
+		t.Errorf("payload length bytes = %d, want 16", got)
+	}
+	if got := binary.BigEndian.Uint32(b[25:29]); got != 0x7f7f7f7f {
+		t.Errorf("half-mask bytes = %08x, want 7f7f7f7f", got)
+	}
+	if got := binary.BigEndian.Uint16(b[29:31]); got != 9 {
+		t.Errorf("extracted payload length bytes = %d, want 9", got)
+	}
+	if got := b[31]; got != byte(appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_RIGHT_1) {
+		t.Errorf("rotation byte = %d, want %d", got, appctlpb.LowEntropyMaskRotation_LOW_ENTROPY_MASK_ROTATE_RIGHT_1)
 	}
 }
 

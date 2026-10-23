@@ -16,16 +16,19 @@
 package protocol
 
 import (
+	mrand "math/rand"
 	"sync"
 	"time"
 
 	"github.com/enfein/mieru/v3/pkg/cipher"
-	"github.com/enfein/mieru/v3/pkg/rng"
 )
 
 var (
 	// scheduleIdleTime determines when a underlay is considered idle.
-	scheduleIdleTime = cipher.KeyRefreshInterval + time.Duration(rng.FixedIntVH(61))*time.Second
+	// The extra delay is drawn once per process so that the connection reuse
+	// and teardown timing is not a stable fingerprint of the host name and
+	// mieru version.
+	scheduleIdleTime = cipher.KeyRefreshInterval + time.Duration(mrand.Intn(61))*time.Second
 )
 
 // ScheduleController controls scheduling a new client session to a underlay.

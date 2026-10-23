@@ -599,7 +599,7 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 	// this function returns: the next call sets it again before it blocks.
 	// Keeping one SetReadDeadline() per read instead of two keeps the timeout
 	// semantics of the read loop unchanged.
-	common.SetReadTimeout(t.conn, readOneSegmentTimeout)
+	common.SetReadTimeout(t.conn, readOneSegmentTimeout())
 
 	// Read encrypted metadata.
 	readLen := MetadataLength + cipher.DefaultOverhead
@@ -623,11 +623,14 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 	t.inBytes.Add(int64(len(encryptedMeta)))
 
 	// Replay protection of the message that starts an inbound cipher chain.
-	// The lookup is read-only: the signature is recorded after the message has
-	// passed the authentication and the framing checks below, so a forged or
-	// truncated message can't enter the cache.
+	// The signature spans the entire 24 byte wire nonce, not just the first 16
+	// bytes: a noncePattern can pin those leading bytes to a constant, which
+	// would leave almost no entropy in the signed input and make the signature
+	// collide across messages. The lookup is read-only: the signature is
+	// recorded after the message has passed the authentication and the framing
+	// checks below, so a forged or truncated message can't enter the cache.
 	isNewSessionReplay := false
-	if firstRead && streamReplayCache.Seen(replay.DomainStream, encryptedMeta[:cipher.DefaultOverhead], replay.Tag{}) {
+	if firstRead && streamReplayCache.Seen(replay.DomainStream, encryptedMeta[:cipher.DefaultNonceSize], replay.Tag{}) {
 		isNewSessionReplay = true
 	}
 
@@ -710,7 +713,7 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 		// accepted twice. Recording here, after the metadata, the payload and
 		// the padding of the message are all consistent, keeps a message that
 		// failed a check out of the cache.
-		streamReplayCache.Record(replay.DomainStream, encryptedMeta[:cipher.DefaultOverhead], replay.Tag{})
+		streamReplayCache.Record(replay.DomainStream, encryptedMeta[:cipher.DefaultNonceSize], replay.Tag{})
 	}
 	return seg, nil
 }
@@ -845,7 +848,7 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 		existingData := append(t.txScratch[:0], metaBuf[:]...)
 		existingData = append(existingData, seg.payload...)
 		padding, err := newPaddingInto(t.padScratch[:0],
-			buildRecommendedPaddingOpts(maxPaddingSize, existingData, t.send.BlockContext().UserName),
+			buildRecommendedPaddingOpts(maxPaddingSize, existingData),
 		)
 		if err != nil {
 			return fmt.Errorf("newPaddingInto() failed: %w", err)
@@ -1088,20 +1091,21 @@ func (t *StreamUnderlay) writeToConn(data []byte) error {
 // drainAfterError continues to read some data from the stream network connection
 // after an error happened to confuse possible attacks.
 func (t *StreamUnderlay) drainAfterError() {
-	// Set read deadline to avoid being blocked forever.
-	timeoutMillis := rng.IntRange(1000, 10000)
-	timeoutMillis += rng.FixedIntVH(50000) // Maximum 60 seconds.
+	// Set read deadline to avoid being blocked forever. The timeout is drawn
+	// per connection instead of adding a host-stable component: a connection
+	// that stays silent for a whole minute is itself a fingerprint, and
+	// draining only needs to absorb what a prober writes in reply.
+	timeoutMillis := rng.IntRange(500, 5000) // Maximum 5 seconds.
 	t.conn.SetReadDeadline(time.Now().Add(time.Duration(timeoutMillis) * time.Millisecond))
 
 	// Determine the read buffer size.
-	bufSizeType := rng.FixedIntVH(4)
+	bufSizeType := mrand.Intn(4)
 	bufSize := 1 << (12 + bufSizeType) // 4, 8, 16, 32 KB
 	buf := make([]byte, bufSize)
 
 	// Determine the number of bytes to read.
 	// Minimum 0 bytes, maximum bufSize bytes.
-	minRead := rng.IntRange(0, bufSize-254)
-	minRead += rng.FixedIntVH(256)
+	minRead := rng.IntRange(0, bufSize)
 
 	if minRead > 0 {
 		n, err := io.ReadAtLeast(t.conn, buf, minRead)
