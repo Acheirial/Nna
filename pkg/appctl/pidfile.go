@@ -299,8 +299,9 @@ func IsAppRunning(pidFilePath string) (running bool, pid int) {
 
 // StartAppDaemon starts the application in the background and waits until
 // the background process becomes alive. execPath is the path of the executable
-// to run, which is started with the "run" argument.
-func StartAppDaemon(execPath, pidFilePath string) error {
+// to run, which is started with the mode ("client" or "server") and the "run"
+// argument.
+func StartAppDaemon(execPath, pidFilePath, mode string) error {
 	if running, pid := IsAppRunning(pidFilePath); running {
 		log.Debugf("process %d is already running", pid)
 		return nil
@@ -311,7 +312,7 @@ func StartAppDaemon(execPath, pidFilePath string) error {
 		removePidFileIfRecords(pidFilePath, pid)
 	}
 
-	if err := spawnBackgroundProcess(execPath); err != nil {
+	if err := spawnBackgroundProcess(execPath, mode); err != nil {
 		return fmt.Errorf("spawnBackgroundProcess() failed: %w", err)
 	}
 
@@ -383,9 +384,10 @@ func pidFileRemoved(path string) bool {
 }
 
 // spawnBackgroundProcess starts the given executable, which runs with
-// the "run" argument, as a background process detached from the caller.
-func spawnBackgroundProcess(execPath string) error {
-	cmd := exec.Command(execPath, "run")
+// the mode and the "run" argument, as a background process detached from
+// the caller.
+func spawnBackgroundProcess(execPath, mode string) error {
+	cmd := exec.Command(execPath, mode, "run")
 	if errors.Is(cmd.Err, exec.ErrDot) {
 		cmd.Err = nil
 	}

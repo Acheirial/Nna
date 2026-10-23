@@ -21,6 +21,7 @@ import (
 	"crypto/ecdh"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,8 +35,8 @@ import (
 // Handshake test helpers.
 // ---------------------------------------------------------------------------
 
-// testHandshakeRequestPayload returns the payload prefix that a v2 client puts
-// at the beginning of an open session request.
+// testHandshakeRequestPayload returns the payload prefix that a client puts at
+// the beginning of an open session request.
 func testHandshakeRequestPayload(tb testing.TB, suites []cipher.Suite) []byte {
 	tb.Helper()
 	request, _, err := newHandshakeRequest(suites)
@@ -47,7 +48,7 @@ func testHandshakeRequestPayload(tb testing.TB, suites []cipher.Suite) []byte {
 
 // testHandshakeRequestPayloadWithVersion returns a handshake request payload
 // with the given protocol version range, so that a test can act as a peer that
-// doesn't share a version with the server.
+// doesn't carry the protocol version of this build.
 func testHandshakeRequestPayloadWithVersion(tb testing.TB, versionMin, versionMax uint8, suites []cipher.Suite) []byte {
 	tb.Helper()
 	request, _, err := newHandshakeRequest(suites)
@@ -59,7 +60,7 @@ func testHandshakeRequestPayloadWithVersion(tb testing.TB, versionMin, versionMa
 	return request.Marshal()
 }
 
-// testOpenSessionSegment returns the open session request of a v2 client: a
+// testOpenSessionSegment returns the open session request of a client: a
 // session control segment whose payload carries a handshake request.
 func testOpenSessionSegment(tb testing.TB, sessionID uint32, transport common.TransportProtocol) *segment {
 	tb.Helper()
@@ -80,9 +81,9 @@ func testOpenSessionSegmentWithPayload(tb testing.TB, sessionID uint32, transpor
 	return seg
 }
 
-// testHandshakeClient plays the client side of a v2 handshake with a raw
-// cipher. It is used by the tests that drive a server without a mux, because
-// such a client must build the handshake request payload and derive the session
+// testHandshakeClient plays the client side of a handshake with a raw cipher.
+// It is used by the tests that drive a server without a mux, because such a
+// client must build the handshake request payload and derive the session
 // ciphers itself.
 type testHandshakeClient struct {
 	envelope  cipher.BlockCipher
@@ -116,27 +117,15 @@ func newTestHandshakeClient(tb testing.TB, envelope cipher.BlockCipher, stateles
 }
 
 // newTestHandshakeClientWithSuites creates a raw client that offers the given
-// cipher suites in its handshake request, with the protocol version range of
-// this build. The envelope cipher of the request is independent of the offered
+// cipher suites in its handshake request, with the protocol version of this
+// build. The envelope cipher of the request is independent of the offered
 // suites.
 func newTestHandshakeClientWithSuites(tb testing.TB, envelope cipher.BlockCipher, stateless bool, suites []cipher.Suite) (*testHandshakeClient, []byte) {
-	tb.Helper()
-	return newTestHandshakeClientWithVersion(tb, envelope, stateless, suites, minSupportedProtocolVersion, maxSupportedProtocolVersion)
-}
-
-// newTestHandshakeClientWithVersion creates a raw client that offers the given
-// cipher suites with the given protocol version range, so that a test can act
-// as a version 2 peer, which derives its session keys from the handshake
-// envelope. The envelope cipher of the request is independent of the offered
-// suites.
-func newTestHandshakeClientWithVersion(tb testing.TB, envelope cipher.BlockCipher, stateless bool, suites []cipher.Suite, versionMin, versionMax uint8) (*testHandshakeClient, []byte) {
 	tb.Helper()
 	request, privateKey, err := newHandshakeRequest(suites)
 	if err != nil {
 		tb.Fatalf("newHandshakeRequest() failed: %v", err)
 	}
-	request.versionMin = versionMin
-	request.versionMax = versionMax
 	c := &testHandshakeClient{
 		envelope:  envelope,
 		priv:      privateKey,
@@ -154,7 +143,7 @@ func (c *testHandshakeClient) complete(tb testing.TB, response *handshakeRespons
 	if response.status != handshakeStatusOK {
 		tb.Fatalf("handshake response status = %d, want %d", response.status, handshakeStatusOK)
 	}
-	c2s, s2c, err := deriveSessionKeys(c.envelope, response.suite, c.priv, response.ephPub[:], c.salt[:], response.serverSalt[:], response.version, c.stateless)
+	c2s, s2c, err := deriveSessionKeys(c.envelope, response.suite, c.priv, response.ephPub[:], c.salt[:], response.serverSalt[:], c.stateless)
 	if err != nil {
 		tb.Fatalf("deriveSessionKeys() failed: %v", err)
 	}
@@ -250,6 +239,47 @@ func testRot13Payload(tb testing.TB, payload []byte) []byte {
 	}
 	tb.Errorf("the payload of a rotate-13 exchange is not valid input of testtool.TestHelperRot13")
 	return payload
+}
+
+// droppedResponseWait is how long a test waits for a response datagram before
+// it concludes that a dropped request was not answered at all.
+const droppedResponseWait = time.Second
+
+// assertNoPacketResponse verifies that no response datagram arrives at the
+// connection of a client: this is how a server drops a request it doesn't
+// answer, instead of telling a peer that it doesn't speak this protocol.
+func assertNoPacketResponse(tb testing.TB, conn net.PacketConn) {
+	tb.Helper()
+	buf := make([]byte, 1500)
+	if err := conn.SetReadDeadline(time.Now().Add(droppedResponseWait)); err != nil {
+		tb.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	n, addr, err := conn.ReadFrom(buf)
+	if err == nil {
+		tb.Fatalf("the server wrote %d bytes to %v as an answer to a dropped request", n, addr)
+	}
+	if n != 0 {
+		tb.Fatalf("the server wrote %d bytes as an answer to a dropped request", n)
+	}
+}
+
+// assertNoStreamResponse verifies that a stream connection carries no byte as
+// an answer to a dropped request: the read of a closed connection returns zero
+// bytes, and a connection that stays open without an answer reads zero bytes
+// when the deadline expires.
+func assertNoStreamResponse(tb testing.TB, conn net.Conn) {
+	tb.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(droppedResponseWait)); err != nil {
+		tb.Fatalf("SetReadDeadline() failed: %v", err)
+	}
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if n != 0 {
+		tb.Fatalf("the server wrote %d bytes as an answer to a dropped request", n)
+	}
+	if err == nil {
+		tb.Fatal("read of a dropped request succeeded with an empty buffer, want no answer")
+	}
 }
 
 // testReadPacketHandshakeResponse reads one handshake response message from a
@@ -392,6 +422,45 @@ func testServerSession(tb testing.TB, underlay any, sessionID uint32) *Session {
 	return found
 }
 
+// testSessionMap returns the session map of a server underlay.
+func testSessionMap(underlay any) *sync.Map {
+	switch u := underlay.(type) {
+	case *PacketUnderlay:
+		return &u.sessionMap
+	case *StreamUnderlay:
+		return &u.sessionMap
+	default:
+		return nil
+	}
+}
+
+// waitForSessionClose waits until a server underlay has closed the session of a
+// request it didn't accept. A cleanup pass removes a closed session from the map
+// of the underlay, so a session that was registered and then removed counts as
+// closed as well.
+func waitForSessionClose(t *testing.T, underlay any, sessionID uint32) {
+	t.Helper()
+	sessions := testSessionMap(underlay)
+	if sessions == nil {
+		t.Fatalf("underlay %T has no session map", underlay)
+	}
+	seenRegistered := false
+	waitForCondition(t, 5*time.Second, "the server to close the session of the request", func() bool {
+		value, ok := sessions.Load(sessionID)
+		if !ok {
+			return seenRegistered
+		}
+		seenRegistered = true
+		session := value.(*Session)
+		select {
+		case <-session.closedChan:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // End to end tests.
 // ---------------------------------------------------------------------------
@@ -433,12 +502,9 @@ func TestHandshakeEndToEnd(t *testing.T) {
 		{
 			// The first suite of the client protects the handshake envelope, so
 			// this case negotiates a 32 bytes key suite out of a 16 bytes
-			// envelope. From protocol version 3 on the session keys are derived
-			// from the negotiated suite, so the server preference order selects
-			// XChaCha20-Poly1305 even though the client prefers the shorter key
-			// of AES-128-GCM. The version 2 expectation of the same lists is
-			// covered by TestAcceptHandshakeVersionSelectsSuite: there the
-			// envelope filter selects AES-128-GCM.
+			// envelope. The session keys are derived from the negotiated suite,
+			// so the server preference order selects XChaCha20-Poly1305 even
+			// though the client prefers the shorter key of AES-128-GCM.
 			name:          "tcp client prefers a suite with a short key",
 			network:       "tcp",
 			transport:     common.StreamTransport,
@@ -585,9 +651,9 @@ func TestHandshakeEndToEnd(t *testing.T) {
 				t.Fatalf("server to client cipher suite = %v, want %v", got, tc.wantDataSuite)
 			}
 			// The data plane may negotiate a suite with a longer key than the
-			// cipher that protected the handshake envelope, which is why the
-			// session keys are derived from the negotiated suite from version 3
-			// on. The envelope cipher is the first suite the client offers.
+			// cipher that protected the handshake envelope, because the session
+			// keys are derived from the negotiated suite. The envelope cipher is
+			// the first suite the client offers.
 			if tc.envelopeLen > 0 {
 				if got := clientStaticCipher(t, session).Suite().KeyLen(); got != tc.envelopeLen {
 					t.Fatalf("client handshake envelope key length = %d, want %d", got, tc.envelopeLen)
@@ -666,9 +732,11 @@ func findServerUnderlay(t *testing.T, mux *Mux) Underlay {
 	return nil
 }
 
-// TestHandshakeRejectsIncompatibleRequests verifies that the server answers a
-// request it can't handshake with a diagnostic response instead of a panic,
-// that the response carries the right status, and that no session is created.
+// TestHandshakeRejectsIncompatibleRequests verifies that the server drops a
+// request it can't handshake with, without writing any byte and without a
+// session that reaches the application, and that a peer which speaks the
+// protocol version but no common cipher suite is still told why the handshake
+// failed.
 func TestHandshakeRejectsIncompatibleRequests(t *testing.T) {
 	const userName = "handshake-reject-user"
 	password := []byte(t.Name())
@@ -680,40 +748,69 @@ func TestHandshakeRejectsIncompatibleRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	envelope.SetBlockContext(cipher.BlockContext{UserName: userName})
+	envelope.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 
-	testCases := []struct {
-		name       string
-		payload    []byte
-		wantStatus uint8
+	// The second entry of the suite list copies the first one, so the request
+	// offers the same suite twice and its preference list is malformed.
+	duplicateSuites := testHandshakeRequestPayloadWithVersion(t, protocolVersion, protocolVersion, []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES128GCM})
+	duplicateSuites[handshakeRequestHeaderLen+1] = duplicateSuites[handshakeRequestHeaderLen]
+
+	// A request that is not a handshake of protocolVersion is dropped without an
+	// answer, so the server writes no byte for it.
+	droppedTestCases := []struct {
+		name    string
+		payload []byte
 	}{
 		{
-			name:       "legacy protocol version",
-			payload:    append([]byte{1, 1, 1, byte(cipher.SuiteXChaCha20Poly1305)}, make([]byte, 48)...),
-			wantStatus: handshakeStatusNoVersion,
+			name:    "protocol version of a previous peer",
+			payload: append([]byte{2, 2, 1, byte(cipher.SuiteXChaCha20Poly1305)}, make([]byte, 48)...),
 		},
 		{
-			name:       "truncated handshake request",
-			payload:    []byte{minSupportedProtocolVersion, maxSupportedProtocolVersion, 1},
-			wantStatus: handshakeStatusNoVersion,
+			name:    "protocol version of the oldest peer",
+			payload: append([]byte{1, 1, 1, byte(cipher.SuiteXChaCha20Poly1305)}, make([]byte, 48)...),
 		},
 		{
-			name:       "no common protocol version",
-			payload:    testHandshakeRequestPayloadWithVersion(t, maxSupportedProtocolVersion+1, maxSupportedProtocolVersion+1, nil),
-			wantStatus: handshakeStatusNoVersion,
+			name:    "payload shorter than the handshake request header",
+			payload: []byte{protocolVersion, protocolVersion},
 		},
 		{
-			name:       "invalid version range",
-			payload:    testHandshakeRequestPayloadWithVersion(t, 3, 2, nil),
-			wantStatus: handshakeStatusNoVersion,
+			name:    "truncated handshake request",
+			payload: []byte{protocolVersion, protocolVersion, 1},
 		},
 		{
-			name:       "no common cipher suite",
-			payload:    testHandshakeRequestPayloadWithVersion(t, minSupportedProtocolVersion, maxSupportedProtocolVersion, []cipher.Suite{cipher.SuiteAES256GCM}),
-			wantStatus: handshakeStatusNoSuite,
+			name:    "zero cipher suites",
+			payload: []byte{protocolVersion, protocolVersion, 0},
+		},
+		{
+			name:    "unknown cipher suite",
+			payload: append([]byte{protocolVersion, protocolVersion, 1, 7}, make([]byte, 48)...),
+		},
+		{
+			name:    "duplicate cipher suite",
+			payload: duplicateSuites,
+		},
+		{
+			name:    "version range below the protocol version",
+			payload: testHandshakeRequestPayloadWithVersion(t, 1, 2, nil),
+		},
+		{
+			name:    "version range above the protocol version",
+			payload: testHandshakeRequestPayloadWithVersion(t, protocolVersion+1, protocolVersion+1, nil),
+		},
+		{
+			name:    "invalid version range",
+			payload: testHandshakeRequestPayloadWithVersion(t, protocolVersion, 2, nil),
 		},
 	}
-	for i, tc := range testCases {
+
+	clientConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.ListenPacket() client failed: %v", err)
+	}
+	defer clientConn.Close()
+
+	var sentBytes int64
+	for i, tc := range droppedTestCases {
 		t.Run(tc.name, func(t *testing.T) {
 			sessionID := uint32(100 + i)
 			ss := &sessionStruct{
@@ -722,40 +819,64 @@ func TestHandshakeRejectsIncompatibleRequests(t *testing.T) {
 				payloadLen: uint16(len(tc.payload)),
 			}
 			wire := testBuildPacketMessage(t, envelope, ss, tc.payload)
-
-			clientConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatalf("net.ListenPacket() client failed: %v", err)
-			}
-			defer clientConn.Close()
 			if _, err := clientConn.WriteTo(wire, server.conn.LocalAddr()); err != nil {
 				t.Fatalf("WriteTo() failed: %v", err)
 			}
+			sentBytes += int64(len(wire))
 
-			response := testReadPacketHandshakeResponse(t, clientConn, envelope)
-			if response.status != tc.wantStatus {
-				t.Fatalf("handshake status = %d, want %d", response.status, tc.wantStatus)
+			// The event loop of the underlay reads a datagram and dispatches it
+			// in one pass, so waiting for the bytes of the request and for the
+			// session of the request to be closed makes the assertions below
+			// independent of the scheduling of that loop.
+			waitForCondition(t, 5*time.Second, "the server to read the open session request", func() bool {
+				return server.inBytes.Load() >= sentBytes
+			})
+			// The session of the request must be closed, and it must never
+			// reach the application.
+			waitForSessionClose(t, server, sessionID)
+			if got := server.outBytes.Load(); got != 0 {
+				t.Fatalf("the server wrote %d bytes in answer to a dropped request", got)
 			}
-			if response.version != 0 || response.suite != 0 {
-				t.Fatalf("failed handshake response = (version %d, suite %d), want zero values", response.version, response.suite)
-			}
-			// The rejected session must not be visible to the application, and
-			// it must be closed.
+			// The dropped session must not be visible to the application.
 			select {
 			case conn := <-server.readySessions:
-				t.Fatalf("server accepted a session for a rejected request: %v", conn)
+				t.Fatalf("server accepted a session for a dropped request: %v", conn)
 			default:
-			}
-			if value, ok := server.sessionMap.Load(sessionID); ok {
-				session := value.(*Session)
-				select {
-				case <-session.closedChan:
-				default:
-					t.Error("rejected session is not closed")
-				}
 			}
 		})
 	}
+	// None of the dropped requests was answered with a datagram.
+	assertNoPacketResponse(t, clientConn)
+
+	// A peer that speaks the protocol version and shares no cipher suite is
+	// answered, because the handshake itself is compatible.
+	t.Run("no common cipher suite", func(t *testing.T) {
+		const sessionID = 200
+		payload := testHandshakeRequestPayloadWithVersion(t, protocolVersion, protocolVersion, []cipher.Suite{cipher.SuiteAES256GCM})
+		ss := &sessionStruct{
+			baseStruct: baseStruct{protocol: uint8(openSessionRequest)},
+			sessionID:  sessionID,
+			payloadLen: uint16(len(payload)),
+		}
+		if _, err := clientConn.WriteTo(testBuildPacketMessage(t, envelope, ss, payload), server.conn.LocalAddr()); err != nil {
+			t.Fatalf("WriteTo() failed: %v", err)
+		}
+		response := testReadPacketHandshakeResponse(t, clientConn, envelope)
+		if response.status != handshakeStatusNoSuite {
+			t.Fatalf("handshake status = %d, want %d", response.status, handshakeStatusNoSuite)
+		}
+		if response.version != 0 || response.suite != 0 {
+			t.Fatalf("failed handshake response = (version %d, suite %d), want zero values", response.version, response.suite)
+		}
+		// The rejected session must not be visible to the application, and it
+		// must be closed.
+		select {
+		case conn := <-server.readySessions:
+			t.Fatalf("server accepted a session for a rejected request: %v", conn)
+		default:
+		}
+		waitForSessionClose(t, server, sessionID)
+	})
 }
 
 // TestHandshakeAcceptsPeerClockOffset verifies that a peer whose clock is one
@@ -778,7 +899,7 @@ func TestHandshakeAcceptsPeerClockOffset(t *testing.T) {
 			t.Fatalf("BlockCipherListFromPassword() failed: %v", err)
 		}
 		envelope := slotCiphers[slot]
-		envelope.SetBlockContext(cipher.BlockContext{UserName: userName})
+		envelope.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 
 		client, requestPayload := newTestHandshakeClient(t, envelope, true)
 		sessionID := uint32(200 + slot)
@@ -832,10 +953,11 @@ func TestHandshakeAcceptsPeerClockOffset(t *testing.T) {
 	}
 }
 
-// TestHandshakeStreamRejectsLegacyRequest verifies that a stream underlay
-// answers, and closes, an open session request that doesn't carry the handshake
-// of this protocol version.
-func TestHandshakeStreamRejectsLegacyRequest(t *testing.T) {
+// TestHandshakeStreamDropsUnsupportedRequest verifies that a stream underlay
+// doesn't answer an open session request that doesn't carry the handshake of
+// this protocol version: it writes no byte, it closes the connection, and no
+// session reaches the application.
+func TestHandshakeStreamDropsUnsupportedRequest(t *testing.T) {
 	const userName = "handshake-stream-reject-user"
 	password := []byte(t.Name())
 	credential := cipher.HashPassword(password, []byte(userName))
@@ -864,10 +986,11 @@ func TestHandshakeStreamRejectsLegacyRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	envelope.SetBlockContext(cipher.BlockContext{UserName: userName})
+	envelope.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 
-	// A version 1 client sends application data where a v2 client sends its
-	// handshake request.
+	// The payload of a peer that doesn't speak this protocol version: a client
+	// of a previous version sends application data where a client of this build
+	// sends its handshake request.
 	const sessionID = 300
 	payload := bytes.Repeat([]byte{0x17}, handshakeRequestFixedLen)
 	ss := &sessionStruct{
@@ -876,7 +999,7 @@ func TestHandshakeStreamRejectsLegacyRequest(t *testing.T) {
 		payloadLen: uint16(len(payload)),
 	}
 	if _, err := clientConn.Write(testBuildStreamMessage(t, envelope, ss, payload)); err != nil {
-		t.Fatalf("Write() of the legacy request failed: %v", err)
+		t.Fatalf("Write() of the unsupported request failed: %v", err)
 	}
 
 	seg, err := underlay.readOneSegment()
@@ -887,30 +1010,21 @@ func TestHandshakeStreamRejectsLegacyRequest(t *testing.T) {
 		t.Fatalf("onOpenSessionRequest() failed: %v", err)
 	}
 
-	// The server answers with a diagnostic response, with no panic and no
-	// session that reaches the application.
-	clientEnvelope, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, false)
-	if err != nil {
-		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
+	// The connection is closed without an answer, with no panic.
+	select {
+	case <-underlay.done:
+	default:
+		t.Error("the underlay of a dropped request is still open")
 	}
-	clientEnvelope.SetBlockContext(cipher.BlockContext{UserName: userName})
-	response := testReadStreamHandshakeResponse(t, clientConn, clientEnvelope)
-	if response.status != handshakeStatusNoVersion {
-		t.Fatalf("handshake status = %d, want %d", response.status, handshakeStatusNoVersion)
-	}
+	assertNoStreamResponse(t, clientConn)
+
+	// No session of a dropped request reaches the application.
 	select {
 	case conn := <-underlay.readySessions:
-		t.Fatalf("server accepted a session for a legacy request: %v", conn)
+		t.Fatalf("server accepted a session for an unsupported request: %v", conn)
 	default:
 	}
-	if value, ok := underlay.sessionMap.Load(sessionID); ok {
-		session := value.(*Session)
-		select {
-		case <-session.closedChan:
-		default:
-			t.Error("rejected session is not closed")
-		}
-	}
+	waitForSessionClose(t, underlay, sessionID)
 }
 
 // TestHandshakeStreamEndToEndRejectsWrongKey verifies that the stream data
@@ -949,7 +1063,7 @@ func TestHandshakeStreamEndToEndRejectsWrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	envelope.SetBlockContext(cipher.BlockContext{UserName: userName})
+	envelope.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 	client, requestPayload := newTestHandshakeClientWithSuites(t, envelope, false, []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES256GCM})
 
 	const sessionID = 400
@@ -973,7 +1087,7 @@ func TestHandshakeStreamEndToEndRejectsWrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	responseEnvelope.SetBlockContext(cipher.BlockContext{UserName: userName})
+	responseEnvelope.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 	response := testReadStreamHandshakeResponse(t, clientConn, responseEnvelope)
 	client.complete(t, response)
 

@@ -540,7 +540,7 @@ func buildServerUserStreamWire(t *testing.T, credential []byte, userName string,
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	block.SetBlockContext(cipher.BlockContext{UserName: userName})
+	block.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 	encryptedMetadata := make([]byte, block.NonceSize()+len(plaintextMetadata)+block.Overhead())
 	if err := block.Encrypt(encryptedMetadata[:0], plaintextMetadata); err != nil {
 		t.Fatalf("Encrypt(metadata) failed: %v", err)
@@ -575,7 +575,7 @@ func buildServerUserPacketWire(t *testing.T, credential []byte, userName string,
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	block.SetBlockContext(cipher.BlockContext{UserName: userName})
+	block.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 	encryptedMetadata := make([]byte, block.NonceSize()+len(plaintextMetadata)+block.Overhead())
 	if err := block.Encrypt(encryptedMetadata[:0], plaintextMetadata); err != nil {
 		t.Fatalf("Encrypt(metadata) failed: %v", err)
@@ -604,7 +604,7 @@ func newServerUserPacketSender(t *testing.T, serverAddr net.Addr, credential []b
 		conn.Close()
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	block.SetBlockContext(cipher.BlockContext{UserName: userName})
+	block.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 	return &PacketUnderlay{
 		baseUnderlay: *newBaseUnderlay(true, 1400, nil),
 		conn:         conn,

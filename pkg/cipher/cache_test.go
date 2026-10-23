@@ -17,12 +17,9 @@ package cipher
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 // The synthetic entries of the capacity tests use two key epochs that only have
@@ -56,8 +53,8 @@ func withCacheRestored(t *testing.T, fn func()) {
 // fillTestCache inserts count synthetic entries of the given key epoch,
 // oldest first, and returns the keys in insertion order. It writes the cache
 // directly to keep the test independent of the key derivation, and it varies
-// the cipher suite and the iteration variant of the keys so that a filled cache
-// looks like the cache of a multi user server.
+// the cipher suite of the keys so that a filled cache looks like the cache of a
+// multi user server.
 func fillTestCache(t *testing.T, count int, epoch int64) []cipherCacheKey {
 	t.Helper()
 	suites := AllSuites()
@@ -65,14 +62,9 @@ func fillTestCache(t *testing.T, count int, epoch int64) []cipherCacheKey {
 	blockCipherCacheMu.Lock()
 	defer blockCipherCacheMu.Unlock()
 	for i := range count {
-		iter := KeyIter
-		if i%2 == 0 {
-			iter = KeyIterV3
-		}
 		key := cipherCacheKey{
 			password: fmt.Sprintf("synthetic-password-%d", i),
 			suite:    suites[i%len(suites)],
-			iter:     iter,
 		}
 		if _, ok := blockCipherCache[key]; ok {
 			t.Fatalf("synthetic key %d is not unique", i)
@@ -97,13 +89,12 @@ func cacheTestKey(i int) cipherCacheKey {
 	return cipherCacheKey{
 		password: fmt.Sprintf("current-epoch-password-%d", i),
 		suite:    suites[i%len(suites)],
-		iter:     KeyIterV3,
 	}
 }
 
 func TestGetBlockCipherList(t *testing.T) {
 	password := string([]byte{0x00, 0xff, 0x08, 0x09, 0x06, 0x04})
-	ciphers, err := getBlockCipherList(password, SuiteXChaCha20Poly1305, true, KeyIterV3)
+	ciphers, err := getBlockCipherList(password, SuiteXChaCha20Poly1305, true)
 	if err != nil {
 		t.Fatalf("getBlockCipherList() failed: %v", err)
 	}
@@ -116,7 +107,7 @@ func TestGetBlockCipherList(t *testing.T) {
 		}
 	}
 
-	ciphers, err = getBlockCipherList(password, SuiteXChaCha20Poly1305, false, KeyIterV3)
+	ciphers, err = getBlockCipherList(password, SuiteXChaCha20Poly1305, false)
 	if err != nil {
 		t.Fatalf("getBlockCipherList() failed: %v", err)
 	}
@@ -133,12 +124,12 @@ func TestGetBlockCipherList(t *testing.T) {
 func TestGetCachedCiphersKeyedBySuite(t *testing.T) {
 	password := string([]byte{0x11, 0x22, 0x33})
 	now := time.Now()
-	first, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now, KeyIterV3)
+	first, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now)
 	if err != nil {
 		t.Fatalf("getCachedCiphers() failed: %v", err)
 	}
 	// The same password and cipher suite must hit the same cache entry.
-	again, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now, KeyIterV3)
+	again, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now)
 	if err != nil {
 		t.Fatalf("getCachedCiphers() failed: %v", err)
 	}
@@ -154,7 +145,7 @@ func TestGetCachedCiphersKeyedBySuite(t *testing.T) {
 	// and that newBlockCipher() retained only suite.KeyLen() bytes of the
 	// PBKDF2 output.
 	for _, suite := range []Suite{SuiteAES256GCM, SuiteAES128GCM} {
-		other, err := getCachedCiphers(password, suite, now, KeyIterV3)
+		other, err := getCachedCiphers(password, suite, now)
 		if err != nil {
 			t.Fatalf("getCachedCiphers(%s) failed: %v", suite, err)
 		}
@@ -177,7 +168,7 @@ func TestGetCachedCiphersKeyedBySuite(t *testing.T) {
 		}
 	}
 	// A different password must use a different cache entry.
-	otherPassword, err := getCachedCiphers(password+"x", SuiteXChaCha20Poly1305, now, KeyIterV3)
+	otherPassword, err := getCachedCiphers(password+"x", SuiteXChaCha20Poly1305, now)
 	if err != nil {
 		t.Fatalf("getCachedCiphers() failed: %v", err)
 	}
@@ -186,67 +177,14 @@ func TestGetCachedCiphersKeyedBySuite(t *testing.T) {
 	}
 }
 
-func TestGetCachedCiphersKeyedByKeyIter(t *testing.T) {
-	password := string([]byte{0x5a, 0x6b, 0x7c})
-	now := time.Now()
-	salts := saltFromTime(now)
-	legacy, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now, KeyIter)
-	if err != nil {
-		t.Fatalf("getCachedCiphers() failed: %v", err)
-	}
-	v3, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now, KeyIterV3)
-	if err != nil {
-		t.Fatalf("getCachedCiphers() failed: %v", err)
-	}
-	// The two key derivation variants must not share a cache entry, and each
-	// entry must hold the key material of its own iteration count.
-	if legacy == v3 {
-		t.Fatal("getCachedCiphers() returned the same entry for KeyIter and KeyIterV3")
-	}
-	for _, test := range []struct {
-		name  string
-		entry *cachedCiphers
-		iter  int
-	}{
-		{name: "KeyIter", entry: legacy, iter: KeyIter},
-		{name: "KeyIterV3", entry: v3, iter: KeyIterV3},
-	} {
-		want := pbkdf2.Key([]byte(password), salts[1], test.iter, DefaultKeyLen, sha256.New)
-		if got := test.entry.cipherList[1].key[:]; !bytes.Equal(got, want) {
-			t.Errorf("cached %s key = %x, want %x", test.name, got, want)
-		}
-	}
-	// A repeated lookup must hit the entry of its own variant, without
-	// disturbing the entry of the other one.
-	againLegacy, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now, KeyIter)
-	if err != nil {
-		t.Fatalf("getCachedCiphers() failed: %v", err)
-	}
-	if againLegacy != legacy {
-		t.Errorf("getCachedCiphers(KeyIter) returned a different entry after the KeyIterV3 lookup")
-	}
-	againV3, err := getCachedCiphers(password, SuiteXChaCha20Poly1305, now, KeyIterV3)
-	if err != nil {
-		t.Fatalf("getCachedCiphers() failed: %v", err)
-	}
-	if againV3 != v3 {
-		t.Errorf("getCachedCiphers(KeyIterV3) returned a different entry after the KeyIter lookup")
-	}
-	wantV3 := pbkdf2.Key([]byte(password), salts[1], KeyIterV3, DefaultKeyLen, sha256.New)
-	if got := v3.cipherList[1].key[:]; !bytes.Equal(got, wantV3) {
-		t.Errorf("cached KeyIterV3 key = %x after repeated lookups, want %x", got, wantV3)
-	}
-}
-
 // TestCacheCapacityModel checks that the cache can hold the discovery material
-// of a multi user server: a user occupies one entry per cipher suite and per key
-// iteration variant, so thousands of distinct (password, suite, iter) entries
-// must coexist without shadowing each other, and the documented capacity of the
-// cache must stay in reach of a server with about 1300 users.
+// of a multi user server: a user occupies one entry per cipher suite, so
+// thousands of distinct (password, suite) entries must coexist without
+// shadowing each other, and the documented capacity of the cache must stay in
+// reach of a server with about 2700 users.
 func TestCacheCapacityModel(t *testing.T) {
 	withCacheRestored(t, func() {
-		// 3000 entries: about 500 users of the default suite list, each with the
-		// protocol v3 and the legacy key derivation variant.
+		// 3000 entries: about 1000 users of the default suite list.
 		const entries = 3000
 		keys := fillTestCache(t, entries, cacheTestCurrentEpoch)
 		if got := cacheLen(); got != entries {
@@ -260,11 +198,11 @@ func TestCacheCapacityModel(t *testing.T) {
 		}
 
 		// The capacity model documented on maxCacheSize: a user of the default
-		// suite list occupies len(suites) * 2 entries per key epoch, and the
-		// cache must cover at least 1300 such users, because a miss now costs
+		// suite list occupies len(suites) entries per key epoch, and the cache
+		// must cover at least 2700 such users, because a miss now costs
 		// KeyIterV3 key derivations.
-		const documentedUsers = 1300
-		entriesPerUser := len(AllSuites()) * 2
+		const documentedUsers = 2700
+		entriesPerUser := len(AllSuites())
 		if got := maxCacheSize / entriesPerUser; got < documentedUsers {
 			t.Fatalf("maxCacheSize %d holds %d users at %d entries per user, want at least %d users", maxCacheSize, got, entriesPerUser, documentedUsers)
 		}
@@ -279,13 +217,13 @@ func TestCacheEvictionPrefersRetiredEpoch(t *testing.T) {
 	withCacheRestored(t, func() {
 		retired := fillTestCache(t, maxCacheSize, cacheTestRetiredEpoch)
 		// The filled entries differ in every component of the cache key: the
-		// password, the cipher suite and the key iteration variant.
-		variants := make(map[[2]int]struct{})
+		// password and the cipher suite.
+		suites := make(map[Suite]struct{})
 		for _, key := range retired {
-			variants[[2]int{int(key.suite), key.iter}] = struct{}{}
+			suites[key.suite] = struct{}{}
 		}
-		if want := len(AllSuites()) * 2; len(variants) != want {
-			t.Fatalf("filled cache covers %d cipher suite and iteration variants, want %d", len(variants), want)
+		if want := len(AllSuites()); len(suites) != want {
+			t.Fatalf("filled cache covers %d cipher suites, want %d", len(suites), want)
 		}
 
 		const currentEntries = 4
@@ -396,12 +334,12 @@ func TestCacheEvictionDropsOldestWithoutRetiredEpoch(t *testing.T) {
 }
 
 // TestCacheEntryEpochIsAValueProperty keeps the shape of the cache key: the key
-// is (password, suite, iter), while the key epoch belongs to the cached value.
+// is (password, suite), while the key epoch belongs to the cached value.
 // A new epoch therefore replaces the value in place instead of adding a second
 // entry for the same key.
 func TestCacheEntryEpochIsAValueProperty(t *testing.T) {
 	withCacheRestored(t, func() {
-		key := cipherCacheKey{password: "epoch-replacement", suite: SuiteXChaCha20Poly1305, iter: KeyIterV3}
+		key := cipherCacheKey{password: "epoch-replacement", suite: SuiteXChaCha20Poly1305}
 		storeCachedCiphers(key, &cachedCiphers{epoch: cacheTestRetiredEpoch})
 		storeCachedCiphers(key, &cachedCiphers{epoch: cacheTestCurrentEpoch})
 		if got := cacheLen(); got != 1 {

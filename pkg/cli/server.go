@@ -30,77 +30,76 @@ import (
 
 // RegisterServerCommands registers all the server side CLI commands.
 func RegisterServerCommands() {
-	binaryName = "mita"
 	RegisterCallback(
-		[]string{"", "help"},
+		[]string{"", "server", "help"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		serverHelpFunc,
 	)
 	RegisterCallback(
-		[]string{"", "start"},
+		[]string{"", "server", "start"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		serverStartFunc,
 	)
 	RegisterCallback(
-		[]string{"", "run"},
+		[]string{"", "server", "run"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		serverRunFunc,
 	)
 	RegisterCallback(
-		[]string{"", "stop"},
+		[]string{"", "server", "stop"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		serverStopFunc,
 	)
 	RegisterCallback(
-		[]string{"", "status"},
+		[]string{"", "server", "status"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		serverStatusFunc,
 	)
 	RegisterCallback(
-		[]string{"", "apply", "config"},
+		[]string{"", "server", "apply", "config"},
 		func(s []string) error {
-			if len(s) < 4 {
-				return fmt.Errorf("usage: mita apply config <FILE>. no config file is provided")
-			} else if len(s) > 4 {
-				return fmt.Errorf("usage: mita apply config <FILE>. more than 1 config file is provided")
+			if len(s) < 5 {
+				return fmt.Errorf("usage: shadowlemon server apply config <FILE>. no config file is provided")
+			} else if len(s) > 5 {
+				return fmt.Errorf("usage: shadowlemon server apply config <FILE>. more than 1 config file is provided")
 			}
 			return nil
 		},
 		serverApplyConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "replace", "config"},
+		[]string{"", "server", "replace", "config"},
 		func(s []string) error {
-			if len(s) < 4 {
-				return fmt.Errorf("usage: mita replace config <FILE>. no config file is provided")
-			} else if len(s) > 4 {
-				return fmt.Errorf("usage: mita replace config <FILE>. more than 1 config file is provided")
+			if len(s) < 5 {
+				return fmt.Errorf("usage: shadowlemon server replace config <FILE>. no config file is provided")
+			} else if len(s) > 5 {
+				return fmt.Errorf("usage: shadowlemon server replace config <FILE>. more than 1 config file is provided")
 			}
 			return nil
 		},
 		serverReplaceConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "describe", "config"},
+		[]string{"", "server", "describe", "config"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 3)
+			return unexpectedArgsError(s, 4)
 		},
 		serverDescribeConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "version"},
+		[]string{"", "server", "version"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		versionFunc,
 	)
@@ -108,52 +107,52 @@ func RegisterServerCommands() {
 
 var serverHelpFunc = func(s []string) error {
 	helpFmt := helpFormatter{
-		appName: "mita",
+		appName: "shadowlemon server",
 		entries: []helpCmdEntry{
 			{
-				cmd:  "help",
-				help: []string{"Show mita server help."},
+				cmd:  "server help",
+				help: []string{"Show shadowlemon server help."},
 			},
 			{
-				cmd:  "start",
-				help: []string{"Start mita server in background."},
+				cmd:  "server start",
+				help: []string{"Start shadowlemon server in background."},
 			},
 			{
-				cmd:  "stop",
-				help: []string{"Stop mita server."},
+				cmd:  "server stop",
+				help: []string{"Stop shadowlemon server."},
 			},
 			{
-				cmd:  "status",
-				help: []string{"Check mita server status."},
+				cmd:  "server status",
+				help: []string{"Check shadowlemon server status."},
 			},
 			{
-				cmd: "apply config <JSON_FILE>",
+				cmd: "server apply config <JSON_FILE>",
 				help: []string{
 					"Apply server configuration patch from a file.",
 					"It merges the patch with existing server configuration.",
 				},
 			},
 			{
-				cmd: "replace config <JSON_FILE>",
+				cmd: "server replace config <JSON_FILE>",
 				help: []string{
 					"Replace saved server configuration with a complete JSON file.",
 					"Omitted settings and users are removed.",
 				},
 			},
 			{
-				cmd:  "describe config",
+				cmd:  "server describe config",
 				help: []string{"Show current server configuration."},
 			},
 			{
-				cmd:  "version",
-				help: []string{"Show mita server version."},
+				cmd:  "server version",
+				help: []string{"Show shadowlemon server version."},
 			},
 		},
 		advanced: []helpCmdEntry{
 			{
-				cmd: "run",
+				cmd: "server run",
 				help: []string{
-					"Run mita server in foreground.",
+					"Run shadowlemon server in foreground.",
 					"Use environment variable MITA_CONFIG_JSON_FILE to load configuration.",
 				},
 			},
@@ -179,14 +178,14 @@ var serverStartFunc = func(s []string) error {
 
 	pidFilePath := appctl.ServerPidFilePath()
 	if running, _ := appctl.IsAppRunning(pidFilePath); running {
-		log.Infof("mita server is running")
+		log.Infof("shadowlemon server is running")
 		return nil
 	}
 
-	if err := appctl.StartAppDaemon(s[0], pidFilePath); err != nil {
+	if err := appctl.StartAppDaemon(s[0], pidFilePath, "server"); err != nil {
 		return fmt.Errorf(stderror.StartServerFailedErr, err)
 	}
-	log.Infof("mita server is started")
+	log.Infof("shadowlemon server is started")
 	return nil
 }
 
@@ -237,13 +236,13 @@ var serverRunFunc = func(s []string) error {
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 	sig := <-stopChan
-	log.Infof("received signal %v, stop mita server", sig)
+	log.Infof("received signal %v, stop shadowlemon server", sig)
 
 	if err := appctl.StopServerProxy(); err != nil {
 		log.Errorf("StopServerProxy() failed: %v", err)
 	}
 
-	log.Infof("mita server exit now")
+	log.Infof("shadowlemon server exit now")
 	return nil
 }
 
@@ -257,22 +256,22 @@ var serverStopFunc = func(s []string) error {
 		log.Infof(stderror.ServerNotRunning)
 		return nil
 	}
-	log.Infof("mita server is stopped")
+	log.Infof("shadowlemon server is stopped")
 	return nil
 }
 
 var serverStatusFunc = func(s []string) error {
 	pidFilePath := appctl.ServerPidFilePath()
 	if running, _ := appctl.IsAppRunning(pidFilePath); running {
-		log.Infof("mita server status is %q", "RUNNING")
+		log.Infof("shadowlemon server status is %q", "RUNNING")
 	} else {
-		log.Infof("mita server status is %q", "STOPPED")
+		log.Infof("shadowlemon server status is %q", "STOPPED")
 	}
 	return nil
 }
 
 var serverApplyConfigFunc = func(s []string) error {
-	path := s[3]
+	path := s[4]
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("os.ReadFile(%q) failed: %w", path, err)
@@ -306,7 +305,7 @@ var serverApplyConfigFunc = func(s []string) error {
 }
 
 var serverReplaceConfigFunc = func(s []string) error {
-	path := s[3]
+	path := s[4]
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("os.ReadFile(%q) failed: %w", path, err)

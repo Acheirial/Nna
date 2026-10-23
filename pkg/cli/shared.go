@@ -21,8 +21,8 @@ import (
 )
 
 // versionFunc is the callback of the "version" command,
-// which is shared by mieru client and mita server.
+// which is shared by the client and the server.
 var versionFunc = func(_ []string) error {
-	log.Infof(version.AppVersion)
+	log.Infof("%s, protocol %s", version.AppVersion, version.ProtocolIdentifier())
 	return nil
 }

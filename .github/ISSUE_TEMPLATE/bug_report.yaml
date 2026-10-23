@@ -33,12 +33,12 @@ body:
   - type: textarea
     attributes:
       label: 服务器版本
-      description: 如果您使用原始 mita 可执行文件，请提供 `mita version` 命令的输出。
+      description: 如果您使用原始 mita 可执行文件，请提供 `shadowlemon server version` 命令的输出。
       render: shell
   - type: textarea
     attributes:
       label: 客户端版本
-      description: 如果您使用原始 mieru 可执行文件，请提供 `mieru version` 命令的输出。
+      description: 如果您使用原始 mieru 可执行文件，请提供 `shadowlemon client version` 命令的输出。
       render: shell
   - type: textarea
     attributes:

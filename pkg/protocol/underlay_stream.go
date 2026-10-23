@@ -458,15 +458,24 @@ func (t *StreamUnderlay) onOpenSessionRequest(seg *segment) error {
 		}
 	}
 	if handshakeErr != nil {
-		// The peer is told why the handshake failed by the response, and the
-		// session is closed here. The request is never delivered as session
-		// data, so an unauthenticated handshake can't reach the application.
+		// A request of a peer that doesn't speak protocolVersion is dropped
+		// without any answer: the session is torn down in silence and the
+		// connection is closed, because a connection whose first request is not
+		// a handshake of this protocol has nothing left to carry. A peer that
+		// speaks protocolVersion but no common cipher suite is told why the
+		// handshake failed by the response, and only its session is closed
+		// here. The request is never delivered as session data in either case,
+		// so an unauthenticated handshake can't reach the application.
 		//
 		// The response is written before the session is closed, unlike in the
 		// packet transport: the response has to be the first message of the
 		// static cipher chain of this connection, because a client reads its
 		// first message together with the nonce that starts that chain.
 		log.Errorf("%v rejected session %d: %v", t, sessionID, handshakeErr)
+		if response == nil {
+			session.dropWithError(handshakeErr)
+			return t.Close()
+		}
 		session.closeWithError(handshakeErr)
 		return nil
 	}
@@ -540,7 +549,7 @@ func (t *StreamUnderlay) completeClientHandshake(seg *segment) error {
 	t.recv = s2c
 	t.recvNoncePending = true
 	t.sendMutex.Unlock()
-	s.commitClientHandshake(c2s, s2c, response.version, response.suite)
+	s.commitClientHandshake(c2s, s2c, response.suite)
 	// Data segments that waited for the handshake response can be sent now.
 	s.wakeOutput()
 	return nil

@@ -13,10 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// Binary mita is the server of mieru proxy.
+// Binary shadowlemon is the unified client and server of the ShadowLemon proxy.
+//
+// The first argument selects the mode, either "client" or "server".
 package main
 
 import (
+	"os"
 	"runtime/debug"
 
 	"github.com/enfein/mieru/v3/pkg/appctl"
@@ -25,11 +28,26 @@ import (
 )
 
 func main() {
+	setLogPrefix()
 	appctl.RecordAppStartTime()
 	debug.SetGCPercent(90)
+	cli.RegisterClientCommands()
 	cli.RegisterServerCommands()
-	err := cli.ParseAndExecute()
-	if err != nil {
+	if err := cli.ParseAndExecute(); err != nil {
 		log.Fatalf("%v", err)
+	}
+}
+
+// setLogPrefix sets the daemon log prefix based on the selected mode, so that
+// the client logs start with "C" and the server logs start with "S".
+func setLogPrefix() {
+	if len(os.Args) < 2 {
+		return
+	}
+	switch os.Args[1] {
+	case "client":
+		log.LogPrefix = "C"
+	case "server":
+		log.LogPrefix = "S"
 	}
 }

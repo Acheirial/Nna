@@ -36,7 +36,7 @@ source ./libtest.sh
 #   2. the client log must explain the failure with the "no common cipher suite
 #      with the server, the client offered ..." message of pkg/protocol/session.go
 #      and must NOT report a completed handshake,
-#   3. both mita and mieru must still be RUNNING: a peer that offers a suite the
+#   3. both the server and the client must still be RUNNING: a peer that offers a suite the
 #      server doesn't allow is rejected per session, and must not take the
 #      daemons down or leave a half established session behind.
 #
@@ -47,14 +47,14 @@ source ./libtest.sh
 # (pkg/log/mieru_client_logging.go, log.NewClientLogFile()).
 CLIENT_LOG_DIR="$HOME/.cache/mieru"
 NO_COMMON_SUITE_LINE="no common cipher suite with the server, the client offered"
-HANDSHAKE_LINE="handshake completed with protocol version 3 and cipher suite"
+HANDSHAKE_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite"
 # A mismatch must be rejected per session, right after the client sent its
 # handshake request: an attempt that waits for the client handshake timeout
 # means the client never saw the diagnostic response of the server.
 HANDSHAKE_TIMEOUT_LINE="handshake timed out after"
 
 # count_client_log_matches <substring>
-# Prints how many lines of the mieru client log contain the given substring.
+# Prints how many lines of the client log contain the given substring.
 function count_client_log_matches() {
     local pattern=$1
     local count
@@ -69,9 +69,9 @@ function count_client_log_matches() {
 function print_client_log_tail() {
     local lines=$1
 
-    echo "========== BEGIN TAIL OF MIERU CLIENT LOG =========="
+    echo "========== BEGIN TAIL OF CLIENT LOG =========="
     tail -n "$lines" "$CLIENT_LOG_DIR"/*.log 2>/dev/null || true
-    echo "==========  END TAIL OF MIERU CLIENT LOG  =========="
+    echo "==========  END TAIL OF CLIENT LOG  =========="
 }
 
 # wait_for_client_log_match <substring> <max number of seconds to wait>
@@ -93,37 +93,37 @@ function wait_for_client_log_match() {
     return 1
 }
 
-# assert_daemon_running <mita|mieru> <daemon description>
+# assert_daemon_running <client|server> <daemon description>
 function assert_daemon_running() {
     local cmd=$1
     local desc=$2
     local status
 
-    if ! status=$(./"$cmd" status 2>&1); then
-        status="./$cmd status failed: $status"
+    if ! status=$(./shadowlemon "$cmd" status 2>&1); then
+        status="./shadowlemon $cmd status failed: $status"
     fi
-    echo "mieru $desc status:"
+    echo "$desc status:"
     echo "$status"
     if [[ "$status" != *RUNNING* ]]; then
-        echo "mieru $desc is not running after the server rejected a handshake"
+        echo "$desc is not running after the server rejected a handshake"
         echo "without a common cipher suite: the mismatch must be rejected per"
         echo "session instead of taking the daemon down."
         print_client_log_tail 80
-        print_mieru_client_log
+        print_client_log
         exit 1
     fi
 }
 
-# Update mieru server with the config that only allows AES-128-GCM.
+# Update server with the config that only allows AES-128-GCM.
 apply_server_config server_suite_mismatch.json
 
-# Start mieru server proxy.
+# Start the server daemon.
 start_server
 
-# Update mieru client with the config that only offers XCHACHA20-POLY1305.
+# Update client with the config that only offers XCHACHA20-POLY1305.
 apply_client_config client_suite_mismatch.json
 
-# Start mieru client.
+# Start the client.
 start_client
 
 # Start testing. The socks5 connection MUST fail: no cipher suite is shared by
@@ -148,7 +148,7 @@ if [[ "$probe_exit_code" -eq 0 ]]; then
     echo "help: check that server_suite_mismatch.json sets cipherSuites to CIPHER_SUITE_AES_128_GCM"
     echo "help: and that client_suite_mismatch.json sets profiles[0].cipherSuites to CIPHER_SUITE_XCHACHA20_POLY1305."
     print_client_log_tail 80
-    print_mieru_client_log
+    print_client_log
     exit 1
 fi
 
@@ -156,7 +156,7 @@ echo "the socks5 client never transferred data (exit code $probe_exit_code), as 
 
 # The failed handshake must be explained in the client log.
 if ! wait_for_client_log_match "$NO_COMMON_SUITE_LINE" 10; then
-    echo "the mieru client log doesn't explain why the handshake failed."
+    echo "the client log does not explain why the handshake failed."
     echo "the expected log line is written by pkg/protocol/session.go:"
     echo "  fmt.Errorf(\"no common cipher suite with the server, the client offered %v\", suites)"
     echo "and reported by pkg/protocol/mux.go at DEBUG level."
@@ -164,7 +164,7 @@ if ! wait_for_client_log_match "$NO_COMMON_SUITE_LINE" 10; then
     echo "help: and that the server allows CIPHER_SUITE_AES_128_GCM while the client offers"
     echo "help: CIPHER_SUITE_XCHACHA20_POLY1305, so discovery succeeds but negotiation doesn't."
     print_client_log_tail 80
-    print_mieru_client_log
+    print_client_log
     exit 1
 fi
 
@@ -175,11 +175,11 @@ grep -h -F "$NO_COMMON_SUITE_LINE" "$CLIENT_LOG_DIR"/*.log 2>/dev/null | head -n
 # No session may have been established.
 handshake_count=$(count_client_log_matches "$HANDSHAKE_LINE")
 if [[ "$handshake_count" -ne 0 ]]; then
-    echo "cipher suite assertion FAILED: $handshake_count session(s) completed the version 2 handshake"
+    echo "cipher suite assertion FAILED: $handshake_count session(s) completed the ShadowLemon V0.1 handshake"
     echo "although the server and the client don't share a cipher suite:"
     grep -h -F "$HANDSHAKE_LINE" "$CLIENT_LOG_DIR"/*.log 2>/dev/null | head -n 3 || true
     print_client_log_tail 80
-    print_mieru_client_log
+    print_client_log
     exit 1
 fi
 echo "cipher suite assertion passed: no session completed the handshake."
@@ -194,23 +194,23 @@ if [[ "$handshake_timeout_count" -ne 0 ]]; then
     echo "which rejects every open session request with status 2:"
     grep -h -F "$HANDSHAKE_TIMEOUT_LINE" "$CLIENT_LOG_DIR"/*.log 2>/dev/null | head -n 3 || true
     print_client_log_tail 80
-    print_mieru_client_log
+    print_client_log
     exit 1
 fi
 echo "cipher suite assertion passed: no attempt waited for the handshake timeout."
 
 # The rejected handshake must not affect the daemons.
-assert_daemon_running mita "server"
-assert_daemon_running mieru "client"
+assert_daemon_running server "server"
+assert_daemon_running client "client"
 
 print_client_log_tail 20
 
-# Stop mieru client.
+# Stop the client.
 stop_client
 
-# Stop mieru server proxy.
+# Stop the server daemon.
 stop_server
 
-delete_mieru_client_log
+delete_client_log
 
 echo "Cipher suite mismatch test is successful: the handshake was rejected and the daemons survived."

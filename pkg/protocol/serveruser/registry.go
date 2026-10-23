@@ -52,10 +52,10 @@ type user struct {
 	// suites. It also gates the single suite decryptor built from a cached
 	// hint, so a hint for a suite outside the allowed set stays usable.
 	suites []cipher.Suite
-	// decryptor accepts both key derivation variants of the envelope, see
-	// cipher.NewCompatStatelessDecryptor, so that the handshake request of an
-	// old client is still discoverable. The block it returns is the variant of
-	// the client, and it is the block used to protect the handshake response.
+	// decryptor is the stateless decryptor of this user, built over every suite
+	// in suites and the credential of the user. The block it returns is the
+	// block that authenticated the request, and it is the block used to protect
+	// the handshake response.
 	decryptor *cipher.StatelessDecryptor
 	policy    Policy
 
@@ -421,7 +421,7 @@ func buildState(users map[string]*appctlpb.User, allowedSuites []cipher.Suite) *
 			log.Warnf("Skipping server user %q: %v", input.name, err)
 			continue
 		}
-		decryptor, err := cipher.NewCompatStatelessDecryptor(suites, credential[:])
+		decryptor, err := cipher.NewStatelessDecryptor(suites, credential[:])
 		if err != nil {
 			log.Warnf("Skipping server user %q: failed to prepare credential", input.name)
 			continue
@@ -561,19 +561,14 @@ func userHintFromMetadata(encryptedMetadata []byte) [cipher.NonceSuffixLenForUse
 // hintMatches reports whether the user hint embedded in the nonce belongs to
 // this user.
 //
-// A user accepts the keyed hint of protocol v3, which requires the credential
-// shared by the client and the server, as well as the legacy hint of protocol
-// v2, which only requires the user name, so that a client that predates the
-// keyed hint stays discoverable. Accepting the legacy hint is what makes the
-// name of a registered user observable to anyone who knows that name; it is
-// kept only while old clients exist.
+// The hint is keyed: it is derived from the credential shared by the client and
+// the server as well as the user name, so the name of a registered user is not
+// observable to an attacker who only knows that name, and a hint cannot be
+// built or checked without the credential.
 //
 // A matching hint never authenticates anything: it only decides which users are
 // worth an AEAD trial, see tryState.
 func (u *user) hintMatches(nonce []byte) bool {
-	if cipher.CheckUserFromHint([]byte(u.name), nonce) {
-		return true
-	}
 	return cipher.CheckUserFromHintV3(u.pepper, []byte(u.name), nonce)
 }
 
@@ -582,20 +577,17 @@ func (u *user) hintMatches(nonce []byte) bool {
 // fallback, then remaining registry optional fallback. Each user is tried at
 // most once even when it appears in more than one phase.
 //
-// A coarse username-existence timing side channel remains as long as the
-// registry accepts the legacy hint of protocol v2: a hint that matches a
-// registered user name triggers the AEAD trial decryption of that user (up to
-// every supported cipher suite), while a hint that matches nothing costs only
-// the SHA-256 filter of every user and no AEAD work at all. The keyed hint of
-// protocol v3 closes the channel for a hint taken from a current client,
-// because such a hint cannot be built without the credential of the user, but
-// an attacker is free to send a legacy hint of its own, so the channel is only
-// gone once the legacy hint is dropped. With optional hints the difference is
-// hidden by the unconditional fallback trial; with mandatory hints it is
-// observable. The source failure cache bounds how often one source can repeat
-// the measurement with a repeated packet, but it does not remove the channel.
-// Removing it needs constant-work hashing for unmatched hints, or the removal
-// of the legacy hint from hintMatches.
+// A hint match is the only thing that narrows down which users are worth an AEAD
+// trial: a hint that matches a registered user triggers the AEAD trial
+// decryption of that user (up to every supported cipher suite), while a hint
+// that matches nothing costs only the SHA-256 filter of every user and no AEAD
+// work at all. With optional hints that difference is hidden by the
+// unconditional fallback trial; with mandatory hints it is observable, but a
+// matching hint cannot be built without the credential of a user, so the
+// measurement only confirms a hint that a client of that user already produced.
+// The source failure cache bounds how often one source can repeat the
+// measurement with a repeated packet, but it does not remove the channel;
+// removing it needs constant-work hashing for unmatched hints.
 func tryState(state *state, encryptedMeta []byte, source Source, hintMandatory bool) discoveryResult {
 	nonce := encryptedMeta[:cipher.DefaultNonceSize]
 	var trialPlaintext [metadataLength]byte
@@ -761,18 +753,18 @@ func (u *user) trySuite(suite cipher.Suite, encryptedMeta, dst []byte) (cipher.B
 }
 
 // suiteDecryptor returns the decryptor of a single cipher suite of this user,
-// building it on demand. Like the decryptor of the whole user, it accepts both
-// key derivation variants, so a cached suite hint doesn't switch a legacy
-// client to the v3 variant.
+// building it on demand. It decrypts the same envelope key derivation as the
+// decryptor of the whole user, so a cached suite hint only changes the order in
+// which the suites of a user are tried.
 func (u *user) suiteDecryptor(suite cipher.Suite) (*cipher.StatelessDecryptor, error) {
 	u.suiteMu.Lock()
 	defer u.suiteMu.Unlock()
 	if u.preferred != nil && u.preferredSuite == suite {
 		return u.preferred, nil
 	}
-	decryptor, err := cipher.NewCompatStatelessDecryptor([]cipher.Suite{suite}, u.credential[:])
+	decryptor, err := cipher.NewStatelessDecryptor([]cipher.Suite{suite}, u.credential[:])
 	if err != nil {
-		return nil, fmt.Errorf("cipher.NewCompatStatelessDecryptor() failed: %w", err)
+		return nil, fmt.Errorf("cipher.NewStatelessDecryptor() failed: %w", err)
 	}
 	u.preferredSuite = suite
 	u.preferred = decryptor

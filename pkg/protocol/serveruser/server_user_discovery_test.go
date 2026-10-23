@@ -79,7 +79,13 @@ func TestUserDiscoveryRequiresAuthentication(t *testing.T) {
 	users := userMap(makeTestUser(userName, registeredCredential))
 	unknownCredential := cipher.HashPassword([]byte("not-the-registered-password"), []byte(userName))
 	plaintext := newDummyMetadata()
-	encryptedMetadataWithHint := encryptDiscoveryMetadata(t, unknownCredential, userName, users, true, plaintext)
+	// The packet carries the hint of the registered user, which a client that
+	// does not hold the credential of that user could not produce, and it is
+	// protected by another credential, so only the AEAD trial can reject it.
+	encryptedMetadataWithHint := encryptMetadataWithContext(t, unknownCredential, cipher.BlockContext{
+		UserName: userName,
+		Pepper:   cipher.HintPepper(userName, string(registeredCredential)),
+	}, plaintext)
 
 	for _, transport := range discoveryTransports {
 		for _, hintMandatory := range []bool{false, true} {
@@ -293,7 +299,12 @@ func TestDiscoverySkipsInvalidCachedID(t *testing.T) {
 	assertDiscovery(t, result, target, matchCachedFallback, 1)
 }
 
-func TestDiscoveryDoesNotRetryCachedHintFailure(t *testing.T) {
+// TestDiscoveryDoesNotRetryCachedCandidate checks that a cached candidate whose
+// trial decryption failed is not tried a second time in the optional fallback
+// phase: the packet carries the hint of the cached user, which is what puts it
+// in the cached hint phase, while only the later registry scan authenticates the
+// real user.
+func TestDiscoveryDoesNotRetryCachedCandidate(t *testing.T) {
 	const (
 		cachedWrong = "a-cached-wrong"
 		target      = "z-correct-user"
@@ -305,7 +316,10 @@ func TestDiscoveryDoesNotRetryCachedHintFailure(t *testing.T) {
 	state := publisher.Load()
 	source := Source{key: sourceUserCacheTestKey(308), valid: true}
 	state.cache.recordAuthenticated(source.key, testUserID(t, state, cachedWrong), cipher.SuiteXChaCha20Poly1305)
-	encrypted := encryptDiscoveryMetadata(t, targetCredential, cachedWrong, users, true, newDummyMetadata())
+	encrypted := encryptMetadataWithContext(t, targetCredential, cipher.BlockContext{
+		UserName: cachedWrong,
+		Pepper:   cipher.HintPepper(cachedWrong, string(wrongCredential)),
+	}, newDummyMetadata())
 
 	result, err := discoverUser(publisher, mandatory, encrypted, source, false, nil)
 	if err != nil {
@@ -373,9 +387,9 @@ func encryptMetadataWithContext(tb testing.TB, credential []byte, ctx cipher.Blo
 
 // encryptMetadataWithHint retries the randomized nonce until the hint of the
 // produced metadata matches the requested hint relationship with the compiled
-// users. Only the legacy hint depends on the random bytes in front of the
-// hint, so a single attempt is normally enough; retrying removes the unlikely
-// case of a hint that does not match a legacy client.
+// users. The hint is computed from the random bytes in front of it, so a single
+// attempt is normally enough; retrying removes the unlikely case of a hint that
+// does not match the user whose name the client claims.
 func encryptMetadataWithHint(tb testing.TB, credential []byte, ctx cipher.BlockContext, compiled *state, wantMatch bool, plaintext []byte) []byte {
 	tb.Helper()
 	for range 10 {
@@ -394,13 +408,11 @@ func encryptMetadataWithHint(tb testing.TB, credential []byte, ctx cipher.BlockC
 	return nil
 }
 
-// TestUserDiscoveryAcceptsKeyedAndLegacyHint records that one user is found
-// whatever hint its client writes: the keyed hint of protocol v3, which
-// requires the credential shared with the client, and the legacy hint of
-// protocol v2, which only requires the user name and is still accepted so that
-// an old client stays discoverable.
-func TestUserDiscoveryAcceptsKeyedAndLegacyHint(t *testing.T) {
-	const userName = "hint-variant-user"
+// TestUserDiscoveryAcceptsKeyedHint records that the user a client claims is
+// found when the hint of the client is the keyed hint of that user, which
+// requires the credential shared by the client and the server.
+func TestUserDiscoveryAcceptsKeyedHint(t *testing.T) {
+	const userName = "keyed-hint-user"
 	credential := cipher.HashPassword([]byte(t.Name()), []byte(userName))
 	users := userMap(makeTestUser(userName, credential))
 	plaintext := newDummyMetadata()
@@ -414,35 +426,26 @@ func TestUserDiscoveryAcceptsKeyedAndLegacyHint(t *testing.T) {
 		t.Errorf("compiled pepper = %x, want %x", pepper, want)
 	}
 
-	for _, test := range []struct {
-		name string
-		ctx  cipher.BlockContext
-	}{
-		{name: "keyed-hint", ctx: cipher.BlockContext{UserName: userName, Pepper: pepper}},
-		{name: "legacy-hint", ctx: cipher.BlockContext{UserName: userName}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			encrypted := encryptMetadataWithHint(t, credential, test.ctx, state, true, plaintext)
-			for _, transport := range discoveryTransports {
-				for _, hintMandatory := range []bool{false, true} {
-					t.Run(fmt.Sprintf("%s/MandatoryHint_%t", transport.name, hintMandatory), func(t *testing.T) {
-						decryptedMeta, matchedUser, err := transport.discover(users, hintMandatory, encrypted)
-						if err != nil {
-							t.Fatalf("discovery failed: %v", err)
-						}
-						if !bytes.Equal(decryptedMeta, plaintext) {
-							t.Errorf("decrypted metadata = %x, want %x", decryptedMeta, plaintext)
-						}
-						if matchedUser != userName {
-							t.Errorf("discovered user = %q, want %q", matchedUser, userName)
-						}
-					})
+	ctx := cipher.BlockContext{UserName: userName, Pepper: pepper}
+	encrypted := encryptMetadataWithHint(t, credential, ctx, state, true, plaintext)
+	for _, transport := range discoveryTransports {
+		for _, hintMandatory := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/MandatoryHint_%t", transport.name, hintMandatory), func(t *testing.T) {
+				decryptedMeta, matchedUser, err := transport.discover(users, hintMandatory, encrypted)
+				if err != nil {
+					t.Fatalf("discovery failed: %v", err)
 				}
-			}
-		})
+				if !bytes.Equal(decryptedMeta, plaintext) {
+					t.Errorf("decrypted metadata = %x, want %x", decryptedMeta, plaintext)
+				}
+				if matchedUser != userName {
+					t.Errorf("discovered user = %q, want %q", matchedUser, userName)
+				}
+			})
+		}
 	}
 
-	// A keyed hint built from another credential must not select this user, so
+	// A hint built from another credential must not select this user, so
 	// with mandatory hints the trial decryption is never reached. The metadata
 	// itself is protected by the credential of the user, so optional hints fall
 	// back to the registry scan and still find the user: a hint is a filter of
@@ -465,12 +468,13 @@ func TestUserDiscoveryAcceptsKeyedAndLegacyHint(t *testing.T) {
 	}
 }
 
-// TestServerResponseCarriesKeyedHint records that the handshake response the
-// server protects with the cipher of a discovered user carries the keyed hint
-// of protocol v3. Nothing verifies a hint on a response, a client ignores it,
-// so this is only about not leaking the user name: with the legacy hint any
-// observer of a response could test whether a guessed name is registered.
-func TestServerResponseCarriesKeyedHint(t *testing.T) {
+// TestServerResponseCarriesUserHint records that the handshake response the
+// server protects with the cipher of a discovered user carries the hint of that
+// user. Nothing verifies a hint on a response, a client ignores it, so this is
+// only about not leaking the user name: the hint is derived from the credential
+// of the user, so an observer of a response cannot test whether a guessed name
+// is registered.
+func TestServerResponseCarriesUserHint(t *testing.T) {
 	const userName = "keyed-response-user"
 	credential := cipher.HashPassword([]byte(t.Name()), []byte(userName))
 	users := userMap(makeTestUser(userName, credential))
@@ -496,22 +500,14 @@ func TestServerResponseCarriesKeyedHint(t *testing.T) {
 	}
 
 	response := []byte("handshake response")
-	for range 10 {
-		encrypted := make([]byte, result.block.NonceSize()+len(response)+result.block.Overhead())
-		if err := result.block.Encrypt(encrypted[:0], response); err != nil {
-			t.Fatalf("Encrypt() failed: %v", err)
-		}
-		nonce := encrypted[:cipher.DefaultNonceSize]
-		if !cipher.CheckUserFromHintV3(pepper, []byte(userName), nonce) {
-			t.Fatal("the response nonce does not carry the keyed hint of the user")
-		}
-		// A keyed hint passes the legacy check only by an unlikely collision,
-		// so retry instead of asserting that unlikely event.
-		if !cipher.CheckUserFromHint([]byte(userName), nonce) {
-			return
-		}
+	encrypted := make([]byte, result.block.NonceSize()+len(response)+result.block.Overhead())
+	if err := result.block.Encrypt(encrypted[:0], response); err != nil {
+		t.Fatalf("Encrypt() failed: %v", err)
 	}
-	t.Fatal("could not observe a keyed response hint that differs from the legacy hint")
+	nonce := encrypted[:cipher.DefaultNonceSize]
+	if !cipher.CheckUserFromHintV3(pepper, []byte(userName), nonce) {
+		t.Fatal("the response nonce does not carry the user hint of the user")
+	}
 }
 
 // assertDiscovery verifies the discovered identity, the number of cipher
@@ -569,17 +565,23 @@ func newDummyMetadata() []byte {
 }
 
 // encryptDiscoveryMetadata retries the randomized nonce until it has exactly
-// the requested hint relationship with users. This removes the small chance
-// of a hint collision from policy tests and benchmarks. The probability of
-// collision is very low so we don't need to retry a lot.
+// the requested hint relationship with the registered users: wantHint selects
+// metadata whose hint matches hintUser and no other user, and !wantHint selects
+// metadata whose hint matches no user. The hint of the client is derived from
+// the credential the caller passes, so a client that does not hold the
+// credential of hintUser cannot produce metadata whose hint matches that user.
+// The probability of an accidental hint collision is very low so we don't need
+// to retry a lot.
 func encryptDiscoveryMetadata(tb testing.TB, credential []byte, hintUser string, users map[string]*appctlpb.User, wantHint bool, plaintext []byte) []byte {
 	tb.Helper()
-	for attempt := 0; attempt < 10; attempt++ {
+	compiled := buildState(users, cipher.AllSuites())
+	pepper := cipher.HintPepper(hintUser, string(credential))
+	for range 10 {
 		block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, true)
 		if err != nil {
 			tb.Fatalf("BlockCipherFromPassword() failed: %v", err)
 		}
-		block.SetBlockContext(cipher.BlockContext{UserName: hintUser})
+		block.SetBlockContext(cipher.BlockContext{UserName: hintUser, Pepper: pepper})
 		encryptedMeta := make([]byte, block.NonceSize()+len(plaintext)+block.Overhead())
 		if err := block.Encrypt(encryptedMeta[:0], plaintext); err != nil {
 			tb.Fatalf("Encrypt() failed: %v", err)
@@ -587,10 +589,10 @@ func encryptDiscoveryMetadata(tb testing.TB, credential []byte, hintUser string,
 
 		matches := 0
 		matchedUser := ""
-		for _, user := range users {
-			if cipher.CheckUserFromHint([]byte(user.GetName()), encryptedMeta[:cipher.DefaultNonceSize]) {
+		for i := range compiled.users {
+			if compiled.users[i].hintMatches(encryptedMeta[:cipher.DefaultNonceSize]) {
 				matches++
-				matchedUser = user.GetName()
+				matchedUser = compiled.users[i].name
 			}
 		}
 		if wantHint && matches == 1 && matchedUser == hintUser {

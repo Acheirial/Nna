@@ -23,63 +23,63 @@ set -e
 # Load test library.
 source ./libtest.sh
 
-# Replace mieru server with mixed config.
-./mita replace config server_mix.json
+# Replace server with mixed config.
+./shadowlemon server replace config server_mix.json
 if [[ "$?" -ne 0 ]]; then
-    echo "command 'mita replace config server_mix.json' failed"
+    echo "command 'shadowlemon server replace config server_mix.json' failed"
     exit 1
 fi
-echo "mieru server config:"
-./mita describe config
+echo "server config:"
+./shadowlemon server describe config
 
-# Start mieru server proxy.
-./mita start
+# Start the server daemon.
+./shadowlemon server start
 if [[ "$?" -ne 0 ]]; then
-    echo "command 'mita start' failed"
+    echo "command 'shadowlemon server start' failed"
     exit 1
 fi
-server_status=$(./mita status)
-echo "mieru server status:"
+server_status=$(./shadowlemon server status)
+echo "server status:"
 echo "$server_status"
 if [[ "$server_status" != *RUNNING* ]]; then
-    echo "mita server is not running"
+    echo "server is not running"
     exit 1
 fi
 
-# Replace mieru client with mixed config.
-./mieru replace config client_mix.json
+# Replace client with mixed config.
+./shadowlemon client replace config client_mix.json
 if [[ "$?" -ne 0 ]]; then
-    echo "command 'mieru replace config client_mix.json' failed"
+    echo "command 'shadowlemon client replace config client_mix.json' failed"
     exit 1
 fi
 sleep 1
-./mieru export config simple
+./shadowlemon client export config simple
 sleep 1
-./mieru export config > client.url.txt
+./shadowlemon client export config > client.url.txt
 rm ~/.config/mieru/client.conf.pb
 sleep 1
-echo "mieru client config before import:"
-./mieru describe config
+echo "client config before import:"
+./shadowlemon client describe config
 sleep 1
-echo "mieru client config URL:"
+echo "client config URL:"
 cat client.url.txt
 sleep 1
-./mieru import config "$(cat client.url.txt)"
-echo "mieru client config after import:"
-./mieru describe config
+./shadowlemon client import config "$(cat client.url.txt)"
+echo "client config after import:"
+./shadowlemon client describe config
 sleep 1
 
-# Start mieru client.
-./mieru start
+# Start the client.
+./shadowlemon client start
 if [[ "$?" -ne 0 ]]; then
-    echo "command 'mieru start' failed"
+    echo "command 'shadowlemon client start' failed"
     exit 1
 fi
-client_status=$(./mieru status)
-echo "mieru client status:"
+client_status=$(./shadowlemon client status)
+echo "client status:"
 echo "$client_status"
 if [[ "$client_status" != *RUNNING* ]]; then
-    echo "mieru client is not running"
+    echo "client is not running"
     exit 1
 fi
 
@@ -90,41 +90,41 @@ echo ">>> socks5 UDP associate - TCP and UDP <<<"
   -local_proxy_host=127.0.0.1 -local_proxy_port=1080 \
   -interval_ms=10 -num_request=100 -num_conn=60
 if [ "$?" -ne "0" ]; then
-    print_mieru_client_log
+    print_client_log
     echo "Test UDP associate - TCP and UDP failed."
     exit 1
 fi
 
-# Stop mieru client.
-./mieru stop
+# Stop the client.
+./shadowlemon client stop
 if [[ "$?" -ne 0 ]]; then
-    echo "command 'mieru stop' failed"
+    echo "command 'shadowlemon client stop' failed"
     exit 1
 fi
 sleep 1
-client_status=$(./mieru status)
-echo "mieru client status:"
+client_status=$(./shadowlemon client status)
+echo "client status:"
 echo "$client_status"
 if [[ "$client_status" != *STOPPED* ]]; then
-    echo "mieru client is not stopped"
+    echo "client is not stopped"
     exit 1
 fi
 
-# Stop mieru server proxy.
-./mita stop
+# Stop the server daemon.
+./shadowlemon server stop
 if [[ "$?" -ne 0 ]]; then
-    echo "command 'mita stop' failed"
+    echo "command 'shadowlemon server stop' failed"
     exit 1
 fi
 sleep 1
-server_status=$(./mita status)
-echo "mieru server status:"
+server_status=$(./shadowlemon server status)
+echo "server status:"
 echo "$server_status"
 if [[ "$server_status" != *STOPPED* ]]; then
-    echo "mita server is not stopped"
+    echo "server is not stopped"
     exit 1
 fi
 
-print_mieru_client_log
-delete_mieru_client_log
+print_client_log
+delete_client_log
 sleep 1

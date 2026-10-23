@@ -509,8 +509,8 @@ func (LowEntropyMaskRotation) EnumDescriptor() ([]byte, []int) {
 
 // Cipher suites supported by the mieru proxy protocol.
 //
-// The numeric value of each entry is the suite identifier used on the wire by
-// the version 2 handshake, so the numbering must never change.
+// The numeric value of each entry is the suite identifier used on the wire, so
+// the numbering must never change.
 //
 // A connection always uses exactly one suite, negotiated by the two ends:
 //   - A mieru client lists the suites it is willing to use, in preference

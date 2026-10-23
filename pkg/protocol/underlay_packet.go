@@ -572,6 +572,13 @@ func (u *PacketUnderlay) onOpenSessionRequest(seg *segment, remoteAddr net.Addr)
 	// request, at the same time slot.
 	response, _, _, handshakeErr := session.acceptHandshake(seg, seg.block, u.allowedCipherSuites(), true)
 	if handshakeErr != nil {
+		// A request of a peer that doesn't speak protocolVersion is dropped
+		// without any answer: the session is torn down in silence, so that such
+		// a peer can't tell the datagram from one that never arrived. A
+		// datagram is independent of the other datagrams, so the underlay keeps
+		// listening. A peer that speaks protocolVersion but no common cipher
+		// suite is answered with a diagnostic response.
+		//
 		// The rejected session is closed before its diagnostic response is
 		// written, so that no observer can find a rejected session that is
 		// registered and still open, whatever the order in which this routine
@@ -583,12 +590,14 @@ func (u *PacketUnderlay) onOpenSessionRequest(seg *segment, remoteAddr net.Addr)
 		// as session data, so an unauthenticated handshake can't reach the
 		// application.
 		log.Errorf("%v rejected session %d: %v", u, sessionID, handshakeErr)
+		if response == nil {
+			session.dropWithError(handshakeErr)
+			return nil
+		}
 		session.closeWithError(handshakeErr)
-		if response != nil {
-			respSeg := session.newSessionResponseSegment(response.Marshal(), seg.block)
-			if err := u.writeOneSegment(respSeg, remoteAddr); err != nil {
-				log.Debugf("%v failed to send the handshake response of session %d: %v", u, sessionID, err)
-			}
+		respSeg := session.newSessionResponseSegment(response.Marshal(), seg.block)
+		if err := u.writeOneSegment(respSeg, remoteAddr); err != nil {
+			log.Debugf("%v failed to send the handshake response of session %d: %v", u, sessionID, err)
 		}
 		return nil
 	}

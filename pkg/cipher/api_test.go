@@ -33,24 +33,30 @@ func TestUserHintOperationsAllocateNoHeap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 	}
-	c.SetBlockContext(BlockContext{UserName: string(user)})
+	pepper := HintPepper(string(user), "allocation-free-password")
+	c.SetBlockContext(BlockContext{UserName: string(user), Pepper: pepper})
 	var baseNonce [DefaultNonceSize]byte
-	nonce := c.addUserHintToNonce(baseNonce[:])
-	if !CheckUserFromHint(user, nonce) {
+	nonce, err := c.addUserHintToNonce(baseNonce[:])
+	if err != nil {
+		t.Fatalf("addUserHintToNonce() failed: %v", err)
+	}
+	if !CheckUserFromHintV3(pepper, user, nonce) {
 		t.Fatal("generated user hint did not match")
 	}
 
 	if allocs := testing.AllocsPerRun(1000, func() {
-		if !CheckUserFromHint(user, nonce) {
+		if !CheckUserFromHintV3(pepper, user, nonce) {
 			panic("user hint did not match")
 		}
 	}); allocs != 0 {
-		t.Fatalf("CheckUserFromHint() allocations = %v, want 0", allocs)
+		t.Fatalf("CheckUserFromHintV3() allocations = %v, want 0", allocs)
 	}
 
 	if allocs := testing.AllocsPerRun(1000, func() {
 		localNonce := baseNonce
-		c.addUserHintToNonce(localNonce[:])
+		if _, err := c.addUserHintToNonce(localNonce[:]); err != nil {
+			panic(err)
+		}
 	}); allocs != 0 {
 		t.Fatalf("addUserHintToNonce() allocations = %v, want 0", allocs)
 	}
@@ -64,15 +70,9 @@ func TestUserHintOperationsPanicForLongUserName(t *testing.T) {
 		fn   func()
 	}{
 		{
-			name: "CheckUserFromHint",
-			fn: func() {
-				CheckUserFromHint([]byte(user), nonce[:])
-			},
-		},
-		{
 			name: "addUserHintToNonce",
 			fn: func() {
-				c := &aeadBlockCipher{ctx: BlockContext{UserName: user}}
+				c := &aeadBlockCipher{ctx: BlockContext{UserName: user, Pepper: make([]byte, HintPepperLen)}}
 				c.addUserHintToNonce(nonce[:])
 			},
 		},
@@ -107,6 +107,40 @@ func TestUserHintOperationsPanicForLongUserName(t *testing.T) {
 	}
 }
 
+// TestAddUserHintToNonceRequiresPepper records that a block context that carries
+// a user name without a pepper cannot write a user hint: the pepper is what
+// binds the hint to the credential of the user, so such a hint could not be
+// checked by any server.
+func TestAddUserHintToNonceRequiresPepper(t *testing.T) {
+	const user = "no-pepper-user"
+	c, err := newXChaCha20Poly1305BlockCipher(make([]byte, DefaultKeyLen))
+	if err != nil {
+		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	var nonce [DefaultNonceSize]byte
+
+	// A block without a user name writes no hint at all.
+	if got, err := c.addUserHintToNonce(nonce[:]); err != nil || !bytes.Equal(got, nonce[:]) {
+		t.Fatalf("addUserHintToNonce() without a user name = (%x, %v), want the unchanged nonce", got, err)
+	}
+
+	c.SetBlockContext(BlockContext{UserName: user})
+	if _, err := c.addUserHintToNonce(nonce[:]); err == nil {
+		t.Fatal("addUserHintToNonce() wrote a user hint without a pepper")
+	}
+	plaintext := []byte("plaintext")
+	dst := make([]byte, 0, c.NonceSize()+len(plaintext)+c.Overhead())
+	if err := c.Encrypt(dst, plaintext); err == nil {
+		t.Fatal("Encrypt() succeeded without a user hint pepper")
+	}
+
+	// The same block writes the hint again once it has a pepper.
+	c.SetBlockContext(BlockContext{UserName: user, Pepper: HintPepper(user, "password")})
+	if _, err := c.addUserHintToNonce(nonce[:]); err != nil {
+		t.Fatalf("addUserHintToNonce() with a pepper failed: %v", err)
+	}
+}
+
 func TestHintPepper(t *testing.T) {
 	const user = "pepper-user"
 	const password = "pepper-password"
@@ -135,7 +169,7 @@ func TestHintPepper(t *testing.T) {
 		})
 	}
 
-	// A missing user name or credential selects the legacy hint of protocol v2.
+	// A missing user name or credential returns no pepper.
 	for _, test := range []struct {
 		name     string
 		user     string
@@ -168,10 +202,13 @@ func TestKeyedUserHint(t *testing.T) {
 		baseNonce[i] = byte(i)
 	}
 
-	// The keyed hint has the same position and the same length as the legacy
-	// hint: only the last NonceSuffixLenForUserHint bytes of the nonce change.
+	// The hint occupies the last NonceSuffixLenForUserHint bytes of the nonce
+	// and leaves the bytes in front of it untouched.
 	c.SetBlockContext(BlockContext{UserName: user, Pepper: pepper})
-	keyed := c.addUserHintToNonce(append([]byte(nil), baseNonce[:]...))
+	keyed, err := c.addUserHintToNonce(append([]byte(nil), baseNonce[:]...))
+	if err != nil {
+		t.Fatalf("addUserHintToNonce() failed: %v", err)
+	}
 	if len(keyed) != DefaultNonceSize {
 		t.Fatalf("nonce length = %d, want %d", len(keyed), DefaultNonceSize)
 	}
@@ -180,31 +217,32 @@ func TestKeyedUserHint(t *testing.T) {
 		t.Errorf("addUserHintToNonce() changed the nonce in front of the hint: %x, want %x", keyed[:prefixLen], baseNonce[:prefixLen])
 	}
 	if bytes.Equal(keyed, baseNonce[:]) {
-		t.Error("addUserHintToNonce() did not write a keyed hint")
+		t.Error("addUserHintToNonce() did not write a user hint")
 	}
 	if !CheckUserFromHintV3(pepper, userBytes, keyed) {
-		t.Errorf("CheckUserFromHintV3() did not match the keyed hint %x that was written", keyed[prefixLen:])
+		t.Errorf("CheckUserFromHintV3() did not match the hint %x that was written", keyed[prefixLen:])
 	}
-	if CheckUserFromHint(userBytes, keyed) {
-		t.Error("CheckUserFromHint() matched a keyed hint")
+	// The same nonce must always carry the same hint.
+	again, err := c.addUserHintToNonce(append([]byte(nil), baseNonce[:]...))
+	if err != nil {
+		t.Fatalf("addUserHintToNonce() failed: %v", err)
 	}
-	// The same nonce must always carry the same keyed hint.
-	if again := c.addUserHintToNonce(append([]byte(nil), baseNonce[:]...)); !bytes.Equal(again, keyed) {
-		t.Errorf("keyed hint of a fixed nonce = %x, want %x", again, keyed)
-	}
-
-	// The legacy hint of the same user and the same nonce is a different value
-	// and still matches the legacy check.
-	c.SetBlockContext(BlockContext{UserName: user})
-	legacy := c.addUserHintToNonce(append([]byte(nil), baseNonce[:]...))
-	if !CheckUserFromHint(userBytes, legacy) {
-		t.Errorf("CheckUserFromHint() did not match the legacy hint %x that was written", legacy[prefixLen:])
-	}
-	if bytes.Equal(legacy, keyed) {
-		t.Error("the keyed hint equals the legacy hint of the same user and nonce")
+	if !bytes.Equal(again, keyed) {
+		t.Errorf("hint of a fixed nonce = %x, want %x", again, keyed)
 	}
 
-	// Only the credential of that user yields a matching keyed hint.
+	// Another pepper writes another hint for the same user and the same nonce,
+	// so the hint depends on the credential of the user.
+	c.SetBlockContext(BlockContext{UserName: user, Pepper: HintPepper(user, "other-password")})
+	otherPepper, err := c.addUserHintToNonce(append([]byte(nil), baseNonce[:]...))
+	if err != nil {
+		t.Fatalf("addUserHintToNonce() failed: %v", err)
+	}
+	if bytes.Equal(otherPepper, keyed) {
+		t.Error("the user hint does not depend on the pepper of the user")
+	}
+
+	// Only the credential of that user yields a matching hint.
 	for _, test := range []struct {
 		name   string
 		pepper []byte
@@ -215,12 +253,12 @@ func TestKeyedUserHint(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if CheckUserFromHintV3(test.pepper, test.user, keyed) {
-				t.Errorf("CheckUserFromHintV3(%q) matched the keyed hint of %q", test.user, user)
+				t.Errorf("CheckUserFromHintV3(%q) matched the hint of %q", test.user, user)
 			}
 		})
 	}
 
-	// Both derivation paths must stay heap allocation free.
+	// The hint operations must stay heap allocation free.
 	c.SetBlockContext(BlockContext{UserName: user, Pepper: pepper})
 	if allocs := testing.AllocsPerRun(1000, func() {
 		localNonce := baseNonce
@@ -298,7 +336,7 @@ func TestConcurrentStatelessTrialsReturnIndependentCiphers(t *testing.T) {
 		t.Error(err)
 	}
 
-	templates, err := getBlockCipherList(string(password), SuiteXChaCha20Poly1305, true, KeyIterV3)
+	templates, err := getBlockCipherList(string(password), SuiteXChaCha20Poly1305, true)
 	if err != nil {
 		t.Fatalf("getBlockCipherList() failed: %v", err)
 	}
@@ -398,7 +436,7 @@ func BenchmarkStatelessDecryptor(b *testing.B) {
 	}
 }
 
-func BenchmarkCheckUserFromHint(b *testing.B) {
+func BenchmarkCheckUserFromHintV3(b *testing.B) {
 	user := []byte("benchmark-user")
 	key := make([]byte, 32)
 	if _, err := crand.Read(key); err != nil {
@@ -408,16 +446,20 @@ func BenchmarkCheckUserFromHint(b *testing.B) {
 	if err != nil {
 		b.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 	}
-	c.SetBlockContext(BlockContext{UserName: string(user)})
+	pepper := HintPepper(string(user), "benchmark-password")
+	c.SetBlockContext(BlockContext{UserName: string(user), Pepper: pepper})
 	nonce, err := c.newNonce()
 	if err != nil {
 		b.Fatalf("newNonce() failed: %v", err)
 	}
-	nonce = c.addUserHintToNonce(nonce)
+	nonce, err = c.addUserHintToNonce(nonce)
+	if err != nil {
+		b.Fatalf("addUserHintToNonce() failed: %v", err)
+	}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if !CheckUserFromHint(user, nonce) {
+		if !CheckUserFromHintV3(pepper, user, nonce) {
 			b.Fatal("user hint did not match")
 		}
 	}

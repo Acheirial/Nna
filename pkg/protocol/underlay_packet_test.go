@@ -89,7 +89,7 @@ func TestPacketServerDropsInvalidControl(t *testing.T) {
 		serverConn.Close()
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	block.SetBlockContext(cipher.BlockContext{UserName: userName})
+	block.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(password))})
 
 	server := &PacketUnderlay{
 		baseUnderlay:       *newBaseUnderlay(false, 1400, nil),
@@ -167,7 +167,7 @@ func TestPacketClientClosesUnknownSession(t *testing.T) {
 		clientConn.Close()
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	block.SetBlockContext(cipher.BlockContext{UserName: "user"})
+	block.SetBlockContext(cipher.BlockContext{UserName: "user", Pepper: cipher.HintPepper("user", t.Name())})
 
 	client := &PacketUnderlay{
 		baseUnderlay:       *newBaseUnderlay(true, 1400, nil),
@@ -315,7 +315,7 @@ func TestPacketServerDropsSegmentOfAnotherUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() for user B failed: %v", err)
 	}
-	foreignBlock.SetBlockContext(cipher.BlockContext{UserName: userB})
+	foreignBlock.SetBlockContext(cipher.BlockContext{UserName: userB, Pepper: cipher.HintPepper(userB, string(credentialB))})
 	foreign := testDataSegment(sessionID, 0, []byte("payload of user B"), common.PacketTransport)
 	foreign.block = foreignBlock
 	if server.mayDeliverToSession(session, foreign) {
@@ -325,7 +325,7 @@ func TestPacketServerDropsSegmentOfAnotherUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() for user A failed: %v", err)
 	}
-	ownBlock.SetBlockContext(cipher.BlockContext{UserName: userA})
+	ownBlock.SetBlockContext(cipher.BlockContext{UserName: userA, Pepper: cipher.HintPepper(userA, string(credentialA))})
 	own := testDataSegment(sessionID, 0, []byte("payload of user A"), common.PacketTransport)
 	own.block = ownBlock
 	if !server.mayDeliverToSession(session, own) {
@@ -1069,7 +1069,7 @@ func TestPacketUnderlayConcurrentDatagramAssembly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 		}
-		block.SetBlockContext(cipher.BlockContext{UserName: userName})
+		block.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, t.Name())})
 		return block
 	}
 	// The two senders share one cipher, which is what a client underlay uses

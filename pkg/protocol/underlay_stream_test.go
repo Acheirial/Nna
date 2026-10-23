@@ -441,7 +441,7 @@ func TestStreamUnderlaySecondOpenSessionRequestDoesNotRekey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	envelope.SetBlockContext(cipher.BlockContext{UserName: userName})
+	envelope.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 	client, requestPayload := newTestHandshakeClient(t, envelope, false)
 
 	// The first session completes its handshake and switches the chain.
@@ -469,7 +469,7 @@ func TestStreamUnderlaySecondOpenSessionRequestDoesNotRekey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 	}
-	responseEnvelope.SetBlockContext(cipher.BlockContext{UserName: userName})
+	responseEnvelope.SetBlockContext(cipher.BlockContext{UserName: userName, Pepper: cipher.HintPepper(userName, string(credential))})
 	client.complete(t, testReadStreamHandshakeResponse(t, clientConn, responseEnvelope))
 
 	if !underlay.chainSwitched {

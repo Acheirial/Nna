@@ -25,18 +25,18 @@
 ### 服务器
 
 ```sh
-mita status
+shadowlemon server status
 ```
 
-如果输出 `mita server status is "RUNNING"`，说明代理服务正在运行。如果输出 `"STOPPED"`，说明守护进程没有在运行，可以用 `mita start` 启动。`mita start`（以及 `mieru start`）会先校验配置，配置非法时立即报错且不会启动守护进程，因此如果 `start` 立即失败，请先检查配置。
+如果输出 `shadowlemon server status is "RUNNING"`，说明代理服务正在运行。如果输出 `"STOPPED"`，说明守护进程没有在运行，可以用 `shadowlemon server start` 启动。`shadowlemon server start`（以及 `shadowlemon client start`）会先校验配置，配置非法时立即报错且不会启动守护进程，因此如果 `start` 立即失败，请先检查配置。
 
 ### 客户端
 
 ```sh
-mieru status
+shadowlemon client status
 ```
 
-如果输出 `mieru client status is "RUNNING"`，说明客户端正在运行；输出 `"STOPPED"` 说明客户端没有在运行。客户端监听的 socks5 地址记录在客户端日志中。
+如果输出 `shadowlemon client status is "RUNNING"`，说明客户端正在运行；输出 `"STOPPED"` 说明客户端没有在运行。客户端监听的 socks5 地址记录在客户端日志中。
 
 ---
 
@@ -56,7 +56,7 @@ sudo journalctl -u mita -xe --no-pager
 sudo journalctl -u mita -xe --no-pager -n 200
 ```
 
-如果是用 `mita start` 直接启动后台守护进程，可以按需把 `mita start` 的标准输出重定向到文件。调试时更简单的方式是用 `mita run` 在前台运行，日志直接打印到终端。
+如果是用 `shadowlemon server start` 直接启动后台守护进程，可以按需把 `shadowlemon server start` 的标准输出重定向到文件。调试时更简单的方式是用 `shadowlemon server run` 在前台运行，日志直接打印到终端。
 
 ### 客户端 (mieru)
 
@@ -68,7 +68,7 @@ sudo journalctl -u mita -xe --no-pager -n 200
 
 日志文件命名格式：`yyyyMMdd_HHmm_PID.log`。每次重启 mieru 会生成新文件。日志数量过多时，旧文件会被自动清理。
 
-客户端以 `mieru start` 后台运行时，日志写入上表中的日志目录；直接用 `mieru run` 在前台运行时，日志打印到当前终端。
+客户端以 `shadowlemon client start` 后台运行时，日志写入上表中的日志目录；直接用 `shadowlemon client run` 在前台运行时，日志打印到当前终端。
 
 ---
 
@@ -82,28 +82,28 @@ sudo journalctl -u mita -xe --no-pager -n 200
 
 ```sh
 # 启用
-mita apply config server_enable_debug_logging.json
-mita stop
-mita start
+shadowlemon server apply config server_enable_debug_logging.json
+shadowlemon server stop
+shadowlemon server start
 
 # 关闭
-mita apply config server_disable_debug_logging.json
-mita stop
-mita start
+shadowlemon server apply config server_disable_debug_logging.json
+shadowlemon server stop
+shadowlemon server start
 ```
 
 **客户端：**
 
 ```sh
 # 启用
-mieru apply config client_enable_debug_logging.json
-mieru stop
-mieru start
+shadowlemon client apply config client_enable_debug_logging.json
+shadowlemon client stop
+shadowlemon client start
 
 # 关闭
-mieru apply config client_disable_debug_logging.json
-mieru stop
-mieru start
+shadowlemon client apply config client_disable_debug_logging.json
+shadowlemon client stop
+shadowlemon client start
 ```
 
 日志等级由 `loggingLevel` 字段控制，可选值为 `FATAL`、`ERROR`、`WARN`、`INFO`、`DEBUG`、`TRACE`。改动 `loggingLevel` 也需要重启对应的程序才能生效。
@@ -114,8 +114,8 @@ mieru start
 
 客户端与服务端在握手时协商密码套件。可选套件为 `CIPHER_SUITE_XCHACHA20_POLY1305`、`CIPHER_SUITE_AES_256_GCM` 和 `CIPHER_SUITE_AES_128_GCM`，配置字段的含义与协商规则见[密码套件](./protocol.md#密码套件)与[版本与套件协商](./protocol.md#版本与套件协商)。日常运维需要注意下面几点。
 
-1. **协议版本与兼容性。** 本版本使用协议版本 2 与 3 的握手。协议版本 1 的旧客户端发出的握手请求会被服务端判为「无共同版本」，服务端返回 `status` = 1 并关闭会话。协议版本 3 与版本 2 之间也不是双向兼容：v3 服务端同时兼容 v2 与 v3 客户端，但 v2 服务端只兼容 v2 客户端，v3 客户端无法与 v2 服务端建立会话（v3 客户端用 4096 次派生的静态密钥并携带 keyed 用户提示，v2 服务端只尝试 64 次派生、只识别旧提示）。因此升级**必须两端同步**：只升级一端会让所有会话在握手阶段被拒绝，现象与「完全无法连接」相同。套件协商发生在握手的内部，所以它不能用来兼容旧客户端。
-2. **查看生效的套件。** 服务端用 `mita describe config`，客户端用 `mieru describe config`，查看输出里的 `cipherSuites` 字段。如果没有该字段或者列表为空，说明仍在使用默认行为：客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`，服务端接受全部套件。实际使用的套件由两端在握手时协商：先取两个列表的交集，再在交集中按服务端偏好顺序选出最终成员。**只有协商出协议版本 2 时**，才会额外要求该成员的长度不超过客户端列表首项（信封套件）的密钥长度，因此当对端是 v2 服务端时，把 `CIPHER_SUITE_AES_128_GCM` 放在客户端首位会排除两种 32 字节密钥的套件；交集为空、或（v2 下）交集中没有满足密钥长度限制的成员时，握手失败（服务端返回 `status` = 2 并记录日志）。协议版本 3 不受这条密钥长度限制，交集中的任何套件都可能被选中。
+1. **协议版本与兼容性。** 客户端与服务端使用协议版本 3 完成握手，并且**不提供任何向后兼容**：唯一支持的协议版本是 3，协议版本 1、2 的旧对等端发出的首包版本字节不是 3，会被服务端直接丢弃——服务端不写任何响应字节、直接关闭会话（TCP 关闭连接，UDP 丢弃该数据报并继续监听）。不存在任何协商或降级路径，套件协商发生在握手的内部，因此也无法用来规避这一要求。因此升级**必须两端同步**：只升级一端会让所有会话在握手阶段失败，现象与「完全无法连接」相同。
+2. **查看生效的套件。** 服务端用 `shadowlemon server describe config`，客户端用 `shadowlemon client describe config`，查看输出里的 `cipherSuites` 字段。如果没有该字段或者列表为空，说明仍在使用默认行为：客户端只使用 `CIPHER_SUITE_XCHACHA20_POLY1305`，服务端接受全部套件。实际使用的套件由两端在握手时协商：先取两个列表的交集，再在交集中按服务端偏好顺序选出最终成员；挑选最终套件时**不**按密钥长度过滤，客户端把 `CIPHER_SUITE_AES_128_GCM` 放在首位只会让保护握手请求（信封）的静态密钥长度为 16 字节，交集中两种 32 字节密钥的套件同样可能被选中。只有双方都已认证、但套件交集为空时握手才会失败，此时服务端返回 `status` = 2、关闭会话并记录日志。
 3. **建议优先使用 XChaCha20-Poly1305。** 也就是保持默认，或者把 `CIPHER_SUITE_XCHACHA20_POLY1305` 写在客户端与服务端列表的第一项。它的性能不依赖 CPU 的硬件特性；而在没有 AES 硬件指令的 CPU 上，Go 标准库中 AES-GCM 的软件实现必须使用常数时间的实现，速度会明显下降。
 4. **两端 CPU 差异较大、并且都支持 AES-NI 时，可以改用 AES-256-GCM。** 如果服务器与客户端的 CPU 都支持 AES 硬件指令（x86 的 AES-NI、ARM 的 Crypto Extension），可以把两端的 `cipherSuites` 都设置为以 `CIPHER_SUITE_AES_256_GCM` 开头的列表。只有在确认两端都有硬件加速时才建议这样做，其余情况请保留 XChaCha20-Poly1305。
 
@@ -135,13 +135,13 @@ common.UnmarshalJSON() failed: proto: (line 2:2): unknown field "profiles"
 common.UnmarshalJSON() failed: proto: (line 2:2): unknown field "portBindings"
 ```
 
-这通常表示配置文件被应用到了错误的程序。如果 `mita` 报告 `profiles` 等未知字段，很可能是它正在读取客户端配置；如果 `mieru` 报告 `portBindings` 或 `users` 等未知字段，很可能是它正在读取服务器配置。
+这通常表示配置文件被应用到了错误的程序。如果 `shadowlemon server` 报告 `profiles` 等未知字段，很可能是它正在读取客户端配置；如果 `shadowlemon client` 报告 `portBindings` 或 `users` 等未知字段，很可能是它正在读取服务器配置。
 
 请使用匹配的命令：
 
 ```sh
-mita apply config <server_config.json>
-mieru apply config <client_config.json>
+shadowlemon server apply config <server_config.json>
+shadowlemon client apply config <client_config.json>
 ```
 
 另外，如果配置是从旧版本沿用而来，其中可能含有本版本已删除的字段：客户端配置里的 `httpProxyPort`、`httpProxyListenLAN`、`noCheckUpdate`、`rpcPort` 与 `advancedSettings`，以及服务器配置里 `users` 下的 `quotas`。请先从配置文件中删除这些字段，再重新应用。
@@ -151,13 +151,13 @@ mieru apply config <client_config.json>
 | 步骤 | 命令/操作 | 检查内容 |
 |------|-----------|----------|
 | 1 | `ping <server_ip>` | 确认基础网络可达性。 |
-| 2 | `mita status`（服务器端） | 确认代理服务处于 `RUNNING` 状态。 |
-| 3 | `mieru status`（客户端） | 确认客户端已启动。 |
-| 4 | `mieru describe config` 与 `mita describe config` | 对比**端口**、**协议**、**用户名**和**密码**，必须完全一致；同时确认两端的 `cipherSuites` 有交集，且两端都能运行本次握手所需的协议版本（v1 客户端不再被支持；v3 客户端需要 v3 服务端，只有 v2 服务端时无法建连，见[密码套件协商](#密码套件协商)）。如果对端是 v2 服务端，还要确认交集中有密钥长度不超过客户端列表首项（信封套件）的套件。 |
+| 2 | `shadowlemon server status`（服务器端） | 确认代理服务处于 `RUNNING` 状态。 |
+| 3 | `shadowlemon client status`（客户端） | 确认客户端已启动。 |
+| 4 | `shadowlemon client describe config` 与 `shadowlemon server describe config` | 对比**端口**、**协议**、**用户名**和**密码**，必须完全一致；同时确认两端的 `cipherSuites` 有交集（两端至少要有一个共同的套件，见[密码套件协商](#密码套件协商)），并确认两端程序版本可以互相对话：本版本只使用协议版本 3，任何一端升级后另一端必须同步升级，否则所有会话都会在握手阶段被服务端直接丢弃。 |
 | 5 | `date`（两端均执行） | 确认两端时钟偏差不超过 1 分钟；偏差超过 1 分钟会握手失败。 |
 | 6 | 在两端启用调试日志并重启 | 在日志中查找 `handshake`、`cipher` 或 `underlay` 相关错误；服务器的解密失败通常表现为无法识别用户或密钥不匹配。 |
 | 7 | 检查服务器防火墙 | 确认配置文件里 `portBindings` 声明的 TCP / UDP 端口对公网开放。 |
-| 8 | `mita describe config`（服务器端） | 服务端默认要求首包携带匹配的用户提示，配置项 `advancedSettings` -> `userHintIsMandatory` 的默认值是 `true`；未命中提示的源还会在 10 秒内被负缓存直接拒绝。使用不带提示的旧客户端、或两端用户名/密码不一致时，首包会被丢弃。只有该字段被显式设置为 `false` 才会关闭这一要求。 |
+| 8 | `shadowlemon server describe config`（服务器端） | 服务端默认要求首包携带匹配的用户提示，配置项 `advancedSettings` -> `userHintIsMandatory` 的默认值是 `true`；未命中提示的源还会在 10 秒内被负缓存直接拒绝。两端用户名/密码不一致、或者首包没有携带提示/提示与任何已注册用户都不匹配时，首包会被丢弃。只有该字段被显式设置为 `false` 才会关闭这一要求。 |
 
 ### 症状：连接一段时间后断开
 
@@ -183,8 +183,8 @@ mieru apply config <client_config.json>
 | 可能原因 | 如何检查 | 解决方法 |
 |----------|----------|----------|
 | 端口已被占用 | `lsof -i :1080`（macOS/Linux）或 `netstat -ano \| findstr 1080`（Windows） | 更换 `socks5Port` 为未占用的端口。 |
-| 配置文件 JSON 语法错误 | `mieru apply config` 打印错误 | 修正 JSON 语法后重新应用。 |
-| 权限不足（Linux） | 客户端二进制文件无执行权限 | `chmod +x mieru` 或通过软件包安装。 |
+| 配置文件 JSON 语法错误 | `shadowlemon client apply config` 打印错误 | 修正 JSON 语法后重新应用。 |
+| 权限不足（Linux） | 客户端二进制文件无执行权限 | `chmod +x shadowlemon` 或通过软件包安装。 |
 | 日志目录不可写 | 启动日志提示无法创建日志文件 | 检查上表中的日志目录权限。 |
 
 ---
@@ -224,7 +224,7 @@ mieru apply config <client_config.json>
 **示例：使用自定义配置文件在前台运行客户端**
 
 ```sh
-MIERU_CONFIG_JSON_FILE=/etc/mieru_client_config.json mieru run
+MIERU_CONFIG_JSON_FILE=/etc/mieru_client_config.json shadowlemon client run
 ```
 
 日志直接输出到终端。按 `Ctrl+C` 退出。
@@ -237,16 +237,16 @@ MIERU_CONFIG_JSON_FILE=/etc/mieru_client_config.json mieru run
 
 ```sh
 # 服务器
-mita apply config <FILE>       # 合并写入；要整体替换则用 mita replace config <FILE>
-mita stop
-mita start
+shadowlemon server apply config <FILE>       # 合并写入；要整体替换则用 shadowlemon server replace config <FILE>
+shadowlemon server stop
+shadowlemon server start
 
 # 客户端
-mieru apply config <FILE>      # 合并写入；要整体替换则用 mieru replace config <FILE>
-mieru stop
-mieru start
+shadowlemon client apply config <FILE>      # 合并写入；要整体替换则用 shadowlemon client replace config <FILE>
+shadowlemon client stop
+shadowlemon client start
 ```
 
 需要重启的原因：守护进程在启动代理服务时读取一次配置，之后配置文件的改动不会自动作用于已经运行的代理服务。因此**本版本不再提供局部重载配置的能力**，任何改动（包括 `loggingLevel`、监听端口、用户列表）都要通过 `stop` + `start` 生效。
 
-如果只想确认当前生效的设置，用 `mita describe config` 或 `mieru describe config` 查看。
+如果只想确认当前生效的设置，用 `shadowlemon server describe config` 或 `shadowlemon client describe config` 查看。

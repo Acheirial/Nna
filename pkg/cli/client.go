@@ -40,101 +40,101 @@ import (
 // RegisterClientCommands registers all the client side CLI commands.
 func RegisterClientCommands() {
 	RegisterCallback(
-		[]string{"", "help"},
+		[]string{"", "client", "help"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		clientHelpFunc,
 	)
 	RegisterCallback(
-		[]string{"", "start"},
+		[]string{"", "client", "start"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		clientStartFunc,
 	)
 	RegisterCallback(
-		[]string{"", "run"},
+		[]string{"", "client", "run"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		clientRunFunc,
 	)
 	RegisterCallback(
-		[]string{"", "stop"},
+		[]string{"", "client", "stop"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		clientStopFunc,
 	)
 	RegisterCallback(
-		[]string{"", "status"},
+		[]string{"", "client", "status"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		clientStatusFunc,
 	)
 	RegisterCallback(
-		[]string{"", "apply", "config"},
+		[]string{"", "client", "apply", "config"},
 		func(s []string) error {
-			if len(s) < 4 {
-				return fmt.Errorf("usage: mieru apply config <FILE>. No config file is provided")
-			} else if len(s) > 4 {
-				return fmt.Errorf("usage: mieru apply config <FILE>. More than 1 config file is provided")
+			if len(s) < 5 {
+				return fmt.Errorf("usage: shadowlemon client apply config <FILE>. No config file is provided")
+			} else if len(s) > 5 {
+				return fmt.Errorf("usage: shadowlemon client apply config <FILE>. More than 1 config file is provided")
 			}
 			return nil
 		},
 		clientApplyConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "replace", "config"},
+		[]string{"", "client", "replace", "config"},
 		func(s []string) error {
-			if len(s) < 4 {
-				return fmt.Errorf("usage: mieru replace config <FILE>. No config file is provided")
-			} else if len(s) > 4 {
-				return fmt.Errorf("usage: mieru replace config <FILE>. More than 1 config file is provided")
+			if len(s) < 5 {
+				return fmt.Errorf("usage: shadowlemon client replace config <FILE>. No config file is provided")
+			} else if len(s) > 5 {
+				return fmt.Errorf("usage: shadowlemon client replace config <FILE>. More than 1 config file is provided")
 			}
 			return nil
 		},
 		clientReplaceConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "describe", "config"},
+		[]string{"", "client", "describe", "config"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 3)
+			return unexpectedArgsError(s, 4)
 		},
 		clientDescribeConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "import", "config"},
+		[]string{"", "client", "import", "config"},
 		func(s []string) error {
-			if len(s) < 4 {
-				return fmt.Errorf("usage: mieru import config <URL>. No URL is provided")
-			} else if len(s) > 4 {
-				return fmt.Errorf("usage: mieru import config <URL>. More than 1 URL is provided")
+			if len(s) < 5 {
+				return fmt.Errorf("usage: shadowlemon client import config <URL>. No URL is provided")
+			} else if len(s) > 5 {
+				return fmt.Errorf("usage: shadowlemon client import config <URL>. More than 1 URL is provided")
 			}
 			return nil
 		},
 		clientImportConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "export", "config", "simple"},
+		[]string{"", "client", "export", "config", "simple"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 4)
+			return unexpectedArgsError(s, 5)
 		},
 		clientExportConfigSimpleFunc,
 	)
 	RegisterCallback(
-		[]string{"", "export", "config"},
+		[]string{"", "client", "export", "config"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 3)
+			return unexpectedArgsError(s, 4)
 		},
 		clientExportConfigFunc,
 	)
 	RegisterCallback(
-		[]string{"", "version"},
+		[]string{"", "client", "version"},
 		func(s []string) error {
-			return unexpectedArgsError(s, 2)
+			return unexpectedArgsError(s, 3)
 		},
 		versionFunc,
 	)
@@ -142,44 +142,44 @@ func RegisterClientCommands() {
 
 var clientHelpFunc = func(s []string) error {
 	helpFmt := helpFormatter{
-		appName: "mieru",
+		appName: "shadowlemon client",
 		entries: []helpCmdEntry{
 			{
-				cmd:  "help",
-				help: []string{"Show mieru client help."},
+				cmd:  "client help",
+				help: []string{"Show shadowlemon client help."},
 			},
 			{
-				cmd:  "start",
-				help: []string{"Start mieru client in background."},
+				cmd:  "client start",
+				help: []string{"Start shadowlemon client in background."},
 			},
 			{
-				cmd:  "stop",
-				help: []string{"Stop mieru client."},
+				cmd:  "client stop",
+				help: []string{"Stop shadowlemon client."},
 			},
 			{
-				cmd:  "status",
-				help: []string{"Check mieru client status."},
+				cmd:  "client status",
+				help: []string{"Check shadowlemon client status."},
 			},
 			{
-				cmd: "apply config <JSON_FILE>",
+				cmd: "client apply config <JSON_FILE>",
 				help: []string{
 					"Apply client configuration patch from a file.",
 					"It merges the patch with existing client configuration.",
 				},
 			},
 			{
-				cmd: "replace config <JSON_FILE>",
+				cmd: "client replace config <JSON_FILE>",
 				help: []string{
 					"Replace saved client configuration with a complete JSON file.",
 					"Omitted settings and profiles are removed.",
 				},
 			},
 			{
-				cmd:  "describe config",
+				cmd:  "client describe config",
 				help: []string{"Show current client configuration."},
 			},
 			{
-				cmd: "import config <URL>",
+				cmd: "client import config <URL>",
 				help: []string{
 					"Import client configuration from a URL.",
 					"The URL can be standard format mieru:// or simple format mierus://.",
@@ -187,23 +187,23 @@ var clientHelpFunc = func(s []string) error {
 				},
 			},
 			{
-				cmd:  "export config simple",
+				cmd:  "client export config simple",
 				help: []string{"Export client configuration as URLs in simple format."},
 			},
 			{
-				cmd:  "export config",
+				cmd:  "client export config",
 				help: []string{"Export client configuration as a URL."},
 			},
 			{
-				cmd:  "version",
-				help: []string{"Show mieru client version."},
+				cmd:  "client version",
+				help: []string{"Show shadowlemon client version."},
 			},
 		},
 		advanced: []helpCmdEntry{
 			{
-				cmd: "run",
+				cmd: "client run",
 				help: []string{
-					"Run mieru client in foreground.",
+					"Run shadowlemon client in foreground.",
 					"Use environment variable MIERU_CONFIG_JSON_FILE to load configuration.",
 				},
 			},
@@ -231,14 +231,14 @@ var clientStartFunc = func(s []string) error {
 		return fmt.Errorf(stderror.GetClientPidFilePathFailedErr, err)
 	}
 	if running, _ := appctl.IsAppRunning(pidFilePath); running {
-		log.Infof("mieru client is running, listening to socks5://%s", clientSocks5Address(config))
+		log.Infof("shadowlemon client is running, listening to socks5://%s", clientSocks5Address(config))
 		return nil
 	}
 
-	if err := appctl.StartAppDaemon(s[0], pidFilePath); err != nil {
+	if err := appctl.StartAppDaemon(s[0], pidFilePath, "client"); err != nil {
 		return fmt.Errorf(stderror.StartClientFailedErr, err)
 	}
-	log.Infof("mieru client is started, listening to socks5://%s", clientSocks5Address(config))
+	log.Infof("shadowlemon client is started, listening to socks5://%s", clientSocks5Address(config))
 	return nil
 }
 
@@ -359,7 +359,7 @@ var clientRunFunc = func(s []string) error {
 			return
 		}
 		close(started)
-		log.Infof("mieru client socks5 server is running, listening to socks5://%s", socks5Addr)
+		log.Infof("shadowlemon client socks5 server is running, listening to socks5://%s", socks5Addr)
 		serveErr <- socks5Server.Serve(socks5Listener)
 	}(socks5Addr)
 
@@ -377,7 +377,7 @@ var clientRunFunc = func(s []string) error {
 	var serveFailed error
 	select {
 	case sig := <-stopChan:
-		log.Infof("received signal %v, stop mieru client", sig)
+		log.Infof("received signal %v, stop shadowlemon client", sig)
 	case err := <-serveErr:
 		// Don't call log.Fatalf here, which exits the process without running
 		// the deferred pid file removal, and leaves a stale pid file.
@@ -392,9 +392,9 @@ var clientRunFunc = func(s []string) error {
 		log.Errorf("client mux Close() failed: %v", err)
 	}
 	wg.Wait()
-	log.Infof("mieru client socks5 server is stopped")
+	log.Infof("shadowlemon client socks5 server is stopped")
 
-	log.Infof("mieru client exit now")
+	log.Infof("shadowlemon client exit now")
 	if serveFailed != nil {
 		return fmt.Errorf(stderror.RunSocks5ServerFailedErr, serveFailed)
 	}
@@ -414,7 +414,7 @@ var clientStopFunc = func(s []string) error {
 		log.Infof(stderror.ClientNotRunning)
 		return nil
 	}
-	log.Infof("mieru client is stopped")
+	log.Infof("shadowlemon client is stopped")
 	return nil
 }
 
@@ -424,9 +424,9 @@ var clientStatusFunc = func(s []string) error {
 		return fmt.Errorf(stderror.GetClientPidFilePathFailedErr, err)
 	}
 	if running, _ := appctl.IsAppRunning(pidFilePath); running {
-		log.Infof("mieru client status is %q", "RUNNING")
+		log.Infof("shadowlemon client status is %q", "RUNNING")
 	} else {
-		log.Infof("mieru client status is %q", "STOPPED")
+		log.Infof("shadowlemon client status is %q", "STOPPED")
 	}
 	return nil
 }
@@ -437,11 +437,11 @@ var clientApplyConfigFunc = func(s []string) error {
 			return fmt.Errorf(stderror.StoreClientConfigFailedErr, err)
 		}
 	}
-	return appctl.ApplyJSONClientConfig(s[3])
+	return appctl.ApplyJSONClientConfig(s[4])
 }
 
 var clientReplaceConfigFunc = func(s []string) error {
-	return appctl.ReplaceJSONClientConfig(s[3])
+	return appctl.ReplaceJSONClientConfig(s[4])
 }
 
 var clientDescribeConfigFunc = func(s []string) error {
@@ -464,7 +464,7 @@ var clientImportConfigFunc = func(s []string) error {
 			return fmt.Errorf(stderror.StoreClientConfigFailedErr, err)
 		}
 	}
-	return appctl.ApplyURLClientConfig(s[3])
+	return appctl.ApplyURLClientConfig(s[4])
 }
 
 var clientExportConfigSimpleFunc = func(s []string) error {

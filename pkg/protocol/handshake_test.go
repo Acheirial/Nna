@@ -70,8 +70,8 @@ func TestHandshakeRequestRoundTrip(t *testing.T) {
 			if consumed != len(b) {
 				t.Fatalf("consumed %d bytes, want %d", consumed, len(b))
 			}
-			if parsed.versionMin != minSupportedProtocolVersion || parsed.versionMax != maxSupportedProtocolVersion {
-				t.Fatalf("version range = %d-%d, want %d-%d", parsed.versionMin, parsed.versionMax, minSupportedProtocolVersion, maxSupportedProtocolVersion)
+			if parsed.versionMin != protocolVersion || parsed.versionMax != protocolVersion {
+				t.Fatalf("version range = %d-%d, want %d-%d", parsed.versionMin, parsed.versionMax, protocolVersion, protocolVersion)
 			}
 			if !reflect.DeepEqual(parsed.suites, request.suites) {
 				t.Fatalf("suites = %v, want %v", parsed.suites, request.suites)
@@ -195,14 +195,10 @@ func TestHandshakeResponseRoundTrip(t *testing.T) {
 			name: "success",
 			response: &handshakeResponse{
 				status:  handshakeStatusOK,
-				version: maxSupportedProtocolVersion,
+				version: protocolVersion,
 				suite:   cipher.SuiteAES256GCM,
 				ephPub:  [handshakeEphemeralKeyLen]byte{1, 2, 3},
 			},
-		},
-		{
-			name:     "no common version",
-			response: handshakeFailureResponse(handshakeStatusNoVersion),
 		},
 		{
 			name:     "no common suite",
@@ -228,7 +224,7 @@ func TestHandshakeResponseRoundTrip(t *testing.T) {
 	// The success response round trips the salts as well.
 	response := &handshakeResponse{
 		status:     handshakeStatusOK,
-		version:    maxSupportedProtocolVersion,
+		version:    protocolVersion,
 		suite:      cipher.SuiteAES128GCM,
 		serverSalt: [handshakeSaltLen]byte{9, 8, 7},
 	}
@@ -244,14 +240,16 @@ func TestHandshakeResponseRoundTrip(t *testing.T) {
 func TestParseHandshakeResponseRejects(t *testing.T) {
 	valid := &handshakeResponse{
 		status:  handshakeStatusOK,
-		version: maxSupportedProtocolVersion,
+		version: protocolVersion,
 		suite:   cipher.SuiteXChaCha20Poly1305,
 	}
 	validBytes := valid.Marshal()
 	unknownSuite := *valid
 	unknownSuite.suite = cipher.Suite(9)
-	oldVersion := *valid
-	oldVersion.version = 1
+	previousVersion := *valid
+	previousVersion.version = 2
+	oldestVersion := *valid
+	oldestVersion.version = 1
 
 	testCases := []struct {
 		name string
@@ -278,8 +276,12 @@ func TestParseHandshakeResponseRejects(t *testing.T) {
 			data: unknownSuite.Marshal(),
 		},
 		{
-			name: "unsupported version",
-			data: oldVersion.Marshal(),
+			name: "unsupported version of a previous peer",
+			data: previousVersion.Marshal(),
+		},
+		{
+			name: "unsupported version of the oldest peer",
+			data: oldestVersion.Marshal(),
 		},
 	}
 	for _, tc := range testCases {
@@ -296,6 +298,8 @@ func TestParseHandshakeResponseRejects(t *testing.T) {
 	}
 }
 
+// TestNegotiateVersion verifies that the version of a client is accepted only
+// when its range contains the single protocol version of this build.
 func TestNegotiateVersion(t *testing.T) {
 	testCases := []struct {
 		name             string
@@ -305,24 +309,17 @@ func TestNegotiateVersion(t *testing.T) {
 		wantIntersection bool
 	}{
 		{
-			name:             "version 2",
-			clientMin:        2,
-			clientMax:        2,
-			wantVersion:      2,
+			name:             "client only supports the protocol version of this build",
+			clientMin:        protocolVersion,
+			clientMax:        protocolVersion,
+			wantVersion:      protocolVersion,
 			wantIntersection: true,
 		},
 		{
-			name:             "client supports version 2 and 3",
-			clientMin:        2,
-			clientMax:        3,
-			wantVersion:      3,
-			wantIntersection: true,
-		},
-		{
-			name:             "client only supports version 3",
-			clientMin:        3,
-			clientMax:        3,
-			wantVersion:      3,
+			name:             "client supports version 1 to 3",
+			clientMin:        1,
+			clientMax:        protocolVersion,
+			wantVersion:      protocolVersion,
 			wantIntersection: true,
 		},
 		{
@@ -332,11 +329,10 @@ func TestNegotiateVersion(t *testing.T) {
 			wantIntersection: false,
 		},
 		{
-			name:             "client supports version 1 to 3",
-			clientMin:        1,
-			clientMax:        3,
-			wantVersion:      3,
-			wantIntersection: true,
+			name:             "client only supports a version of a previous peer",
+			clientMin:        2,
+			clientMax:        2,
+			wantIntersection: false,
 		},
 		{
 			name:             "client only supports versions above the build",
@@ -364,9 +360,8 @@ func TestNegotiateVersion(t *testing.T) {
 	}
 }
 
-// TestNegotiateSuite verifies the cipher suite selection of protocol version 3
-// and later: the server preference order decides and the key length of the
-// handshake envelope is not a bound.
+// TestNegotiateSuite verifies the cipher suite selection: the server preference
+// order decides and the key length of the handshake envelope is not a bound.
 func TestNegotiateSuite(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -431,121 +426,6 @@ func TestNegotiateSuite(t *testing.T) {
 			}
 			if ok && suite != tc.wantSuite {
 				t.Fatalf("negotiateSuite(%v, %v) = %v, want %v", tc.clientSuites, tc.allowedSuites, suite, tc.wantSuite)
-			}
-		})
-	}
-}
-
-func TestNegotiateSuiteForEnvelope(t *testing.T) {
-	testCases := []struct {
-		name          string
-		clientSuites  []cipher.Suite
-		allowedSuites []cipher.Suite
-		envelope      cipher.Suite
-		wantSuite     cipher.Suite
-		wantCommon    bool
-	}{
-		{
-			name:          "identical single suite",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES256GCM},
-			allowedSuites: []cipher.Suite{cipher.SuiteAES256GCM},
-			envelope:      cipher.SuiteAES256GCM,
-			wantSuite:     cipher.SuiteAES256GCM,
-			wantCommon:    true,
-		},
-		{
-			name:          "server preference decides",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305},
-			allowedSuites: []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES128GCM},
-			envelope:      cipher.SuiteXChaCha20Poly1305,
-			wantSuite:     cipher.SuiteXChaCha20Poly1305,
-			wantCommon:    true,
-		},
-		{
-			name:          "server preference differs from client preference",
-			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES256GCM},
-			allowedSuites: []cipher.Suite{cipher.SuiteAES256GCM, cipher.SuiteXChaCha20Poly1305},
-			envelope:      cipher.SuiteXChaCha20Poly1305,
-			wantSuite:     cipher.SuiteAES256GCM,
-			wantCommon:    true,
-		},
-		{
-			name:          "empty intersection",
-			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305},
-			allowedSuites: []cipher.Suite{cipher.SuiteAES128GCM},
-			envelope:      cipher.SuiteXChaCha20Poly1305,
-			wantCommon:    false,
-		},
-		{
-			name:          "empty client list",
-			clientSuites:  nil,
-			allowedSuites: cipher.AllSuites(),
-			envelope:      cipher.SuiteXChaCha20Poly1305,
-			wantCommon:    false,
-		},
-		{
-			name:          "empty allowed list means all suites",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM},
-			allowedSuites: nil,
-			envelope:      cipher.SuiteXChaCha20Poly1305,
-			wantSuite:     cipher.SuiteAES128GCM,
-			wantCommon:    true,
-		},
-		{
-			name:          "unknown allowed suite is ignored",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES256GCM},
-			allowedSuites: []cipher.Suite{cipher.Suite(7), cipher.SuiteAES256GCM},
-			envelope:      cipher.SuiteXChaCha20Poly1305,
-			wantSuite:     cipher.SuiteAES256GCM,
-			wantCommon:    true,
-		},
-		{
-			name:          "every suite fits in the envelope",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305},
-			allowedSuites: cipher.AllSuites(),
-			envelope:      cipher.SuiteXChaCha20Poly1305,
-			wantSuite:     cipher.SuiteXChaCha20Poly1305,
-			wantCommon:    true,
-		},
-		{
-			name:          "a suite with a longer key than the envelope is skipped",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305},
-			allowedSuites: cipher.AllSuites(),
-			envelope:      cipher.SuiteAES128GCM,
-			wantSuite:     cipher.SuiteAES128GCM,
-			wantCommon:    true,
-		},
-		{
-			name:          "a suite with a key as long as the envelope is kept",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteAES256GCM},
-			allowedSuites: cipher.AllSuites(),
-			envelope:      cipher.SuiteAES256GCM,
-			wantSuite:     cipher.SuiteAES256GCM,
-			wantCommon:    true,
-		},
-		{
-			name:          "every common suite needs a longer key than the envelope",
-			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES256GCM},
-			allowedSuites: cipher.AllSuites(),
-			envelope:      cipher.SuiteAES128GCM,
-			wantCommon:    false,
-		},
-		{
-			name:          "invalid envelope disables every suite",
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM},
-			allowedSuites: cipher.AllSuites(),
-			envelope:      cipher.Suite(9),
-			wantCommon:    false,
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			suite, ok := negotiateSuiteForEnvelope(tc.clientSuites, tc.allowedSuites, tc.envelope)
-			if ok != tc.wantCommon {
-				t.Fatalf("negotiateSuiteForEnvelope(%v, %v, %v) common = %v, want %v", tc.clientSuites, tc.allowedSuites, tc.envelope, ok, tc.wantCommon)
-			}
-			if ok && suite != tc.wantSuite {
-				t.Fatalf("negotiateSuiteForEnvelope(%v, %v, %v) = %v, want %v", tc.clientSuites, tc.allowedSuites, tc.envelope, suite, tc.wantSuite)
 			}
 		})
 	}
@@ -648,11 +528,11 @@ func TestDeriveSessionKeysAgree(t *testing.T) {
 			clientSalt := []byte("0123456789abcdef")
 			serverSalt := []byte("fedcba9876543210")
 
-			clientC2S, clientS2C, err := deriveSessionKeys(clientStatic, suite, clientPriv, serverPub, clientSalt, serverSalt, maxSupportedProtocolVersion, true)
+			clientC2S, clientS2C, err := deriveSessionKeys(clientStatic, suite, clientPriv, serverPub, clientSalt, serverSalt, true)
 			if err != nil {
 				t.Fatalf("deriveSessionKeys() for the client failed: %v", err)
 			}
-			serverC2S, serverS2C, err := deriveSessionKeys(serverStatic, suite, serverPriv, clientPub, clientSalt, serverSalt, maxSupportedProtocolVersion, true)
+			serverC2S, serverS2C, err := deriveSessionKeys(serverStatic, suite, serverPriv, clientPub, clientSalt, serverSalt, true)
 			if err != nil {
 				t.Fatalf("deriveSessionKeys() for the server failed: %v", err)
 			}
@@ -694,7 +574,7 @@ func TestDeriveSessionKeysAgree(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BlockCipherFromPassword() for another credential failed: %v", err)
 			}
-			otherC2S, _, err := deriveSessionKeys(otherStatic, suite, clientPriv, serverPub, clientSalt, serverSalt, maxSupportedProtocolVersion, true)
+			otherC2S, _, err := deriveSessionKeys(otherStatic, suite, clientPriv, serverPub, clientSalt, serverSalt, true)
 			if err != nil {
 				t.Fatalf("deriveSessionKeys() for another credential failed: %v", err)
 			}
@@ -705,67 +585,13 @@ func TestDeriveSessionKeysAgree(t *testing.T) {
 	}
 }
 
-// TestDeriveSessionKeysVersionSelectsSuite proves that the key derivation
-// follows the protocol version: from version 3 on the keys are derived from the
-// negotiated suite, so a data plane suite may need more key material than the
-// cipher that protected the handshake envelope, while under version 2 the keys
-// are derived from the envelope cipher and a longer negotiated suite is
-// rejected.
-func TestDeriveSessionKeysVersionSelectsSuite(t *testing.T) {
-	password := []byte("a version dependent derivation credential")
-	envelope, err := cipher.BlockCipherFromPassword(cipher.SuiteAES128GCM, password, true)
-	if err != nil {
-		t.Fatalf("BlockCipherFromPassword() failed: %v", err)
-	}
-	priv, pub, err := cipher.GenerateEphemeralKey()
-	if err != nil {
-		t.Fatalf("GenerateEphemeralKey() failed: %v", err)
-	}
-	clientSalt := []byte("0123456789abcdef")
-	serverSalt := []byte("fedcba9876543210")
-	probe := []byte("a version dependent data plane probe")
-
-	// Version 3: the XChaCha20-Poly1305 data plane needs 32 bytes of key, which
-	// the 16 bytes envelope of AES-128-GCM could not provide under version 2.
-	c2s, s2c, err := deriveSessionKeys(envelope, cipher.SuiteXChaCha20Poly1305, priv, pub, clientSalt, serverSalt, 3, true)
-	if err != nil {
-		t.Fatalf("deriveSessionKeys() of version 3 failed: %v", err)
-	}
-	if got := c2s.Suite(); got != cipher.SuiteXChaCha20Poly1305 {
-		t.Fatalf("client to server cipher suite = %v, want %v", got, cipher.SuiteXChaCha20Poly1305)
-	}
-	if got := s2c.Suite(); got != cipher.SuiteXChaCha20Poly1305 {
-		t.Fatalf("server to client cipher suite = %v, want %v", got, cipher.SuiteXChaCha20Poly1305)
-	}
-	wire := testSealProbe(t, c2s, probe)
-	decrypted, err := c2s.CloneStatelessFast().Decrypt(append([]byte{}, wire...))
-	if err != nil {
-		t.Fatalf("the data plane cipher didn't decrypt its own message: %v", err)
-	}
-	if !bytes.Equal(decrypted, probe) {
-		t.Fatalf("data plane probe = %q, want %q", decrypted, probe)
-	}
-
-	// Version 2: the same pair of suites is rejected, because the session keys
-	// are derived from the envelope cipher and only 16 bytes long.
-	if _, _, err := deriveSessionKeys(envelope, cipher.SuiteXChaCha20Poly1305, priv, pub, clientSalt, serverSalt, 2, true); err == nil {
-		t.Fatal("deriveSessionKeys() of version 2 accepted a XChaCha20-Poly1305 data plane with an AES-128-GCM envelope")
-	}
-	// Version 2 with the suite of the envelope works.
-	if _, _, err := deriveSessionKeys(envelope, cipher.SuiteAES128GCM, priv, pub, clientSalt, serverSalt, 2, true); err != nil {
-		t.Fatalf("deriveSessionKeys() of version 2 with the envelope suite failed: %v", err)
-	}
-}
-
-// TestAcceptHandshakeVersionSelectsSuite proves the version dependent cipher
-// suite selection of a server. A version 2 request keeps the envelope key
-// length filter and derives the session keys from the envelope cipher, even
-// when the negotiated data plane suite is another one, while a version 3
-// request negotiates the server preferred suite even when it needs a longer key
-// than the handshake envelope. Both peers must still agree on the data plane
-// key in every case.
-func TestAcceptHandshakeVersionSelectsSuite(t *testing.T) {
-	const userName = "handshake-version-user"
+// TestAcceptHandshakeSelectsSuite proves the cipher suite selection of a server:
+// the server preference order decides, and the key length of the cipher that
+// protected the handshake envelope is not a bound, because the session keys are
+// derived from the negotiated suite. Both peers must still agree on the data
+// plane key in every case.
+func TestAcceptHandshakeSelectsSuite(t *testing.T) {
+	const userName = "handshake-suite-user"
 	password := cipher.HashPassword([]byte(t.Name()), []byte(userName))
 
 	testCases := []struct {
@@ -773,50 +599,35 @@ func TestAcceptHandshakeVersionSelectsSuite(t *testing.T) {
 		envelopeSuite cipher.Suite
 		clientSuites  []cipher.Suite
 		allowedSuites []cipher.Suite
-		versionMin    uint8
-		versionMax    uint8
 		wantSuite     cipher.Suite
 	}{
 		{
-			// The envelope cipher is the first suite the client offers, which
-			// is AES-128-GCM and only provides 16 bytes of key material. Under
-			// version 2 the envelope filter skips the XChaCha20-Poly1305 the
-			// server prefers.
-			name:          "version 2 keeps the envelope filter",
-			envelopeSuite: cipher.SuiteAES128GCM,
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305},
-			versionMin:    2,
-			versionMax:    2,
-			wantSuite:     cipher.SuiteAES128GCM,
-		},
-		{
-			name:          "version 3 ignores the envelope key length",
-			envelopeSuite: cipher.SuiteAES128GCM,
-			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305},
-			versionMin:    3,
-			versionMax:    3,
+			// The first suite of the client protects the handshake envelope, so
+			// the envelope of this case is XChaCha20-Poly1305 and the client
+			// prefers AES-128-GCM. The server preference order still decides,
+			// because the session keys are derived from the negotiated suite.
+			name:          "server preference decides",
+			envelopeSuite: cipher.SuiteXChaCha20Poly1305,
+			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES128GCM},
 			wantSuite:     cipher.SuiteXChaCha20Poly1305,
 		},
 		{
-			// Under version 2 the negotiated suite may differ from the suite
-			// of the envelope. The session keys are then derived from the
-			// envelope cipher and only the first bytes of them are used by the
-			// negotiated data plane suite.
-			name:          "version 2 derives from the envelope when the negotiated suite differs",
-			envelopeSuite: cipher.SuiteXChaCha20Poly1305,
-			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES128GCM},
-			allowedSuites: []cipher.Suite{cipher.SuiteAES128GCM},
-			versionMin:    2,
-			versionMax:    2,
-			wantSuite:     cipher.SuiteAES128GCM,
+			// The negotiated suite needs 32 bytes of key material, which the
+			// 16 bytes envelope of AES-128-GCM doesn't provide. The session
+			// keys are derived from the negotiated suite, so the envelope key
+			// length is not a bound.
+			name:          "negotiated suite longer than the envelope key",
+			envelopeSuite: cipher.SuiteAES128GCM,
+			clientSuites:  []cipher.Suite{cipher.SuiteAES128GCM, cipher.SuiteXChaCha20Poly1305},
+			wantSuite:     cipher.SuiteXChaCha20Poly1305,
 		},
 		{
-			name:          "version 3 derives from the negotiated suite",
+			// The negotiated suite is not the suite of the envelope, and it is
+			// shorter than the envelope key.
+			name:          "negotiated suite differs from the envelope suite",
 			envelopeSuite: cipher.SuiteXChaCha20Poly1305,
 			clientSuites:  []cipher.Suite{cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES128GCM},
 			allowedSuites: []cipher.Suite{cipher.SuiteAES128GCM},
-			versionMin:    3,
-			versionMax:    3,
 			wantSuite:     cipher.SuiteAES128GCM,
 		},
 	}
@@ -827,7 +638,7 @@ func TestAcceptHandshakeVersionSelectsSuite(t *testing.T) {
 				t.Fatalf("BlockCipherFromPassword() failed: %v", err)
 			}
 			sessionID := uint32(500 + i)
-			client, payload := newTestHandshakeClientWithVersion(t, envelope, false, tc.clientSuites, tc.versionMin, tc.versionMax)
+			client, payload := newTestHandshakeClientWithSuites(t, envelope, false, tc.clientSuites)
 			server := NewSession(sessionID, false, 1400, nil, nil)
 			requestSeg := testOpenSessionSegmentWithPayload(t, sessionID, common.StreamTransport, payload)
 			response, c2s, s2c, err := server.acceptHandshake(requestSeg, envelope, tc.allowedSuites, false)
@@ -837,8 +648,8 @@ func TestAcceptHandshakeVersionSelectsSuite(t *testing.T) {
 			if response.status != handshakeStatusOK {
 				t.Fatalf("handshake status = %d, want %d", response.status, handshakeStatusOK)
 			}
-			if response.version != tc.versionMax {
-				t.Fatalf("handshake version = %d, want %d", response.version, tc.versionMax)
+			if response.version != protocolVersion {
+				t.Fatalf("handshake version = %d, want %d", response.version, protocolVersion)
 			}
 			if response.suite != tc.wantSuite {
 				t.Fatalf("negotiated suite = %v, want %v", response.suite, tc.wantSuite)
@@ -855,7 +666,7 @@ func TestAcceptHandshakeVersionSelectsSuite(t *testing.T) {
 			if got := client.c2s.Suite(); got != tc.wantSuite {
 				t.Fatalf("client to server cipher suite = %v, want %v", got, tc.wantSuite)
 			}
-			probe := []byte("a version dependent data plane probe")
+			probe := []byte("a negotiated data plane probe")
 			wire := testSealProbe(t, client.c2s, probe)
 			decrypted, err := c2s.CloneStatelessFast().Decrypt(append([]byte{}, wire...))
 			if err != nil {
@@ -1033,7 +844,7 @@ func TestHandshakePublishesClientCiphersAfterChainSwitch(t *testing.T) {
 	}
 
 	// Only the transport commits, after it switched its cipher chain.
-	other.commitClientHandshake(c2s, s2c, resp.version, resp.suite)
+	other.commitClientHandshake(c2s, s2c, resp.suite)
 	if !other.handshakeDone.Load() || other.clientHandshakePending() {
 		t.Fatal("commitClientHandshake() didn't publish the handshake")
 	}

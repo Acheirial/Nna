@@ -189,7 +189,10 @@ func TestDiscoveryFailureCacheRequiresMandatoryHint(t *testing.T) {
 	// The hint names the registered user, but the payload is protected by a
 	// different credential, so the trial decryption fails.
 	unknownCredential := cipher.HashPassword([]byte("unknown"), []byte(userName))
-	failedMetadata := encryptDiscoveryMetadata(t, unknownCredential, userName, users, true, plaintext)
+	failedMetadata := encryptMetadataWithContext(t, unknownCredential, cipher.BlockContext{
+		UserName: userName,
+		Pepper:   cipher.HintPepper(userName, string(credential)),
+	}, plaintext)
 	// A correctly authenticated packet with the same source hint.
 	validMetadata := encryptDiscoveryMetadata(t, credential, userName, users, true, plaintext)
 	source := Source{key: sourceUserCacheTestKey(1008), valid: true}

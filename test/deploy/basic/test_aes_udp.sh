@@ -36,7 +36,7 @@ source ./libtest.sh
 #
 # The negotiated suite is only observable in a log line, and that line is
 # written at DEBUG level by the client (pkg/protocol/session.go, message
-# "<session> handshake completed with protocol version %d and cipher suite %v").
+# "<session> handshake completed with protocol ShadowLemon V0.1 and cipher suite <suite>").
 # client_aes_udp.json therefore sets "loggingLevel": "DEBUG"; with the "INFO"
 # level used by client_udp.json the line is never emitted. The client writes its
 # log to $HOME/.cache/mieru/<timestamp>_<pid>.log
@@ -46,8 +46,8 @@ source ./libtest.sh
 # (Session.acceptHandshake) logs nothing when the handshake succeeds; it only
 # logs the reasons of a rejection, also at DEBUG level.
 CLIENT_LOG_DIR="$HOME/.cache/mieru"
-EXPECTED_AES_LINE="handshake completed with protocol version 3 and cipher suite AES_256_GCM"
-HANDSHAKE_LINE="handshake completed with protocol version 3 and cipher suite"
+EXPECTED_AES_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite AES_256_GCM"
+HANDSHAKE_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite"
 # The client logs "Adding session <id> to <underlay>" at DEBUG level when a
 # session is attached to an underlay (pkg/protocol/underlay_packet.go and
 # pkg/protocol/underlay_stream.go). The underlay name tells the transport apart:
@@ -56,7 +56,7 @@ PACKET_UNDERLAY_LINE="to PacketUnderlay{"
 STREAM_UNDERLAY_LINE="to StreamUnderlay{"
 
 # count_client_log_matches <substring>
-# Prints how many lines of the mieru client log contain the given substring.
+# Prints how many lines of the client log contain the given substring.
 function count_client_log_matches() {
     local pattern=$1
     local count
@@ -71,9 +71,9 @@ function count_client_log_matches() {
 function print_client_log_tail() {
     local lines=$1
 
-    echo "========== BEGIN TAIL OF MIERU CLIENT LOG =========="
+    echo "========== BEGIN TAIL OF CLIENT LOG =========="
     tail -n "$lines" "$CLIENT_LOG_DIR"/*.log 2>/dev/null || true
-    echo "==========  END TAIL OF MIERU CLIENT LOG  =========="
+    echo "==========  END TAIL OF CLIENT LOG  =========="
 }
 
 # assert_aes_cipher_suite_over_udp
@@ -93,18 +93,18 @@ function assert_aes_cipher_suite_over_udp() {
     packet_count=$(count_client_log_matches "$PACKET_UNDERLAY_LINE")
     stream_count=$(count_client_log_matches "$STREAM_UNDERLAY_LINE")
 
-    echo "cipher suite assertion: $handshake_count session(s) completed the version 2 handshake,"
+    echo "cipher suite assertion: $handshake_count session(s) completed the ShadowLemon V0.1 handshake,"
     echo "cipher suite assertion: $aes_count of them used AES_256_GCM."
     echo "transport assertion: $packet_count session(s) were attached to the UDP transport and"
     echo "transport assertion: $stream_count session(s) to the TCP transport."
 
     if [[ "$handshake_count" -eq 0 ]]; then
-        echo "cipher suite assertion FAILED: no client log line reports a completed version 2 handshake at all,"
+        echo "cipher suite assertion FAILED: no client log line reports a completed ShadowLemon V0.1 handshake at all,"
         echo "so the session either wasn't established or the client didn't log at DEBUG level."
         echo "the expected log line is written by pkg/protocol/session.go:"
-        echo "  log.Debugf(\"%v handshake completed with protocol version %d and cipher suite %v\", ...)"
+        echo "  handshake completed with protocol ShadowLemon V0.1 and cipher suite <suite>"
         print_client_log_tail 80
-        print_mieru_client_log
+        print_client_log
         exit 1
     fi
 
@@ -118,7 +118,7 @@ function assert_aes_cipher_suite_over_udp() {
         echo "help: that client_aes_udp.json sets profiles[0].cipherSuites and \"loggingLevel\": \"DEBUG\","
         echo "help: and that the log doesn't contain 'no common cipher suite with the server, the client offered'."
         print_client_log_tail 80
-        print_mieru_client_log
+        print_client_log
         exit 1
     fi
 
@@ -127,7 +127,7 @@ function assert_aes_cipher_suite_over_udp() {
         echo "verify AES-256-GCM over UDP. client_aes_udp.json must list only UDP port bindings,"
         echo "and server_aes_udp.json must bind the same UDP ports."
         print_client_log_tail 80
-        print_mieru_client_log
+        print_client_log
         exit 1
     fi
 
@@ -137,16 +137,16 @@ function assert_aes_cipher_suite_over_udp() {
     grep -h -F "$PACKET_UNDERLAY_LINE" "$CLIENT_LOG_DIR"/*.log 2>/dev/null | head -n 3 || true
 }
 
-# Update mieru server with the mixed config that only allows AES-256-GCM.
+# Update server with the mixed config that only allows AES-256-GCM.
 apply_server_config server_aes_udp.json
 
-# Start mieru server proxy.
+# Start the server daemon.
 start_server
 
-# Update mieru client with the UDP config that offers AES-256-GCM.
+# Update client with the UDP config that offers AES-256-GCM.
 apply_client_config client_aes_udp.json
 
-# Start mieru client.
+# Start the client.
 start_client
 
 # Start testing.
@@ -156,7 +156,7 @@ if ! ./socksudpclient -dst_host=127.0.0.1 -dst_port=9090 \
     -local_proxy_host=127.0.0.1 -local_proxy_port=1080 \
     -interval_ms=10 -num_request=100 -num_conn=60
 then
-    print_mieru_client_log
+    print_client_log
     echo "Test AES over UDP failed: the socks5 UDP associate data plane didn't carry the UDP packets."
     exit 1
 fi
@@ -170,12 +170,12 @@ assert_aes_cipher_suite_over_udp
 # negotiated cipher suite and the transport were the expected ones.
 print_client_log_tail 20
 
-# Stop mieru client.
+# Stop the client.
 stop_client
 
-# Stop mieru server proxy.
+# Stop the server daemon.
 stop_server
 
-delete_mieru_client_log
+delete_client_log
 
 echo "AES over UDP test is successful."

@@ -3,33 +3,33 @@
 START=99
 STOP=01
 
-MIERU_BIN="/usr/bin/mieru"
+SHADOWLEMON_BIN="/usr/bin/shadowlemon"
 MIERU_CONFIG="/etc/mieru_client_config.json"
 
 start() {
-    echo "Starting mieru client..."
-    # The pid file is maintained by mieru itself (<config dir>/mieru.pid),
+    echo "Starting shadowlemon client..."
+    # The pid file is maintained by shadowlemon itself (<config dir>/mieru.pid),
     # so this script must not create or delete a pid file of its own.
     export MIERU_CONFIG_JSON_FILE=$MIERU_CONFIG
-    "$MIERU_BIN" start
+    "$SHADOWLEMON_BIN" client start
     RC=$?
     if [ $RC -eq 0 ]; then
-        echo "mieru client is started"
+        echo "shadowlemon client is started"
         exit 0
     else
-        echo "failed to start mieru client"
+        echo "failed to start shadowlemon client"
         exit $RC
     fi
 }
 
 stop() {
-    echo "Stopping mieru client..."
-    # mieru reads its own pid file and sends SIGTERM to the daemon.
-    "$MIERU_BIN" stop
+    echo "Stopping shadowlemon client..."
+    # shadowlemon reads its own pid file and sends SIGTERM to the daemon.
+    "$SHADOWLEMON_BIN" client stop
     RC=$?
     if [ $RC -eq 0 ]; then
-        echo "mieru client is stopped"
+        echo "shadowlemon client is stopped"
     else
-        echo "failed to stop mieru client"
+        echo "failed to stop shadowlemon client"
     fi
 }

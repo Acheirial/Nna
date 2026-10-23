@@ -15,13 +15,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-function print_mieru_client_log() {
-    echo "========== BEGIN OF MIERU CLIENT LOG =========="
+function print_client_log() {
+    echo "========== BEGIN OF CLIENT LOG =========="
     cat $HOME/.cache/mieru/*.log
-    echo "==========  END OF MIERU CLIENT LOG  =========="
+    echo "==========  END OF CLIENT LOG  =========="
 }
 
-function delete_mieru_client_log() {
+function delete_client_log() {
     rm -rf $HOME/.cache/mieru/*.log
 }
 
@@ -46,21 +46,21 @@ function run_or_fail() {
 function apply_server_config() {
     local config=$1
 
-    run_or_fail "mita apply config $config" ./mita apply config "$config"
-    echo "mieru server config:"
-    ./mita describe config
+    run_or_fail "shadowlemon server apply config $config" ./shadowlemon server apply config "$config"
+    echo "server config:"
+    ./shadowlemon server describe config
 }
 
 # start_server
 function start_server() {
     local server_status
 
-    run_or_fail "mita start" ./mita start
-    server_status=$(./mita status)
-    echo "mieru server status:"
+    run_or_fail "shadowlemon server start" ./shadowlemon server start
+    server_status=$(./shadowlemon server status)
+    echo "server status:"
     echo "$server_status"
     if [[ "$server_status" != *RUNNING* ]]; then
-        echo "mita server is not running"
+        echo "server is not running"
         exit 1
     fi
 }
@@ -69,13 +69,13 @@ function start_server() {
 function stop_server() {
     local server_status
 
-    run_or_fail "mita stop" ./mita stop
+    run_or_fail "shadowlemon server stop" ./shadowlemon server stop
     sleep 1
-    server_status=$(./mita status)
-    echo "mieru server status:"
+    server_status=$(./shadowlemon server status)
+    echo "server status:"
     echo "$server_status"
     if [[ "$server_status" != *STOPPED* ]]; then
-        echo "mita server is not stopped"
+        echo "server is not stopped"
         exit 1
     fi
 }
@@ -84,21 +84,21 @@ function stop_server() {
 function apply_client_config() {
     local config=$1
 
-    run_or_fail "mieru apply config $config" ./mieru apply config "$config"
-    echo "mieru client config:"
-    ./mieru describe config
+    run_or_fail "shadowlemon client apply config $config" ./shadowlemon client apply config "$config"
+    echo "client config:"
+    ./shadowlemon client describe config
 }
 
 # start_client
 function start_client() {
     local client_status
 
-    run_or_fail "mieru start" ./mieru start
-    client_status=$(./mieru status)
-    echo "mieru client status:"
+    run_or_fail "shadowlemon client start" ./shadowlemon client start
+    client_status=$(./shadowlemon client status)
+    echo "client status:"
     echo "$client_status"
     if [[ "$client_status" != *RUNNING* ]]; then
-        echo "mieru client is not running"
+        echo "client is not running"
         exit 1
     fi
 }
@@ -107,21 +107,21 @@ function start_client() {
 function stop_client() {
     local client_status
 
-    run_or_fail "mieru stop" ./mieru stop
+    run_or_fail "shadowlemon client stop" ./shadowlemon client stop
     sleep 1
-    client_status=$(./mieru status)
-    echo "mieru client status:"
+    client_status=$(./shadowlemon client status)
+    echo "client status:"
     echo "$client_status"
     if [[ "$client_status" != *STOPPED* ]]; then
-        echo "mieru client is not stopped"
+        echo "client is not stopped"
         exit 1
     fi
 }
 
-# dump_client_log prints and deletes the mieru client log.
+# dump_client_log prints and deletes the client log.
 function dump_client_log() {
-    print_mieru_client_log
-    delete_mieru_client_log
+    print_client_log
+    delete_client_log
     sleep 1
 }
 
@@ -135,7 +135,7 @@ function run_socks5_new_conn() {
         -local_proxy_host=127.0.0.1 -local_proxy_port=1080 \
         -test_case=new_conn -num_request=3000
     then
-        print_mieru_client_log
+        print_client_log
         echo "$label - test socks5 new_conn failed."
         exit 1
     fi
@@ -151,7 +151,7 @@ function run_socks5_reuse_conn() {
         -local_proxy_host=127.0.0.1 -local_proxy_port=1080 \
         -test_case=reuse_conn -test_time_sec=30
     then
-        print_mieru_client_log
+        print_client_log
         echo "$label - test socks5 reuse_conn failed."
         exit 1
     fi
@@ -167,7 +167,7 @@ function run_socks5_new_conn_no_wait() {
         -local_proxy_host=127.0.0.1 -local_proxy_port=1080 \
         -test_case=new_conn -num_request=3000
     then
-        print_mieru_client_log
+        print_client_log
         echo "$label - test socks5 new_conn (handshake no wait) failed."
         exit 1
     fi
@@ -188,40 +188,40 @@ function run_socks5_test() {
     local client_config=$3
     local client_no_wait_config=$4
 
-    # Update mieru server with config.
+    # Update server with config.
     apply_server_config "$server_config"
 
-    # Start mieru server proxy.
+    # Start the server daemon.
     start_server
 
-    # Update mieru client with config.
+    # Update client with config.
     apply_client_config "$client_config"
 
-    # Start mieru client.
+    # Start the client.
     start_client
 
     # Start testing.
     run_socks5_new_conn "$label"
     run_socks5_reuse_conn "$label"
 
-    # Stop mieru client.
+    # Stop the client.
     stop_client
 
     dump_client_log
 
-    # Update mieru client with config handshake no wait mode.
+    # Update client with config handshake no wait mode.
     apply_client_config "$client_no_wait_config"
 
-    # Start mieru client.
+    # Start the client.
     start_client
 
     # Start testing.
     run_socks5_new_conn_no_wait "$label"
 
-    # Stop mieru client.
+    # Stop the client.
     stop_client
 
-    # Stop mieru server proxy.
+    # Stop the server daemon.
     stop_server
 
     dump_client_log

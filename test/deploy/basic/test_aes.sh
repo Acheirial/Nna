@@ -30,7 +30,7 @@ source ./libtest.sh
 #
 # The negotiation result is only observable in a log line, and that line is
 # written at DEBUG level by the client (pkg/protocol/session.go, message
-# "<session> handshake completed with protocol version %d and cipher suite %v").
+# "<session> handshake completed with protocol ShadowLemon V0.1 and cipher suite <suite>").
 # client_aes.json therefore sets "loggingLevel": "DEBUG"; with the "INFO" level
 # used by client_tcp.json the line is never emitted. The client writes its log
 # to $HOME/.cache/mieru/<timestamp>_<pid>.log
@@ -41,11 +41,11 @@ source ./libtest.sh
 # logs the reasons of a rejection, also at DEBUG level. server_aes.json is set
 # to DEBUG as well so that a rejection is visible in the container output.
 CLIENT_LOG_DIR="$HOME/.cache/mieru"
-EXPECTED_AES_LINE="handshake completed with protocol version 3 and cipher suite AES_256_GCM"
-HANDSHAKE_LINE="handshake completed with protocol version 3 and cipher suite"
+EXPECTED_AES_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite AES_256_GCM"
+HANDSHAKE_LINE="handshake completed with protocol ShadowLemon V0.1 and cipher suite"
 
 # count_client_log_matches <substring>
-# Prints how many lines of the mieru client log contain the given substring.
+# Prints how many lines of the client log contain the given substring.
 function count_client_log_matches() {
     local pattern=$1
     local count
@@ -60,9 +60,9 @@ function count_client_log_matches() {
 function print_client_log_tail() {
     local lines=$1
 
-    echo "========== BEGIN TAIL OF MIERU CLIENT LOG =========="
+    echo "========== BEGIN TAIL OF CLIENT LOG =========="
     tail -n "$lines" "$CLIENT_LOG_DIR"/*.log 2>/dev/null || true
-    echo "==========  END TAIL OF MIERU CLIENT LOG  =========="
+    echo "==========  END TAIL OF CLIENT LOG  =========="
 }
 
 # assert_aes_cipher_suite_negotiated
@@ -85,23 +85,23 @@ function assert_aes_cipher_suite_negotiated() {
 
     echo "cipher suite assertion FAILED: none of the $handshake_count completed session(s) used AES_256_GCM."
     if [[ "$handshake_count" -gt 0 ]]; then
-        echo "the sessions completed the version 2 handshake with a different cipher suite."
+        echo "the sessions completed the ShadowLemon V0.1 handshake with a different cipher suite."
         echo "observed completed handshakes (the suite name is at the end of each line):"
         grep -h -F "$HANDSHAKE_LINE" "$CLIENT_LOG_DIR"/*.log 2>/dev/null | head -n 3 || true
         echo "a XCHACHA20_POLY1305 suite above means the client fell back to the default suite"
         echo "instead of using the AES-256-GCM suite both configurations ask for."
     else
-        echo "no client log line reports a completed version 2 handshake at all, so the"
+        echo "no client log line reports a completed ShadowLemon V0.1 handshake at all, so the"
         echo "session either wasn't established or the client didn't log at DEBUG level."
     fi
     echo "the expected log line is written by pkg/protocol/session.go:"
-    echo "  log.Debugf(\"%v handshake completed with protocol version %d and cipher suite %v\", ...)"
+    echo "  handshake completed with protocol ShadowLemon V0.1 and cipher suite <suite>"
     echo "help: check that server_aes.json sets cipherSuites to CIPHER_SUITE_AES_256_GCM,"
     echo "help: that client_aes.json sets profiles[0].cipherSuites and \"loggingLevel\": \"DEBUG\","
     echo "help: that the server allows a suite the client offers, and that the log doesn't"
     echo "help: contain 'no common cipher suite with the server, the client offered'."
     print_client_log_tail 80
-    print_mieru_client_log
+    print_client_log
     exit 1
 }
 
@@ -126,6 +126,6 @@ print_client_log_tail 20
 stop_client
 stop_server
 
-delete_mieru_client_log
+delete_client_log
 
 echo "AES test is successful."

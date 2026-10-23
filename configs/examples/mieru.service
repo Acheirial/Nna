@@ -8,7 +8,7 @@ StartLimitIntervalSec=60
 [Service]
 Type=exec
 Environment="MIERU_CONFIG_JSON_FILE=/etc/mieru_client_config.json"
-ExecStart=/usr/bin/mieru run
+ExecStart=/usr/bin/shadowlemon client run
 Restart=on-failure
 RestartSec=1
 

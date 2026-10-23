@@ -36,8 +36,9 @@ import (
 var (
 	_ BlockCipher = &aeadBlockCipher{}
 
-	errCiphertextTooShort  = errors.New("ciphertext is smaller than nonce size")
-	errDestinationTooSmall = errors.New("destination capacity is too small")
+	errCiphertextTooShort    = errors.New("ciphertext is smaller than nonce size")
+	errDestinationTooSmall   = errors.New("destination capacity is too small")
+	errUserHintPepperMissing = errors.New("user hint pepper is empty")
 )
 
 // aeadBlockCipher implements BlockCipher interface with one AEAD algorithm.
@@ -158,7 +159,10 @@ func (c *aeadBlockCipher) Encrypt(dst, plaintext []byte) error {
 			if err != nil {
 				return fmt.Errorf("newNonce() failed: %w", err)
 			}
-			c.implicitNonce = c.addUserHintToNonce(c.implicitNonce)
+			c.implicitNonce, err = c.addUserHintToNonce(c.implicitNonce)
+			if err != nil {
+				return fmt.Errorf("addUserHintToNonce() failed: %w", err)
+			}
 		} else {
 			c.increaseNonce()
 		}
@@ -170,7 +174,10 @@ func (c *aeadBlockCipher) Encrypt(dst, plaintext []byte) error {
 		if err = c.newNonceTo(wireNonce); err != nil {
 			return fmt.Errorf("newNonceTo() failed: %w", err)
 		}
-		wireNonce = c.addUserHintToNonce(wireNonce)
+		wireNonce, err = c.addUserHintToNonce(wireNonce)
+		if err != nil {
+			return fmt.Errorf("addUserHintToNonce() failed: %w", err)
+		}
 	}
 
 	if needSendNonce {
@@ -512,21 +519,18 @@ func (c *aeadBlockCipher) cloneStatelessFast() *aeadBlockCipher {
 
 // addUserHintToNonce embeds the user hint of the block context into the last
 // NonceSuffixLenForUserHint bytes of the wire nonce, in place, and returns the
-// nonce. The length and the position of the hint are the same whatever hint is
-// written, only the 4 bytes at the end of the nonce change.
+// nonce. The length and the position of the hint are fixed, only the 4 bytes at
+// the end of the nonce change.
 //
-// When the block context has no pepper, this writes the legacy hint of
-// protocol v2, which is derived from the user name only and therefore
-// computable by anyone who knows that name; it is the same value that
-// CheckUserFromHint recomputes. When the block context has a pepper, this
-// writes the keyed hint of protocol v3, which also depends on the credential
-// shared by the client and the server; it is the same value that
-// CheckUserFromHintV3 recomputes. Both derivations are the same computation,
-// sha256(pepper ‖ user name ‖ nonce prefix), so a keyed hint can never collide
-// with the legacy hint of the same user for the same nonce.
-func (c *aeadBlockCipher) addUserHintToNonce(nonce []byte) []byte {
+// The hint is computed from the pepper of the block context and the user name,
+// sha256(pepper ‖ user name ‖ nonce prefix), which is the same value that
+// CheckUserFromHintV3 recomputes. A block context that carries a user name
+// without a pepper cannot write a hint, and the function reports that as an
+// error instead of writing a hint that no server can check: the pepper is what
+// binds the hint to the credential shared by the client and the server.
+func (c *aeadBlockCipher) addUserHintToNonce(nonce []byte) ([]byte, error) {
 	if c.ctx.UserName == "" {
-		return nonce
+		return nonce, nil
 	}
 	if len(c.ctx.UserName) > constant.MaxUserNameLen {
 		panic(fmt.Sprintf("user name length %d exceeds maximum %d", len(c.ctx.UserName), constant.MaxUserNameLen))
@@ -534,13 +538,16 @@ func (c *aeadBlockCipher) addUserHintToNonce(nonce []byte) []byte {
 	if len(nonce) < NoncePrefixLenForUserHint+NonceSuffixLenForUserHint {
 		panic(fmt.Sprintf("nonce length %d is too short", len(nonce)))
 	}
+	if len(c.ctx.Pepper) == 0 {
+		return nil, fmt.Errorf("cannot write the user hint of user %q: %w", c.ctx.UserName, errUserHintPepperMissing)
+	}
 	var input [HintPepperLen + constant.MaxUserNameLen + NoncePrefixLenForUserHint]byte
 	n := copy(input[:], c.ctx.Pepper)
 	n += copy(input[n:], c.ctx.UserName)
 	n += copy(input[n:], nonce[:NoncePrefixLenForUserHint])
 	output := sha256.Sum256(input[:n])
 	copy(nonce[len(nonce)-NonceSuffixLenForUserHint:], output[:NonceSuffixLenForUserHint])
-	return nonce
+	return nonce, nil
 }
 
 func selectDecryptStateless(ciphertext, dst []byte, blocks []*aeadBlockCipher) (*aeadBlockCipher, []byte, error) {

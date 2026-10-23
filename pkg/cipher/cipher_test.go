@@ -65,7 +65,7 @@ func TestAEADBlockCipherEncryptDecrypt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 		}
-		cipher.SetBlockContext(BlockContext{UserName: "test-user"})
+		cipher.SetBlockContext(BlockContext{UserName: "test-user", Pepper: HintPepper("test-user", "test-password")})
 		if !cipher.IsStateless() {
 			t.Fatalf("IsStateless() = %v, want %v", cipher.IsStateless(), true)
 		}
@@ -189,7 +189,7 @@ func TestAEADBlockCipherEncryptDecryptImplicitMode(t *testing.T) {
 		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 	}
 	sendCipher.SetImplicitNonceMode(true)
-	sendCipher.SetBlockContext(BlockContext{UserName: "test-user"})
+	sendCipher.SetBlockContext(BlockContext{UserName: "test-user", Pepper: HintPepper("test-user", "test-password")})
 	recvCipher := sendCipher.Clone().(*aeadBlockCipher)
 	if sendCipher.IsStateless() {
 		t.Fatalf("IsStateless() = %v, want %v", sendCipher.IsStateless(), false)
@@ -541,18 +541,18 @@ func benchmarkGenKeyAndData(b *testing.B, keyLen int) (key, data []byte) {
 	return
 }
 
-// legacyPayloadNonce is the payload nonce derivation as implemented before
-// payloadNonceInto() introduced the reusable scratch buffer: a copy of the
-// wire format nonce with the byte at index 16 XORed with 0x01. It is kept here
-// as an independent oracle for the current implementation.
-func legacyPayloadNonce(nonce []byte) []byte {
+// historicalPayloadNonce is the payload nonce derivation before payloadNonceInto()
+// introduced the reusable scratch buffer: a copy of the wire format nonce with
+// the byte at index 16 XORed with 0x01. It is kept here as an independent
+// oracle for the current implementation.
+func historicalPayloadNonce(nonce []byte) []byte {
 	derived := make([]byte, len(nonce))
 	copy(derived, nonce)
 	derived[16] ^= 0x01
 	return derived
 }
 
-func TestPayloadNonceIntoMatchesLegacyImplementation(t *testing.T) {
+func TestPayloadNonceIntoMatchesHistoricalDerivation(t *testing.T) {
 	key := randomBytes(t, DefaultKeyLen)
 	nonces := []struct {
 		name  string
@@ -578,7 +578,7 @@ func TestPayloadNonceIntoMatchesLegacyImplementation(t *testing.T) {
 			got := block.payloadNonceInto(input)
 			block.mu.Unlock()
 
-			want := legacyPayloadNonce(tc.nonce)
+			want := historicalPayloadNonce(tc.nonce)
 			if len(got) != len(tc.nonce) {
 				t.Errorf("%s / %s: payloadNonceInto() returned %d bytes, want %d", suite, tc.name, len(got), len(tc.nonce))
 			}
@@ -598,8 +598,8 @@ func TestPayloadNonceIntoMatchesLegacyImplementation(t *testing.T) {
 				t.Errorf("%s / %s: payloadNonceInto() returned a new buffer, want the scratch buffer of the cipher", suite, tc.name)
 			}
 
-			// The package level compat entry point must return a fresh copy
-			// that doesn't alias the caller nonce.
+			// The package level entry point payloadNonce() must return a fresh
+			// copy that doesn't alias the caller nonce.
 			copied := payloadNonce(input)
 			if !bytes.Equal(copied, want) {
 				t.Errorf("%s / %s: payloadNonce() = %x, want %x", suite, tc.name, copied, want)
@@ -640,22 +640,22 @@ func TestEncryptDecryptPayloadWithNonce(t *testing.T) {
 		}
 
 		// The ciphertext must be byte identical to the ciphertext produced by
-		// the legacy implementation, which derived the nonce with a fresh
+		// the reference derivation, which builds the nonce with a fresh
 		// allocation, and DecryptPayloadWithNonce() must decrypt it.
 		block.mu.Lock()
-		legacyCiphertext := make([]byte, 0, len(data)+block.Overhead())
-		block.aead.Seal(legacyCiphertext, block.aeadNonce(legacyPayloadNonce(nonce)), data, nil)
+		referenceCiphertext := make([]byte, 0, len(data)+block.Overhead())
+		block.aead.Seal(referenceCiphertext, block.aeadNonce(historicalPayloadNonce(nonce)), data, nil)
 		block.mu.Unlock()
-		legacyCiphertext = legacyCiphertext[:len(data)+block.Overhead()]
-		if !bytes.Equal(ciphertext, legacyCiphertext) {
-			t.Errorf("%s: ciphertext = %x, want the legacy ciphertext %x", suite, ciphertext, legacyCiphertext)
+		referenceCiphertext = referenceCiphertext[:len(data)+block.Overhead()]
+		if !bytes.Equal(ciphertext, referenceCiphertext) {
+			t.Errorf("%s: ciphertext = %x, want the reference ciphertext %x", suite, ciphertext, referenceCiphertext)
 		}
-		legacyPlaintext, err := block.DecryptPayloadWithNonce(legacyCiphertext, nonce)
+		referencePlaintext, err := block.DecryptPayloadWithNonce(referenceCiphertext, nonce)
 		if err != nil {
-			t.Fatalf("%s: DecryptPayloadWithNonce() of the legacy ciphertext failed: %v", suite, err)
+			t.Fatalf("%s: DecryptPayloadWithNonce() of the reference ciphertext failed: %v", suite, err)
 		}
-		if !bytes.Equal(legacyPlaintext, data) {
-			t.Errorf("%s: plaintext after decrypting the legacy ciphertext is different", suite)
+		if !bytes.Equal(referencePlaintext, data) {
+			t.Errorf("%s: plaintext after decrypting the reference ciphertext is different", suite)
 		}
 
 		// The payload must not be decryptable with the metadata nonce of the

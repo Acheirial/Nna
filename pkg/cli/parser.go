@@ -22,7 +22,7 @@ import (
 )
 
 // binaryName is the name of this program.
-var binaryName = "mieru"
+const binaryName = "shadowlemon"
 
 type matchProcessor struct {
 	matches   []string
@@ -71,7 +71,7 @@ func ParseAndExecute() error {
 	}
 	if !found {
 		cmd := strings.Join(args, " ")
-		return fmt.Errorf("%q is not a valid command. Run \"%s help\" to get the list of supported commands", cmd, binaryName)
+		return fmt.Errorf("%q is not a valid command. Run \"%s client help\" or \"%s server help\" to get the list of supported commands", cmd, binaryName, binaryName)
 	}
 	return nil
 }

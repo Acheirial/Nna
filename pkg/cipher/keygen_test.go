@@ -32,7 +32,7 @@ func BenchmarkNewKey(b *testing.B) {
 	salts := saltFromTime(t)
 	keygen := pbkdf2Gen{
 		Salt: salts[1],
-		Iter: KeyIter,
+		Iter: KeyIterV3,
 	}
 
 	b.ResetTimer()

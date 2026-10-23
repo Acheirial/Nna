@@ -29,8 +29,8 @@ import (
 // don't change from one run to another.
 func fuzzRequestSeed(suites ...cipher.Suite) []byte {
 	h := &handshakeRequest{
-		versionMin: minSupportedProtocolVersion,
-		versionMax: maxSupportedProtocolVersion,
+		versionMin: protocolVersion,
+		versionMax: protocolVersion,
 		suites:     suites,
 	}
 	for i := range h.ephPub {
@@ -72,16 +72,15 @@ func fuzzResponseSeed(status, version uint8, suite cipher.Suite) []byte {
 //     an identical request, which is what a server relies on when it re-parses
 //     or re-encodes a request.
 //
-// A request whose version range this build doesn't support is accepted on
-// purpose: the version is negotiated after the envelope is decrypted, and a
-// client that shares no version with the server must be answered with
-// handshakeStatusNoVersion instead of being dropped as malformed, see
-// docs/protocol.md.
+// A request whose version range doesn't contain protocolVersion is accepted on
+// purpose: the version range is part of the wire format, so a server parses it
+// and then drops the request without an answer instead of treating it as
+// malformed, see docs/protocol.md.
 func FuzzParseHandshakeRequest(f *testing.F) {
 	f.Add(fuzzRequestSeed(cipher.SuiteXChaCha20Poly1305))
 	f.Add(fuzzRequestSeed(cipher.AllSuites()...))
 	f.Add(fuzzRequestSeed(cipher.SuiteXChaCha20Poly1305, cipher.SuiteAES128GCM)[:handshakeRequestHeaderLen])
-	f.Add([]byte{minSupportedProtocolVersion, maxSupportedProtocolVersion, 1, 0x07})
+	f.Add([]byte{protocolVersion, protocolVersion, 1, 0x07})
 
 	f.Fuzz(func(t *testing.T, b []byte) {
 		defer func() {
@@ -124,18 +123,17 @@ func FuzzParseHandshakeRequest(f *testing.F) {
 		if h.versionMin > h.versionMax {
 			t.Fatalf("parseHandshakeRequest(%q) returned the version range %d-%d", b, h.versionMin, h.versionMax)
 		}
-		// A version range that doesn't overlap the range of this build is
-		// accepted on purpose, so that the server answers
-		// handshakeStatusNoVersion instead of dropping the request as
-		// malformed. Negotiation must then fail, and a range that does overlap
-		// must negotiate a version inside the range of this build.
+		// A version range that doesn't contain protocolVersion is accepted on
+		// purpose, so that the server drops the request without an answer
+		// instead of treating it as malformed. Negotiation must then fail, and
+		// a range that does contain the supported version must negotiate it.
 		version, ok := negotiateVersion(h.versionMin, h.versionMax)
-		overlaps := h.versionMin <= maxSupportedProtocolVersion && h.versionMax >= minSupportedProtocolVersion
-		if ok != overlaps {
-			t.Fatalf("negotiateVersion(%d, %d) = (%d, %v), but the range overlaps the supported %d-%d: %v", h.versionMin, h.versionMax, version, ok, minSupportedProtocolVersion, maxSupportedProtocolVersion, overlaps)
+		contains := h.versionMin <= protocolVersion && h.versionMax >= protocolVersion
+		if ok != contains {
+			t.Fatalf("negotiateVersion(%d, %d) = (%d, %v), but the range contains the supported version %d: %v", h.versionMin, h.versionMax, version, ok, protocolVersion, contains)
 		}
-		if ok && (version < minSupportedProtocolVersion || version > maxSupportedProtocolVersion) {
-			t.Fatalf("negotiateVersion(%d, %d) = %d, want a version in %d-%d", h.versionMin, h.versionMax, version, minSupportedProtocolVersion, maxSupportedProtocolVersion)
+		if ok && version != protocolVersion {
+			t.Fatalf("negotiateVersion(%d, %d) = %d, want %d", h.versionMin, h.versionMax, version, protocolVersion)
 		}
 		if !ok && version != 0 {
 			t.Fatalf("negotiateVersion(%d, %d) failed with version %d, want 0", h.versionMin, h.versionMax, version)
@@ -187,18 +185,18 @@ func FuzzParseHandshakeRequest(f *testing.F) {
 // client never panics, and that every response it accepts is the one the wire
 // format promises:
 //
-//   - the status is a known one and, on success, the version is inside the
-//     range supported by this build and the cipher suite is supported;
+//   - the status is a known one and, on success, the version is protocolVersion
+//     and the cipher suite is supported;
 //   - the length is handshakeResponseLen, and every field equals the bytes of
 //     the input it is read from;
 //   - Marshal() of the result reproduces the input and parses back to an
 //     identical response, which is what a client relies on when it re-parses
 //     the response to derive the session keys.
 func FuzzParseHandshakeResponse(f *testing.F) {
-	f.Add(fuzzResponseSeed(handshakeStatusOK, maxSupportedProtocolVersion, cipher.SuiteXChaCha20Poly1305))
+	f.Add(fuzzResponseSeed(handshakeStatusOK, protocolVersion, cipher.SuiteXChaCha20Poly1305))
 	f.Add(fuzzResponseSeed(handshakeStatusNoSuite, 0, cipher.SuiteAES256GCM))
-	f.Add(fuzzResponseSeed(handshakeStatusOK, maxSupportedProtocolVersion, cipher.SuiteAES128GCM)[:3])
-	f.Add(fuzzResponseSeed(handshakeStatusOK+3, maxSupportedProtocolVersion, cipher.SuiteXChaCha20Poly1305))
+	f.Add(fuzzResponseSeed(handshakeStatusOK, protocolVersion, cipher.SuiteAES128GCM)[:3])
+	f.Add(fuzzResponseSeed(handshakeStatusOK+3, protocolVersion, cipher.SuiteXChaCha20Poly1305))
 
 	f.Fuzz(func(t *testing.T, b []byte) {
 		defer func() {
@@ -226,10 +224,10 @@ func FuzzParseHandshakeResponse(f *testing.F) {
 			if !h.suite.IsValid() {
 				t.Fatalf("parseHandshakeResponse(%q) returned the unsupported cipher suite %d", b, uint8(h.suite))
 			}
-			if h.version < minSupportedProtocolVersion || h.version > maxSupportedProtocolVersion {
-				t.Fatalf("parseHandshakeResponse(%q) returned the unsupported version %d, want a version in %d-%d", b, h.version, minSupportedProtocolVersion, maxSupportedProtocolVersion)
+			if h.version != protocolVersion {
+				t.Fatalf("parseHandshakeResponse(%q) returned the unsupported version %d, want %d", b, h.version, protocolVersion)
 			}
-		case handshakeStatusNoVersion, handshakeStatusNoSuite:
+		case handshakeStatusNoSuite:
 			// A failure response only carries a status, the caller must close
 			// the session.
 		default:

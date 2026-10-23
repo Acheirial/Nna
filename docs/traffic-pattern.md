@@ -11,13 +11,13 @@
 客户端：
 
 ```sh
-mieru apply config <FILE>
+shadowlemon client apply config <FILE>
 ```
 
 服务器：
 
 ```sh
-mita apply config <FILE>
+shadowlemon server apply config <FILE>
 ```
 
 然后重启代理服务使更改生效。
@@ -238,4 +238,4 @@ Nonce 模式功能操纵加密数据包中的 Nonce 前缀。`nonce` 对象支�
 
 ## 配置生效方式
 
-修改流量模式后，需要用 `mita stop` + `mita start`（服务端）或 `mieru stop` + `mieru start`（客户端）重启程序，新的流量模式才会生效。
+修改流量模式后，需要用 `shadowlemon server stop` + `shadowlemon server start`（服务端）或 `shadowlemon client stop` + `shadowlemon client start`（客户端）重启程序，新的流量模式才会生效。

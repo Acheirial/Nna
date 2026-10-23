@@ -22,6 +22,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
+
+	"github.com/enfein/mieru/v3/pkg/version"
 )
 
 // RFC 7748 section 6.1 test vectors.
@@ -237,8 +239,8 @@ func TestDeriveSessionKeysBothSidesAgree(t *testing.T) {
 			saltHash.Write(clientSalt)
 			saltHash.Write(serverSalt)
 			salt := saltHash.Sum(nil)
-			wantC2S := hkdfSHA256(t, clientShared, salt, append([]byte("mieru-v2 c2s"), testVersion, byte(test.suite)), test.keyLen)
-			wantS2C := hkdfSHA256(t, clientShared, salt, append([]byte("mieru-v2 s2c"), testVersion, byte(test.suite)), test.keyLen)
+			wantC2S := hkdfSHA256(t, clientShared, salt, append([]byte(version.ProtocolIdentifier()+" c2s"), testVersion, byte(test.suite)), test.keyLen)
+			wantS2C := hkdfSHA256(t, clientShared, salt, append([]byte(version.ProtocolIdentifier()+" s2c"), testVersion, byte(test.suite)), test.keyLen)
 			if !bytes.Equal(c2s, wantC2S) {
 				t.Errorf("c2s key = %x, want %x", c2s, wantC2S)
 			}

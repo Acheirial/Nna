@@ -18,3 +18,17 @@ package version
 const (
 	AppVersion = "3.38.1"
 )
+
+// ProtocolName is the name of the wire protocol implemented by this program.
+const ProtocolName = "ShadowLemon"
+
+// ProtocolVersion is the human readable version of the wire protocol.
+// It is independent from AppVersion, which versions the program itself, and
+// from the protocol version byte carried by the handshake, which stays 3.
+const ProtocolVersion = "V0.1"
+
+// ProtocolIdentifier returns the protocol name followed by its version, for
+// example "ShadowLemon V0.1".
+func ProtocolIdentifier() string {
+	return ProtocolName + " " + ProtocolVersion
+}

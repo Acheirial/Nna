@@ -39,6 +39,7 @@ import (
 	"github.com/enfein/mieru/v3/pkg/mathext"
 	"github.com/enfein/mieru/v3/pkg/protocol/serveruser"
 	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/enfein/mieru/v3/pkg/version"
 )
 
 const (
@@ -919,14 +920,14 @@ func (s *Session) newSessionResponseSegment(payload []byte, block cipher.BlockCi
 // On success the handshake request prefix is removed from seg, the session
 // data plane ciphers are installed on the session, and the response carries
 // the negotiated version, the server ephemeral public key and the server salt.
-// On failure the returned response carries the failure status, no session key
-// is installed, and the caller must send the response and then close the
-// session. A failure never panics.
 //
-// The negotiated cipher suite is bounded by the key length of the handshake
-// envelope under version 2 and unbounded from version 3 on, because from
-// version 3 on the session keys are derived from the negotiated suite. The
-// handshake status codes are the same for every supported version.
+// On failure no session key is installed and the caller must close the session.
+// A request that is not a handshake of protocolVersion, and a peer whose
+// version range doesn't contain protocolVersion, are not answered at all: the
+// returned response is nil, so that a peer which doesn't speak this protocol
+// can't tell a dropped request from a request that never arrived. A peer that
+// speaks protocolVersion but shares no cipher suite is answered with
+// handshakeStatusNoSuite. A failure never panics.
 func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher, allowedSuites []cipher.Suite, stateless bool) (*handshakeResponse, cipher.BlockCipher, cipher.BlockCipher, error) {
 	if s.isClient {
 		return nil, nil, nil, fmt.Errorf("%v is not a server session", s)
@@ -934,39 +935,38 @@ func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher
 	if requestCipher == nil {
 		return nil, nil, nil, fmt.Errorf("%v handshake request cipher is not available", s)
 	}
-	if len(seg.payload) < handshakeRequestHeaderLen || seg.payload[0] < minSupportedProtocolVersion {
-		// A peer that speaks version 1, or that sends a payload that can't
-		// even hold a handshake request, is rejected. Version 1 clients are
-		// not compatible with this version of the protocol.
-		log.Debugf("%v rejected open session request from %v: the payload doesn't start with a protocol version of at least %d", s, s.remoteAddr, minSupportedProtocolVersion)
-		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("the open session request doesn't carry a protocol version of at least %d", minSupportedProtocolVersion)
+	if len(seg.payload) < handshakeRequestHeaderLen || seg.payload[0] != protocolVersion {
+		// The payload of an open session request starts with the lowest
+		// protocol version of the client, so a peer that speaks another
+		// version, or that sends a payload which can't even hold a handshake
+		// request, is dropped without an answer.
+		log.Debugf("%v dropped open session request from %v: the payload doesn't carry protocol version %d", s, s.remoteAddr, protocolVersion)
+		return nil, nil, nil, fmt.Errorf("the open session request doesn't carry protocol version %d", protocolVersion)
 	}
 
 	request, consumed, err := parseHandshakeRequest(seg.payload)
 	if err != nil {
-		// A peer that doesn't speak a supported protocol version or that sends
-		// a corrupted request is rejected with a diagnostic response.
-		log.Debugf("%v rejected open session request from %v: %v", s, s.remoteAddr, err)
-		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("parseHandshakeRequest() failed: %w", err)
+		// A request that can't be parsed is dropped without an answer as well:
+		// a diagnostic response would let a peer tell a server that speaks this
+		// protocol from an unrelated service, and would answer traffic that
+		// never was a handshake of this protocol.
+		log.Debugf("%v dropped open session request from %v: %v", s, s.remoteAddr, err)
+		return nil, nil, nil, fmt.Errorf("parseHandshakeRequest() failed: %w", err)
 	}
-	version, ok := negotiateVersion(request.versionMin, request.versionMax)
+	// The version range of the client must contain the protocol version of this
+	// build: the first byte of the request is only the lowest version the client
+	// speaks, so a range that excludes protocolVersion is dropped here instead
+	// of being answered.
+	negotiatedVersion, ok := negotiateVersion(request.versionMin, request.versionMax)
 	if !ok {
-		log.Debugf("%v rejected open session request: client protocol version range %d-%d doesn't intersect the server range %d-%d", s, request.versionMin, request.versionMax, minSupportedProtocolVersion, maxSupportedProtocolVersion)
-		return handshakeFailureResponse(handshakeStatusNoVersion), nil, nil, fmt.Errorf("no common protocol version with the client")
+		log.Debugf("%v dropped open session request: the client protocol version range %d-%d doesn't contain the server protocol version %d", s, request.versionMin, request.versionMax, protocolVersion)
+		return nil, nil, nil, fmt.Errorf("no common protocol version with the client")
 	}
 	// The suite that protects the data plane is chosen from the intersection of
-	// the client and the server preference lists. From protocol version 3 on
-	// the session keys are derived from the negotiated suite instead of the
-	// cipher that protected the handshake envelope, so the envelope key length
-	// doesn't bound the negotiated suite any more. A version 2 peer keeps the
-	// old behavior: a suite with a longer key than the envelope is skipped here,
-	// before the response, instead of failing the key derivation below.
-	var suite cipher.Suite
-	if version >= 3 {
-		suite, ok = negotiateSuite(request.suites, allowedSuites)
-	} else {
-		suite, ok = negotiateSuiteForEnvelope(request.suites, allowedSuites, requestCipher.Suite())
-	}
+	// the client and the server preference lists. The session keys are derived
+	// from the negotiated suite, so the key length of the handshake envelope
+	// doesn't bound the selection.
+	suite, ok := negotiateSuite(request.suites, allowedSuites)
 	if !ok {
 		log.Debugf("%v rejected open session request: client cipher suites %v don't intersect the server cipher suites %v", s, request.suites, allowedSuites)
 		return handshakeFailureResponse(handshakeStatusNoSuite), nil, nil, fmt.Errorf("no common cipher suite with the client")
@@ -978,26 +978,15 @@ func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher
 	}
 	response := &handshakeResponse{
 		status:  handshakeStatusOK,
-		version: version,
+		version: negotiatedVersion,
 		suite:   suite,
 	}
 	copy(response.ephPub[:], publicKey)
 	if _, err := crand.Read(response.serverSalt[:]); err != nil {
 		return nil, nil, nil, fmt.Errorf("generate server salt failed: %w", err)
 	}
-	c2s, s2c, err := deriveSessionKeys(requestCipher, suite, privateKey, request.ephPub[:], request.clientSalt[:], response.serverSalt[:], version, stateless)
+	c2s, s2c, err := deriveSessionKeys(requestCipher, suite, privateKey, request.ephPub[:], request.clientSalt[:], response.serverSalt[:], stateless)
 	if err != nil {
-		// Under version 2 the negotiated suite can still be longer than the
-		// envelope cipher if the caller skipped the filter above, in which
-		// case the peers can't agree on a data plane. From version 3 on the
-		// envelope key length doesn't bound the derivation, so a failure is
-		// reported as is.
-		if version < 3 {
-			if _, suiteErr := sessionSuite(suite, requestCipher.Suite()); suiteErr != nil {
-				log.Debugf("%v rejected open session request: %v", s, suiteErr)
-				return handshakeFailureResponse(handshakeStatusNoSuite), nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
-			}
-		}
 		return nil, nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
 	}
 	// The private key is only used to derive the session keys. crypto/ecdh
@@ -1029,14 +1018,8 @@ func (s *Session) acceptHandshake(seg *segment, requestCipher cipher.BlockCipher
 // handshake envelope.
 //
 // On success the payload of seg is consumed and the returned response carries
-// the negotiated version and cipher suite. On failure the caller must close the
-// session. A failure never panics.
-//
-// The data plane keys follow the version of the response: from version 3 on
-// they are derived from the negotiated suite, which may need more key material
-// than the cipher that decrypted the handshake envelope; under version 2 they
-// are derived from the envelope cipher and a negotiated suite with a longer key
-// is rejected.
+// the negotiated cipher suite. On failure the caller must close the session.
+// A failure never panics.
 func (s *Session) deriveClientHandshake(seg *segment, responseCipher cipher.BlockCipher, stateless bool) (c2s, s2c cipher.BlockCipher, _ *handshakeResponse, err error) {
 	if !s.isClient {
 		return nil, nil, nil, fmt.Errorf("%v is not a client session", s)
@@ -1063,10 +1046,6 @@ func (s *Session) deriveClientHandshake(seg *segment, responseCipher cipher.Bloc
 		return nil, nil, nil, fmt.Errorf("%v has no pending handshake", s)
 	}
 
-	if response.status == handshakeStatusNoVersion {
-		s.stopHandshakeTimer()
-		return nil, nil, nil, fmt.Errorf("client protocol version %d-%d and server protocol version %d-%d don't intersect", minSupportedProtocolVersion, maxSupportedProtocolVersion, minSupportedProtocolVersion, maxSupportedProtocolVersion)
-	}
 	if response.status != handshakeStatusOK {
 		s.stopHandshakeTimer()
 		return nil, nil, nil, fmt.Errorf("no common cipher suite with the server, the client offered %v", suites)
@@ -1076,7 +1055,7 @@ func (s *Session) deriveClientHandshake(seg *segment, responseCipher cipher.Bloc
 		return nil, nil, nil, fmt.Errorf("server selected cipher suite %v which the client didn't offer", response.suite)
 	}
 
-	c2s, s2c, err = deriveSessionKeys(responseCipher, response.suite, privateKey, response.ephPub[:], clientSalt[:], response.serverSalt[:], response.version, stateless)
+	c2s, s2c, err = deriveSessionKeys(responseCipher, response.suite, privateKey, response.ephPub[:], clientSalt[:], response.serverSalt[:], stateless)
 	if err != nil {
 		s.stopHandshakeTimer()
 		return nil, nil, nil, fmt.Errorf("deriveSessionKeys() failed: %w", err)
@@ -1093,7 +1072,7 @@ func (s *Session) deriveClientHandshake(seg *segment, responseCipher cipher.Bloc
 // to c2s and s2c before it calls this method, so that a segment which waited for
 // the handshake response is never protected by the static key of the handshake
 // envelope.
-func (s *Session) commitClientHandshake(c2s, s2c cipher.BlockCipher, version uint8, suite cipher.Suite) {
+func (s *Session) commitClientHandshake(c2s, s2c cipher.BlockCipher, suite cipher.Suite) {
 	s.installSessionCiphers(c2s, s2c, true)
 	s.handshakeDone.Store(true)
 	s.stopHandshakeTimer()
@@ -1101,7 +1080,7 @@ func (s *Session) commitClientHandshake(c2s, s2c cipher.BlockCipher, version uin
 	s.handshakePriv = nil
 	s.handshakeClientSalt = [handshakeSaltLen]byte{}
 	s.handshakeMu.Unlock()
-	log.Debugf("%v handshake completed with protocol version %d and cipher suite %v", s, version, suite)
+	log.Debugf("%v handshake completed with protocol %s and cipher suite %v", s, version.ProtocolIdentifier(), suite)
 }
 
 // completeClientHandshake verifies the handshake response carried by the payload
@@ -1117,7 +1096,7 @@ func (s *Session) completeClientHandshake(seg *segment, responseCipher cipher.Bl
 	if err != nil {
 		return nil, nil, err
 	}
-	s.commitClientHandshake(c2s, s2c, response.version, response.suite)
+	s.commitClientHandshake(c2s, s2c, response.suite)
 	return c2s, s2c, nil
 }
 
@@ -2026,7 +2005,24 @@ func (s *Session) output(seg *segment, remoteAddr net.Addr) error {
 	return nil
 }
 
+// closeWithError closes this session. A session that reached the data plane
+// also tells the peer that it is gone, see sendCloseSessionRequest.
 func (s *Session) closeWithError(err error) error {
+	return s.closeSession(err, true)
+}
+
+// dropWithError closes this session without writing anything to the peer. It is
+// used when the first message of a peer is not a handshake of protocolVersion:
+// such a peer is not answered at all, so the session is torn down in silence
+// and the peer can't tell a dropped message from a message that never arrived.
+func (s *Session) dropWithError(err error) error {
+	return s.closeSession(err, false)
+}
+
+// closeSession performs the teardown shared by closeWithError and
+// dropWithError. A close session request is sent to the peer only when
+// notifyPeer is true and the session reached the data plane.
+func (s *Session) closeSession(err error, notifyPeer bool) error {
 	if !s.closeRequested.CompareAndSwap(false, true) {
 		// This function has been called before.
 		return nil
@@ -2044,7 +2040,7 @@ func (s *Session) closeWithError(err error) error {
 	// client can't use yet. The peer cleans the session up when the transport
 	// is closed or the session is idle. The decision is taken before the state
 	// is advanced below.
-	sendCloseRequest := (s.isState(sessionAttached) || s.isState(sessionEstablished)) && !s.clientHandshakePending()
+	sendCloseRequest := notifyPeer && (s.isState(sessionAttached) || s.isState(sessionEstablished)) && !s.clientHandshakePending()
 
 	// Mark the session closed and release everything that waits on it before
 	// doing any I/O. A previous implementation sent the close session request

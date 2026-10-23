@@ -55,14 +55,33 @@ func newDummyMetadata() []byte {
 	return metadata
 }
 
+// testUserCredential derives the credential of a test user the way the server
+// user registry does: from the hashed password when the user record carries
+// one, and from the plain password otherwise.
+func testUserCredential(tb testing.TB, user *appctlpb.User) []byte {
+	tb.Helper()
+	if hashed := user.GetHashedPassword(); hashed != "" {
+		decoded, err := hex.DecodeString(hashed)
+		if err != nil {
+			tb.Fatalf("hex.DecodeString() failed: %v", err)
+		}
+		return decoded
+	}
+	return cipher.HashPassword([]byte(user.GetPassword()), []byte(user.GetName()))
+}
+
 func encryptDiscoveryMetadata(tb testing.TB, credential []byte, hintUser string, users map[string]*appctlpb.User, wantHint bool, plaintext []byte) []byte {
 	tb.Helper()
-	for attempt := 0; attempt < 10; attempt++ {
+	// The hint of the client is derived from the credential it holds, so a
+	// client that does not hold the credential of hintUser cannot produce
+	// metadata whose hint matches that user.
+	hintPepper := cipher.HintPepper(hintUser, string(credential))
+	for range 10 {
 		block, err := cipher.BlockCipherFromPassword(cipher.SuiteXChaCha20Poly1305, credential, true)
 		if err != nil {
 			tb.Fatalf("BlockCipherFromPassword() failed: %v", err)
 		}
-		block.SetBlockContext(cipher.BlockContext{UserName: hintUser})
+		block.SetBlockContext(cipher.BlockContext{UserName: hintUser, Pepper: hintPepper})
 		encryptedMeta := make([]byte, block.NonceSize()+len(plaintext)+block.Overhead())
 		if err := block.Encrypt(encryptedMeta[:0], plaintext); err != nil {
 			tb.Fatalf("Encrypt() failed: %v", err)
@@ -71,7 +90,8 @@ func encryptDiscoveryMetadata(tb testing.TB, credential []byte, hintUser string,
 		matches := 0
 		matchedUser := ""
 		for _, user := range users {
-			if cipher.CheckUserFromHint([]byte(user.GetName()), encryptedMeta[:cipher.DefaultNonceSize]) {
+			pepper := cipher.HintPepper(user.GetName(), string(testUserCredential(tb, user)))
+			if cipher.CheckUserFromHintV3(pepper, []byte(user.GetName()), encryptedMeta[:cipher.DefaultNonceSize]) {
 				matches++
 				matchedUser = user.GetName()
 			}

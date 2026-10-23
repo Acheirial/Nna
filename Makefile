@@ -29,7 +29,8 @@ FUZZ_PACKAGES ?= ./pkg/cipher ./pkg/protocol
 # .ONESHELL is supported in GNU Make version 3.82 and later.
 .ONESHELL:
 
-# Build the mieru client and mita server binaries.
+# Build the shadowlemon binary. The single binary serves both the client
+# (shadowlemon client <command>) and the server (shadowlemon server <command>).
 .PHONY: build
 build: bin
 
@@ -37,8 +38,7 @@ build: bin
 .PHONY: bin
 bin:
 	mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/mieru cmd/mieru/mieru.go
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/mita cmd/mita/mita.go
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/shadowlemon cmd/shadowlemon/main.go
 
 # Compile go libraries and run unit tests.
 .PHONY: lib
@@ -153,8 +153,7 @@ vendor:
 .PHONY: test-binary
 test-binary:
 	mkdir -p bin
-	CGO_ENABLED=0 go build -ldflags="-X 'github.com/enfein/mieru/v3/pkg/log.LogPrefix=C'" -o bin/mieru cmd/mieru/mieru.go
-	CGO_ENABLED=0 go build -ldflags="-X 'github.com/enfein/mieru/v3/pkg/log.LogPrefix=S'" -o bin/mita cmd/mita/mita.go
+	CGO_ENABLED=0 go build -o bin/shadowlemon cmd/shadowlemon/main.go
 	CGO_ENABLED=0 go build -o bin/httpserver test/cmd/httpserver/httpserver.go
 	CGO_ENABLED=0 go build -o bin/sockshttpclient test/cmd/sockshttpclient/sockshttpclient.go
 	CGO_ENABLED=0 go build -o bin/socksudpclient test/cmd/socksudpclient/socksudpclient.go

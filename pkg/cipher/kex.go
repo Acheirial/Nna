@@ -23,6 +23,8 @@ import (
 	"io"
 
 	"golang.org/x/crypto/hkdf"
+
+	"github.com/enfein/mieru/v3/pkg/version"
 )
 
 const (
@@ -33,13 +35,15 @@ const (
 	// sessionSaltLen is the length in bytes of the client salt and the server
 	// salt carried by the handshake.
 	sessionSaltLen = 16
+)
 
-	// clientToServerInfo and serverToClientInfo are the HKDF info prefixes of
-	// the client to server and the server to client session keys. Using a
-	// different info for each direction prevents the nonce of a direction from
-	// being reused in the other direction.
-	clientToServerInfo = "mieru-v2 c2s"
-	serverToClientInfo = "mieru-v2 s2c"
+// clientToServerInfo and serverToClientInfo are the HKDF info prefixes of the
+// client to server and the server to client session keys. Using a different
+// info for each direction prevents the nonce of a direction from being reused
+// in the other direction.
+var (
+	clientToServerInfo = version.ProtocolIdentifier() + " c2s"
+	serverToClientInfo = version.ProtocolIdentifier() + " s2c"
 )
 
 // GenerateEphemeralKey generates an ephemeral X25519 key pair and returns the
@@ -87,12 +91,13 @@ func SharedSecret(priv *ecdh.PrivateKey, peerPub []byte) ([]byte, error) {
 // client session key from the X25519 shared secret and the handshake salts.
 //
 // suite selects the key length and the cipher suite identifier mixed into the
-// HKDF info, and the returned keys are suite.KeyLen() bytes long. From protocol
-// version 3 on it is the negotiated data plane suite, which may differ from the
-// suite of c and may need more key material than the handshake envelope
-// provides. A version 2 peer passes the suite of the handshake envelope, which
-// is the only suite its session keys can be derived from, so that its keys stay
-// bit for bit identical to the keys of an older build.
+// HKDF info, and the returned keys are suite.KeyLen() bytes long. It is the
+// negotiated data plane suite, which may differ from the suite of c and may
+// need more key material than the handshake envelope provides.
+//
+// version is the protocol version byte carried by the handshake. It is mixed
+// into the HKDF info, so two peers that do not agree on the protocol version
+// never derive the same session keys.
 //
 // The static key of c is mixed into the HKDF salt, so a peer must also know the
 // user credential to derive the session keys. c must be the cipher that
