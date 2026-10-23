@@ -271,8 +271,18 @@ enum LowEntropyMaskRotation {
 
 // Cipher suites supported by the shadowlemon proxy protocol.
 //
-// The numeric value of each entry is the suite identifier used on the wire, so
-// the numbering must never change.
+// The numeric value of each entry below is only an identifier used in the
+// configuration file. It is NOT the suite number used by the handshake wire
+// format. The wire format has its own, independent numbering, defined by the
+// cipher.Suite constants in pkg/cipher/suite.go and documented in the cipher
+// suite table of docs/protocol.md (0 = XChaCha20-Poly1305, 1 = AES-256-GCM,
+// 2 = AES-128-GCM). The two numbering spaces serve different purposes and must
+// stay independent of each other.
+//
+// Because both numbering spaces are already in use, neither the existing enum
+// values in this file nor the existing wire format suite numbers may ever be
+// changed. A new suite must be appended after the existing entries here, and
+// its wire format number must be appended after the existing wire format ones.
 //
 // A connection always uses exactly one suite, negotiated by the two ends:
 //   - A shadowlemon client lists the suites it is willing to use, in preference
